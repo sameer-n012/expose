@@ -10,6 +10,13 @@ publish.workspace = true
 [dependencies]
 expose-core.workspace = true
 expose-gpu.workspace = true
+# Byte view of the GPU parameter block (MIT OR Apache-2.0 OR Zlib).
+bytemuck.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# MIT OR Apache-2.0. Blocking executor for GPU tests and examples only.
+pollster = "0.4"
 
 [lints]
 workspace = true
