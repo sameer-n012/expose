@@ -162,13 +162,12 @@ fn composite_pixel_layer(
     let (ox, oy) = (i64::from(p.offset().0), i64::from(p.offset().1));
     let r = ctx.region;
     // Overlap of the layer and the region, in canvas coordinates.
-    let x0 = ox.max(i64::from(r.x));
-    let y0 = oy.max(i64::from(r.y));
-    let x1 = (ox + i64::from(img.width())).min(i64::from(r.x) + i64::from(r.width));
-    let y1 = (oy + i64::from(img.height())).min(i64::from(r.y) + i64::from(r.height));
-    if x0 >= x1 || y0 >= y1 {
+    let Some(ov) = r.intersection_signed(p.offset().0, p.offset().1, img.width(), img.height())
+    else {
         return;
-    }
+    };
+    let (x0, y0) = (i64::from(ov.x), i64::from(ov.y));
+    let (x1, y1) = (x0 + i64::from(ov.width), y0 + i64::from(ov.height));
     let mode = layer.blend_mode();
     let src_w = img.width() as usize;
     let dst_w = r.width as usize;
