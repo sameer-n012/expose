@@ -12,13 +12,12 @@ No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature i
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **ui-catalog** (S) — `apps/desktop/ui`: folder tree (left panel), Library grid with paging (`listPhotos` with `limit`/`offset`), import button (`pickFolder` + `importFolder`), rating/flag/label shortcuts (0–5, P/X/U, 6–9) on the selection. Typed command wrappers already exist in `src/lib/catalog.ts`. Errors go through `callBackend` toasts.
-2. [ ] **capture-time** (S) — at import, call `expose_raw::read_metadata` and store capture time and size with `CatalogStore::set_image_info`. Decide the time zone rule (capture time without offset: store as local wall time; document it). Touches `expose-catalog` (import hook) or `src-tauri` (after import).
-3. [ ] **thumbnails** (O) — preview cache: decode (`expose-raw`), develop at small size (`expose-develop::render_preview`), encode JPEG, store in a cache folder keyed by photo ID + settings hash; Tauri command or custom protocol to serve them to the grid. Use an embedded JPEG preview from RAW files when present (fast path).
-4. [ ] **frame-transport** (O) — prototype how develop preview frames go from Rust to the UI (custom URI protocol with raw/encoded bytes vs. IPC binary vs. shared surface). Measure frames per second at 2560 px. Record the result as an ADR. Paths: `src-tauri` + `ui`.
-5. [ ] **develop-ui** (S after 4) — Develop module panel with sliders bound to `DevelopSettings`, live preview through the frame transport, settings saved to the catalog (`develop_settings` JSON, version from `DEVELOP_SETTINGS_VERSION`).
-6. [ ] **export-v1** (O) — `expose-raw` encode JPEG/PNG/TIFF + output color space (core `to_image`) + size options (FEATURES 5.1 P1).
-7. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
+1. [ ] **thumbnails** (O) — preview cache: decode (`expose-raw`), develop at small size (`expose-develop::render_preview`), resize (`expose_core::buffer::resample`) + `expose_raw::encode` JPEG, store in a cache folder keyed by photo ID + settings hash; custom URI protocol (or command) to serve them; plug into `ui/src/lib/library/thumbnail.ts`. Use an embedded JPEG preview from RAW files when present (fast path). Paths: `src-tauri` (+ the one UI file).
+2. [ ] **frame-transport** (O) — prototype how develop preview frames go from Rust to the UI (custom URI protocol with raw/encoded bytes vs. IPC binary vs. shared surface). Measure frames per second at 2560 px. Record the result as an ADR. Paths: `src-tauri` + `ui`. Runs after thumbnails (same paths).
+3. [ ] **develop-ui** (S after 2) — Develop module panel with sliders bound to `DevelopSettings`, live preview through the frame transport, settings saved to the catalog (`develop_settings` JSON, version from `DEVELOP_SETTINGS_VERSION`).
+4. [ ] **export-v1** (S/O) — encode API is done (PR #11). Remaining: export dialog in the UI (format, quality, color space, size, destination, file naming), Tauri command that runs decode → develop → resize → `encode_path` on a worker, progress + errors. FEATURES 5.1 P1.
+5. [ ] **to-image-speed** (O, can run in parallel: `expose-core` only) — output conversion `to_image` takes ~580 ms of a 790 ms 24 MP JPEG export; use LUTs for transfer functions (keep determinism + WASM-safe).
+6. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 
 ### Follow-ups from merged work
 
@@ -28,6 +27,9 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - [ ] **develop-tuning** — tune slider strengths and zone centers on real photos; local (edge-aware) tone zones; RAW white balance as camera-space gains.
 - [ ] **editor-storage** — sparse tiled layer storage; history memory budget; clipping masks; layer effects.
 - [ ] **ui-polish** (S) — save panel layout between sessions; Tab shortcut conflicts with keyboard focus navigation; refresh shortcut tooltips after a remap.
+- [ ] **ui-catalog-followups** (S) — search box is a placeholder; per-request version for optimistic rollback (two quick changes can restore an old value); folder count is direct-only, so it differs from the grid total with "include subfolders".
+- [ ] **catalog-batch-info** (S) — `CatalogStore::set_image_infos` in one transaction (large imports); in-memory import tests in `src-tauri` now get metadata errors for fake files.
+- [ ] **encode-followups** — copy EXIF/XMP/IPTC into exported files; gamut mapping instead of clipping; JPEG optimized Huffman tables, progressive mode, gray output; TIFF ICC tag type UNDEFINED instead of BYTE.
 - [ ] **catalog-paths** (S) — case-insensitive path comparison on macOS; Windows paths in tests.
 - [ ] **wasm-check** — `expose-core` must compile for `wasm32-unknown-unknown`. The target is not installed (operator). `expose-raw` must build for WASM with `--no-default-features` (no `rawler`).
 - [ ] **lgpl-relink** — before the first public release, make the distributed build let users relink with a modified `rawler` (ADR 0004).
@@ -35,8 +37,15 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 ### Open operator decisions
 
 - Editor default blend space: linear (current) or perceptual (ADR 0005, "Open").
+- JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **export-encode** (PR #11) — Lanczos-3 `resize` + `fit_size` in `expose-core`; `encode`/`encode_path` in `expose-raw` (JPEG local baseline encoder, PNG, TIFF) with ICC v4 profiles (sRGB, Display P3, opRGB, Rec. 2020, ROMM RGB); decoder reads BT.2020/ROMM curves and small-TIFF ICC. ADR 0006.
+
+- [x] **ui-catalog** (PR #10) — folder tree, row-virtualized grid with page cache, sort/filter toolbar, import button, selection, rating/flag/label shortcuts with optimistic update. Thumbnails plug in at `ui/src/lib/library/thumbnail.ts`.
+
+- [x] **capture-time** (PR #9) — import reads metadata with no catalog lock and stores capture time and display-oriented size. `captureTimeMs` is the camera wall-clock time encoded as if UTC (offset ignored). Metadata failures go to `ImportReport.errors`.
 
 - [x] **raw-decode** (PR #8) — format detection, metadata/EXIF, standard formats, RAW via `rawler` 0.7.2, demosaic (bilinear, MHC). ADR 0005.
 - [x] **editor-document** (PR #7) — layer tree, 27 blend modes, masks, 4 adjustment layers, region compositor, undo history. ADR 0005.
