@@ -1,6 +1,6 @@
 # 0008 — Frame Transport, Shared Core Code, and Batch Catalog Writes
 
-- **Status:** Accepted (the webview measurement is still open, see "Open")
+- **Status:** Accepted (webview measurement done on 2026-10-03, see "Webview measurement")
 - **Date:** 2026-10-03
 - **Decided by:** Claude (implementation details)
 
@@ -72,6 +72,29 @@ Candidates (webview cost is an estimate until the operator runs the benchmark):
 - On Linux and Windows, if the webview uses message IPC instead of the custom protocol, `invoke` returns a number array, not an `ArrayBuffer`. This is not tested.
 - The import in `src-tauri` does not use `set_image_infos` yet (TODO: import-batch-info).
 
-## Open
+## Webview measurement
 
-- The operator runs the webview benchmark: `npm --prefix apps/desktop/ui run tauri dev`, then in the developer console `location.search = '?bench=transport'` (optional `&frames=120&long=2560`). If the measured rate is below 30 fps, change the default transport or move the native surface earlier.
+The operator ran the benchmark on 2026-10-03 (macOS webview, `tauri dev`, so the Rust side was a debug build). 60 frames at 2560×1707 (17.48 MB per frame), 6000×4000 synthetic source. Times are milliseconds per frame.
+
+| Candidate | fps | transfer | draw | shell |
+|---|---|---|---|---|
+| ipc-rgba8-put (default) | 46.3 | 19.62 | 2.00 | 6.66 |
+| ipc-rgba8-bitmap | 49.1 | 18.18 | 2.18 | 7.33 |
+| scheme-rgba8-put | 49.8 | 18.18 | 1.87 | 6.28 |
+| scheme-rgba8-bitmap | 49.8 | 17.97 | 2.13 | 7.42 |
+| channel-rgba8-put | 97.2 | 8.02 (gap between frames) | 2.27 | 8.30 |
+| scheme-jpeg-bitmap | 0.4 | 2779 | 12.72 | 2778 |
+| scheme-png-bitmap | 0.2 | 4850 | 66.55 | 4847 |
+| scheme-jpeg-img | 0.4 | 2792 | 3.50 | — |
+| slider-ipc (request every 4 ms, 2 s) | 33.8 | 18.22 | 1.90 | 6.69 |
+| slider-scheme | 33.8 | 17.42 | 1.97 | 6.72 |
+
+Findings:
+
+- The raw request/response transports reach 46–50 fps. The 30 fps target is met. `ipc` and `scheme` are equal within noise. `put` and `bitmap` are equal within noise.
+- The transfer of 17.5 MB into the web process costs about 11–13 ms after the shell work. It is the largest cost.
+- The `Channel` reaches 97 fps because it is a pipeline: the shell renders frame N+1 while the webview receives frame N. Request/response waits for each frame before it sends the next request. The estimate before the measurement (about 2 fps for the channel) was wrong.
+- The encoded frames are very slow here because `tauri dev` builds the Rust code without optimization (CPU encode 2.8–4.8 s, against 36–115 ms in release). They are slower than raw frames in release too, so the decision does not change. The raw frame paths are GPU work and change little between debug and release.
+- Slider simulation: 33.8 fps, lower than the sequential 46–50 fps. The 4 ms timer fired only 73 times in 2 s, so the main thread was busy for most of each frame (response handling, `putImageData`). Then the client often had no waiting request when a frame finished. Slider input events can be delayed by the same cause.
+
+Decision: keep the raw `ipc::Response` transport as the default for now (it meets the target). The next step is to overlap render and transfer (pipelining) and to send fewer bytes, see `TODO.md` → preview-followups.

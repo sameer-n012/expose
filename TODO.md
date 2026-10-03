@@ -12,15 +12,15 @@ No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature i
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **transport-measure** (operator) — run the webview benchmark (ADR 0008, "Open"): `npm --prefix apps/desktop/ui run tauri dev`, then `location.search = '?bench=transport'` in the developer console. This is also the first start of the app in a real webview (check thumbnails too).
+1. [ ] **preview-pipelining** (O) — overlap render and transfer (measured: channel push 97 fps vs. request/response 46–50 fps; slider simulation 33.8 fps). Options: client keeps 2 requests in flight, or settings by command + frames pushed through a `Channel` with an acknowledge per frame (backpressure, latest wins). Also render at the canvas device-pixel size when it is smaller than 2560 px, and keep the main thread free during frame receive. Measure again with `?bench=transport`, also in a release build (`tauri dev` builds Rust without optimization). ADR 0008, "Webview measurement".
 2. [ ] **develop-ui** (S) — Develop module panel with sliders bound to `DevelopSettings`, live preview through `PreviewCanvas` / `PreviewClient` (`ui/src/lib/develop/`, commands `preview_open`/`preview_render`/`preview_close`), settings saved to the catalog (`develop_settings` JSON, version from `DEVELOP_SETTINGS_VERSION`).
 3. [ ] **import-batch-info** (S) — see follow-ups. Same paths as develop-ui (`src-tauri`), so run it before or after.
 4. [ ] **export-v1** (S/O) — encode API is done (PR #11). Remaining: export dialog in the UI (format, quality, color space, size, destination, file naming), Tauri command that runs decode → develop → resize → `encode_path` on a worker, progress + errors. FEATURES 5.1 P1.
-6. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
+5. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 
 ### Follow-ups from merged work
 
-- [ ] **preview-followups** — render at the canvas display size instead of a fixed 2560 px (fewer bytes per frame); move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
+- [ ] **preview-followups** — benchmark note for PNG says "lossy at q85" (copy error in `bench.ts`); move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
 - [ ] **core-followups** (S) — `Rect::translated` is not used yet (editor `add_offset` works on tuples); the Planckian locus also has a piece boundary at 2222 K (y fit) with a small kink.
 - [ ] **gpu-api** (O) — kernels with different input/output size (GPU downsample), multiple inputs / storage buffers, parameter buffer reuse, double-buffered read-back, `WorkingImage` at the API boundary, render graph.
 - [ ] **raw-real-samples** (operator + S) — run `EXPOSE_RAW_SAMPLES=/path cargo test -p expose-raw -- --ignored real_samples --nocapture` on real camera files and fix what fails. Then: forward matrices, BaselineExposure, DNG black level origin check, multi-threaded/tiled demosaic.
@@ -72,4 +72,4 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 ## Known issues
 
 - An editor tool can put a `rustfmt` for a different CPU earlier in `PATH`. `scripts/check.sh` sets `RUSTFMT` to the toolchain binary. For manual runs, use `RUSTFMT="$(rustup which rustfmt)" cargo fmt --all`.
-- The Tauri app has not been started yet (`npm --prefix apps/desktop/ui run tauri dev`). Startup, the folder picker, and the layout in the real webview are not checked.
+- The Tauri app runs in the real webview on macOS (operator, 2026-10-03): thumbnails show, and the transport benchmark runs. The folder picker and the full layout are not checked in detail yet.
