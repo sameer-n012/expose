@@ -1,0 +1,21 @@
+/**
+ * Placeholder section titles for the side panels of each module.
+ * Real panel components replace these when the modules are implemented.
+ */
+import type { ModuleId } from '../../lib/modules';
+import type { Side } from '../../lib/stores/layout.svelte';
+
+export const PANEL_SECTIONS: Readonly<Record<ModuleId, Readonly<Record<Side, readonly string[]>>>> = {
+  library: {
+    left: ['Catalog', 'Folders', 'Collections'],
+    right: ['Histogram', 'Quick develop', 'Keywords', 'Metadata'],
+  },
+  develop: {
+    left: ['Navigator', 'Presets', 'Snapshots', 'History'],
+    right: ['Histogram', 'Basic', 'Tone curve', 'Color', 'Detail', 'Optics'],
+  },
+  editor: {
+    left: ['Tools'],
+    right: ['Color', 'Properties', 'Layers', 'History'],
+  },
+};
