@@ -11,6 +11,7 @@
 //!   16-bit I/O images, rectangles, and conversion between them.
 //! - [`color`]: matrices, primaries, white points, transfer functions, and
 //!   color spaces.
+//! - [`develop`]: non-destructive develop parameter types (no processing).
 //! - [`error`]: the [`CoreError`] type.
 //!
 //! # Dependency rules
@@ -23,6 +24,7 @@
 
 pub mod buffer;
 pub mod color;
+pub mod develop;
 pub mod error;
 
 pub use error::{CoreError, CoreResult};
