@@ -16,6 +16,8 @@
 //!   [`WorkingImage`].
 //! - [`raw::decode_raw`] and [`raw::demosaic()`]: RAW sensor data, and the
 //!   separate develop step to the working image.
+//! - [`embedded_preview`] / [`embedded_preview_min`]: the embedded JPEG
+//!   preview of a RAW or JPEG file, for fast thumbnails.
 //! - [`encode`]: a working image to a JPEG, PNG, or TIFF file in memory
 //!   ([`EncodeOptions`]). [`icc_profile`] gives the ICC profile of an
 //!   output color space.
@@ -59,6 +61,7 @@ mod icc;
 mod limits;
 mod metadata;
 mod orientation;
+mod preview;
 pub mod raw;
 mod standard;
 mod tiff;
@@ -82,6 +85,7 @@ pub use metadata::{
     PhotoMetadata, read_metadata,
 };
 pub use orientation::Orientation;
+pub use preview::{EmbeddedPreview, PreviewSource, embedded_preview, embedded_preview_min};
 pub use standard::{ColorOrigin, SourceColor, SourceTransfer};
 
 use raw::{DemosaicOptions, decode_raw, demosaic};
