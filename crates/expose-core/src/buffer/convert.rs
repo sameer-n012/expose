@@ -1,8 +1,9 @@
 //! Conversion between I/O images and the working image.
 
-use crate::buffer::io::{ChannelLayout, Image, Sample, clamp_unit};
+use crate::buffer::encode_lut::{Encoder, LinearEncoder, LutEncoder};
+use crate::buffer::io::{ChannelLayout, Image, Sample};
 use crate::buffer::working::{Rgba, WorkingImage};
-use crate::color::{ColorSpace, ColorSpaceId, mul_vec_f32};
+use crate::color::{ColorSpace, ColorSpaceId, TransferFunction, mul_vec_f32};
 use crate::error::CoreResult;
 
 impl<T: Sample> Image<T> {
@@ -73,6 +74,15 @@ impl WorkingImage {
     ///
     /// Alpha is clipped to `0.0..=1.0` and quantized linearly. Layouts with
     /// no alpha drop it.
+    ///
+    /// Step 4 and 5 use a lookup table (see `encode_lut.rs`) in place of a
+    /// `powf` call per sample. The table gives the same code as the direct
+    /// formula, except for rare inputs within some ulps of a code boundary
+    /// (at most one code of difference). The linear transfer function does
+    /// not use a table.
+    ///
+    /// The matrix step uses separate `f32` multiplies and adds (no fused
+    /// multiply-add), so the result does not change between targets.
     pub fn to_image<T: Sample>(
         &self,
         space: impl Into<ColorSpace>,
@@ -82,35 +92,89 @@ impl WorkingImage {
         let working = ColorSpaceId::LinearRec2020.definition();
         let matrix = working.conversion_to(&space)?.to_f32();
         let y_row = space.to_xyz()?.to_f32()[1];
-        let tf = space.transfer;
-        let clip = clamp_unit;
-        let encode = |v: f32| T::from_unit(tf.encode(v));
+        let ctx = EncodeContext { matrix, y_row };
 
-        let channels = layout.channels();
-        let mut data = Vec::with_capacity(self.pixels().len() * channels);
-        for p in self.pixels() {
-            let rgb = mul_vec_f32(&matrix, [p[0], p[1], p[2]]).map(clip);
-            let alpha = T::from_unit(p[3]);
-            match layout {
-                ChannelLayout::Gray | ChannelLayout::GrayAlpha => {
-                    let y = clip(y_row[0] * rgb[0] + y_row[1] * rgb[1] + y_row[2] * rgb[2]);
-                    data.push(encode(y));
-                }
-                ChannelLayout::Rgb | ChannelLayout::Rgba => {
-                    data.extend(rgb.map(encode));
-                }
-            }
-            if layout.has_alpha() {
-                data.push(alpha);
+        // `pixels().len() * 16` bytes are already allocated, so this
+        // product (at most 4 channels) cannot overflow.
+        let mut data = vec![T::default(); self.pixels().len() * layout.channels()];
+        if space.transfer == TransferFunction::Linear {
+            ctx.run(self.pixels(), &mut data, layout, &LinearEncoder);
+        } else {
+            // Match on the table form once, outside the pixel loop.
+            match LutEncoder::<T>::new(space.transfer) {
+                LutEncoder::Step(lut) => ctx.run(self.pixels(), &mut data, layout, &lut),
+                LutEncoder::Interp(lut) => ctx.run(self.pixels(), &mut data, layout, &lut),
             }
         }
         Image::from_vec(self.width(), self.height(), layout, data)
     }
 }
 
+/// Clips to `+0.0..=1.0`. NaN, negative values, and `-0.0` give `+0.0`.
+///
+/// The encoders need a non-negative sign bit. For all other inputs this is
+/// the same as `clamp_unit`.
+#[inline]
+fn clip_positive(v: f32) -> f32 {
+    if v > 0.0 { v.min(1.0) } else { 0.0 }
+}
+
+/// The per-call constants of [`WorkingImage::to_image`].
+struct EncodeContext {
+    /// Linear Rec. 2020 to linear output RGB.
+    matrix: [[f32; 3]; 3],
+    /// The Y (luminance) row of the output RGB to XYZ matrix.
+    y_row: [f32; 3],
+}
+
+impl EncodeContext {
+    /// Selects the loop for `layout` once, outside the pixel loop.
+    fn run<T: Sample, E: Encoder<T>>(
+        &self,
+        src: &[Rgba],
+        out: &mut [T],
+        layout: ChannelLayout,
+        enc: &E,
+    ) {
+        match layout {
+            ChannelLayout::Gray => self.run_layout::<T, E, 1, true, false>(src, out, enc),
+            ChannelLayout::GrayAlpha => self.run_layout::<T, E, 2, true, true>(src, out, enc),
+            ChannelLayout::Rgb => self.run_layout::<T, E, 3, false, false>(src, out, enc),
+            ChannelLayout::Rgba => self.run_layout::<T, E, 4, false, true>(src, out, enc),
+        }
+    }
+
+    /// The pixel loop for one layout. `C` is the channel count: 1 or 3
+    /// color channels (`GRAY`), plus 1 if `ALPHA`.
+    #[inline]
+    fn run_layout<T: Sample, E: Encoder<T>, const C: usize, const GRAY: bool, const ALPHA: bool>(
+        &self,
+        src: &[Rgba],
+        out: &mut [T],
+        enc: &E,
+    ) {
+        debug_assert_eq!(C, usize::from(!GRAY) * 2 + 1 + usize::from(ALPHA));
+        debug_assert_eq!(out.len(), src.len() * C);
+        for (p, o) in src.iter().zip(out.chunks_exact_mut(C)) {
+            let rgb = mul_vec_f32(&self.matrix, [p[0], p[1], p[2]]).map(clip_positive);
+            if GRAY {
+                let y = &self.y_row;
+                o[0] = enc.encode(clip_positive(y[0] * rgb[0] + y[1] * rgb[1] + y[2] * rgb[2]));
+            } else {
+                o[0] = enc.encode(rgb[0]);
+                o[1] = enc.encode(rgb[1]);
+                o[2] = enc.encode(rgb[2]);
+            }
+            if ALPHA {
+                o[C - 1] = T::from_unit(p[3]);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::buffer::{ChannelLayout, Image8, Image16, WorkingImage};
+    use crate::buffer::{ChannelLayout, Image8, Image16, Sample, WorkingImage};
     use crate::color::{ColorSpaceId, TransferFunction};
 
     #[test]
@@ -233,5 +297,165 @@ mod tests {
             .unwrap();
         let expected = (TransferFunction::Srgb.encode(0.25) * 255.0).round();
         assert!((f32::from(srgb.as_slice()[0]) - expected).abs() < f32::EPSILON);
+    }
+
+    /// The direct per-sample formula (the code before the lookup table).
+    fn reference<T: Sample>(img: &WorkingImage, id: ColorSpaceId, layout: ChannelLayout) -> Vec<T> {
+        use crate::buffer::io::clamp_unit;
+        use crate::color::mul_vec_f32;
+        let space = id.definition();
+        let working = ColorSpaceId::LinearRec2020.definition();
+        let m = working.conversion_to(&space).unwrap().to_f32();
+        let y = space.to_xyz().unwrap().to_f32()[1];
+        let enc = |v: f32| T::from_unit(space.transfer.encode(v));
+        let mut out = Vec::new();
+        for p in img.pixels() {
+            let rgb = mul_vec_f32(&m, [p[0], p[1], p[2]]).map(clamp_unit);
+            match layout {
+                ChannelLayout::Gray | ChannelLayout::GrayAlpha => {
+                    out.push(enc(clamp_unit(
+                        y[0] * rgb[0] + y[1] * rgb[1] + y[2] * rgb[2],
+                    )));
+                }
+                ChannelLayout::Rgb | ChannelLayout::Rgba => out.extend(rgb.map(enc)),
+            }
+            if layout.has_alpha() {
+                out.push(T::from_unit(p[3]));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn matches_direct_formula_for_all_layouts_spaces_and_edge_values() {
+        let specials = [
+            0.0,
+            -0.0,
+            1.0,
+            0.5,
+            0.18,
+            0.003_130_8,
+            f32::NAN,
+            -1.0,
+            -1e-30,
+            2.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::from_bits(1),
+            f32::MIN_POSITIVE,
+            1e-7,
+            0.999_999_9,
+            1.000_000_1,
+        ];
+        let mut pixels = Vec::new();
+        for (i, &a) in specials.iter().enumerate() {
+            for (j, &b) in specials.iter().enumerate() {
+                let alpha = specials[(i + j) % specials.len()];
+                pixels.push([a, b, specials[(i * 7 + j * 3) % specials.len()], alpha]);
+            }
+        }
+        // A dense ramp of neutral and colored values.
+        for i in 0..=4096_u16 {
+            let t = f32::from(i) / 4096.0;
+            pixels.push([t, t, t, t]);
+            pixels.push([t, 1.0 - t, t * t, 1.0]);
+        }
+        let w = u32::try_from(pixels.len()).unwrap();
+        let img = WorkingImage::from_pixels(w, 1, pixels).unwrap();
+        let layouts = [
+            ChannelLayout::Gray,
+            ChannelLayout::GrayAlpha,
+            ChannelLayout::Rgb,
+            ChannelLayout::Rgba,
+        ];
+        for id in ColorSpaceId::ALL {
+            for layout in layouts {
+                let fast = img.to_image::<u8>(id, layout).unwrap();
+                assert_eq!(fast.layout(), layout);
+                assert_eq!(
+                    fast.as_slice(),
+                    reference::<u8>(&img, id, layout),
+                    "{id:?} {layout:?}"
+                );
+                let fast = img.to_image::<u16>(id, layout).unwrap();
+                assert_eq!(
+                    fast.as_slice(),
+                    reference::<u16>(&img, id, layout),
+                    "{id:?} {layout:?}"
+                );
+            }
+        }
+    }
+
+    /// Timing of `to_image` on a 24 MP image. Run in release mode:
+    /// `cargo test -p expose-core --release -- --ignored to_image_24mp_timing --nocapture`.
+    #[test]
+    #[ignore = "timing benchmark; run manually in release mode"]
+    fn to_image_24mp_timing() {
+        let (w, h) = (6000_u32, 4000_u32);
+        let pixels: Vec<[f32; 4]> = (0..w * h)
+            .map(|i| {
+                // A deterministic pattern that covers the full 0..1 range.
+                #[allow(clippy::cast_precision_loss)]
+                let t = (i % 9973) as f32 / 9972.0;
+                [t, (1.0 - t) * 0.8, t * t, 1.0]
+            })
+            .collect();
+        let ramp = WorkingImage::from_pixels(w, h, pixels).unwrap();
+        // Uniform noise: the worst case for branch prediction.
+        let mut state = 0x9E37_79B9_u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            #[allow(clippy::cast_precision_loss)]
+            let v = (state >> 8) as f32 / 16_777_216.0;
+            v
+        };
+        let noise_px: Vec<[f32; 4]> = (0..w * h).map(|_| [next(), next(), next(), 1.0]).collect();
+        let noise = WorkingImage::from_pixels(w, h, noise_px).unwrap();
+        for id in ColorSpaceId::ALL {
+            let t0 = std::time::Instant::now();
+            let _l8 = super::LutEncoder::<u8>::new(id.transfer());
+            let t8 = t0.elapsed();
+            let t0 = std::time::Instant::now();
+            let _l16 = super::LutEncoder::<u16>::new(id.transfer());
+            let t16 = t0.elapsed();
+            println!(
+                "LUT build {id:?}: u8 {:.3} ms, u16 {:.3} ms",
+                t8.as_secs_f64() * 1e3,
+                t16.as_secs_f64() * 1e3,
+            );
+        }
+        for (name, id, img) in [
+            ("ramp srgb", ColorSpaceId::Srgb, &ramp),
+            ("ramp oprgb", ColorSpaceId::OpRgb, &ramp),
+            ("ramp linear", ColorSpaceId::LinearRec2020, &ramp),
+            ("noise srgb", ColorSpaceId::Srgb, &noise),
+            ("noise linear", ColorSpaceId::LinearRec2020, &noise),
+        ] {
+            // The minimum of some runs is less sensitive to other load on
+            // the machine.
+            let mut t8 = std::time::Duration::MAX;
+            let mut t16 = std::time::Duration::MAX;
+            let mut out8 = None;
+            let mut out16 = None;
+            for _ in 0..7 {
+                let t0 = std::time::Instant::now();
+                out8 = Some(img.to_image::<u8>(id, ChannelLayout::Rgb).unwrap());
+                t8 = t8.min(t0.elapsed());
+                let t0 = std::time::Instant::now();
+                out16 = Some(img.to_image::<u16>(id, ChannelLayout::Rgb).unwrap());
+                t16 = t16.min(t0.elapsed());
+            }
+            let (out8, out16) = (out8.unwrap(), out16.unwrap());
+            println!(
+                "to_image 6000x4000 {name}: u8 {:.1} ms, u16 {:.1} ms (checksum {} {})",
+                t8.as_secs_f64() * 1e3,
+                t16.as_secs_f64() * 1e3,
+                out8.as_slice().iter().map(|&v| u64::from(v)).sum::<u64>(),
+                out16.as_slice().iter().map(|&v| u64::from(v)).sum::<u64>(),
+            );
+        }
     }
 }
