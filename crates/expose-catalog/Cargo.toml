@@ -7,8 +7,26 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["sqlite", "native"]
+# SQLite storage backend (desktop). A web build disables it and supplies
+# its own `CatalogStore` implementation.
+sqlite = ["dep:rusqlite"]
+# Native platform services: file access through `std::fs` and the system
+# clock. A web build disables it and supplies its own `FileSystem` and
+# `Clock` implementations.
+native = []
+
 [dependencies]
 expose-core.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
