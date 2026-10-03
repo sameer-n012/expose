@@ -338,7 +338,11 @@ fn decode_preview(preview: &EmbeddedPreview) -> Result<WorkingImage, DecodeError
     };
     let decoded = decode_with(&preview.jpeg, &options)?;
     // `None`: the file gives no orientation, so the stored pixels are shown.
-    preview.orientation.unwrap_or_default().apply(decoded.image)
+    // `apply` returns a `CoreError`; `DecodeError` wraps it.
+    Ok(preview
+        .orientation
+        .unwrap_or_default()
+        .apply(decoded.image)?)
 }
 
 /// Scales an image to the thumbnail size. Smaller images are not
