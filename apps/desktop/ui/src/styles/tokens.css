@@ -42,6 +42,13 @@
   --color-warning: #dbb36a;
   --color-danger: #e8837c;
 
+  /* Color labels of photos */
+  --color-label-red: #e8837c;
+  --color-label-yellow: #dbb36a;
+  --color-label-green: #8cc28f;
+  --color-label-blue: #6f9bd1;
+  --color-label-purple: #b394d6;
+
   /* Spacing scale */
   --space-1: 2px;
   --space-2: 4px;

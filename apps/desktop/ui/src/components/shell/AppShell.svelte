@@ -15,8 +15,10 @@
   import { MODULE_LABELS, type ModuleId } from '../../lib/modules';
   import type { ShortcutRegistry } from '../../lib/shortcuts/registry';
   import type { LayoutStore, Region, Side } from '../../lib/stores/layout.svelte';
+  import type { LibraryStore } from '../../lib/stores/library.svelte';
   import type { ModuleStore } from '../../lib/stores/modules.svelte';
   import type { ToastStore } from '../../lib/stores/toasts.svelte';
+  import FolderPanel from '../library/FolderPanel.svelte';
   import CanvasPlaceholder from '../modules/CanvasPlaceholder.svelte';
   import LibraryView from '../modules/LibraryView.svelte';
   import { PANEL_SECTIONS } from '../modules/panelSections';
@@ -29,13 +31,14 @@
   interface Props {
     modules: ModuleStore;
     layout: LayoutStore;
+    library: LibraryStore;
     registry: ShortcutRegistry;
     toasts: ToastStore;
     /** Version text for the top bar. Empty while unknown. */
     version?: string;
   }
 
-  let { modules, layout, registry, toasts, version = '' }: Props = $props();
+  let { modules, layout, library, registry, toasts, version = '' }: Props = $props();
 
   /** Shortcut text per module. Null if the action is not registered or has no key. */
   function shortcutFor(actionId: string): string | null {
@@ -90,6 +93,9 @@
   >
     {#each modules.mounted as id (id)}
       <div hidden={id !== modules.active}>
+        {#if id === 'library' && side === 'left'}
+          <FolderPanel {library} />
+        {/if}
         <PanelSections sections={PANEL_SECTIONS[id][side]} />
       </div>
     {/each}
@@ -122,7 +128,7 @@
           data-testid="module-{id}"
         >
           {#if id === 'library'}
-            <LibraryView {modules} />
+            <LibraryView {modules} {library} />
           {:else if id === 'develop'}
             <CanvasPlaceholder title="Develop" hint="The photo preview appears here." />
           {:else}

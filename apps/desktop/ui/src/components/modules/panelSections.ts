@@ -7,7 +7,8 @@ import type { Side } from '../../lib/stores/layout.svelte';
 
 export const PANEL_SECTIONS: Readonly<Record<ModuleId, Readonly<Record<Side, readonly string[]>>>> = {
   library: {
-    left: ['Catalog', 'Folders', 'Collections'],
+    // The folder tree (FolderPanel) shows above these sections.
+    left: ['Collections'],
     right: ['Histogram', 'Quick develop', 'Keywords', 'Metadata'],
   },
   develop: {
