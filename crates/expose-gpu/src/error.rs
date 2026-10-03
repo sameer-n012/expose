@@ -52,9 +52,9 @@ pub enum GpuError {
         "pixel data has {actual} samples, but the image requires {expected} (width x height x 4)"
     )]
     DataLength {
-        /// The number of `f32` samples that the image requires.
+        /// The number of samples (`f32` or bytes) that the image requires.
         expected: usize,
-        /// The number of `f32` samples that the caller supplied.
+        /// The number of samples that the caller supplied.
         actual: usize,
     },
 
@@ -71,6 +71,16 @@ pub enum GpuError {
         output_width: u32,
         /// Output height in pixels.
         output_height: u32,
+    },
+
+    /// The operation needs an image of a different pixel format (for
+    /// example, `read_rgba8` on a float image).
+    #[error("the operation requires a {expected:?} image, but the image is {actual:?}")]
+    FormatMismatch {
+        /// The format that the operation requires.
+        expected: ImageFormat,
+        /// The format of the image.
+        actual: ImageFormat,
     },
 
     /// A kernel used the same image as input and output.
