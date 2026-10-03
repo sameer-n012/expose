@@ -255,6 +255,17 @@ pub struct ImageInfo {
     pub height: Option<u32>,
 }
 
+/// The result of a batch write of image information.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchInfoOutcome {
+    /// The number of photos that the batch changed.
+    pub written: usize,
+    /// The ids in the batch that do not exist in the catalog, in input
+    /// order. The batch does not write these.
+    pub unknown: Vec<PhotoId>,
+}
+
 /// Label changes to apply to one or more photos.
 ///
 /// A field that is `None` is not changed.

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::import::ImportReport;
 use crate::model::{
-    AddOutcome, ColorLabel, DevelopSettings, Flag, Folder, FolderId, FolderNode, ImageInfo,
-    LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
+    AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, Flag, Folder, FolderId, FolderNode,
+    ImageInfo, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
 };
 use crate::platform::FileSystem;
 use crate::query::PhotoQuery;
@@ -74,6 +74,29 @@ pub trait CatalogStore {
     /// [`CatalogError::PhotoNotFound`](crate::CatalogError::PhotoNotFound)
     /// if the photo does not exist.
     fn set_image_info(&mut self, id: PhotoId, info: ImageInfo) -> Result<()>;
+
+    /// Replaces the image information of many photos in one transaction.
+    ///
+    /// Ids that are not in the catalog are skipped and returned in
+    /// [`BatchInfoOutcome::unknown`]; they do not fail the batch. If a width
+    /// or height is 0 (`ZeroDimension`) or the database fails, the method
+    /// returns the error and changes nothing. If an id occurs more than
+    /// once, the last item wins. Empty input does nothing.
+    ///
+    /// The default implementation calls [`set_image_info`](Self::set_image_info)
+    /// for each item and is not atomic. Backends that can do better must
+    /// override it.
+    fn set_image_infos(&mut self, items: &[(PhotoId, ImageInfo)]) -> Result<BatchInfoOutcome> {
+        let mut outcome = BatchInfoOutcome::default();
+        for &(id, info) in items {
+            match self.set_image_info(id, info) {
+                Ok(()) => outcome.written += 1,
+                Err(crate::CatalogError::PhotoNotFound(_)) => outcome.unknown.push(id),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(outcome)
+    }
 
     /// Applies label changes to all photos in `ids`, in one transaction.
     ///

@@ -13,8 +13,8 @@ pub use schema::{APPLICATION_ID, LATEST_VERSION};
 
 use crate::error::{CatalogError, Result};
 use crate::model::{
-    AddOutcome, ColorLabel, DevelopSettings, Flag, Folder, FolderId, FolderNode, ImageInfo,
-    LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
+    AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, Flag, Folder, FolderId, FolderNode,
+    ImageInfo, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
 };
 use crate::paths::{
     build_folder_tree, folder_name, is_valid_file_name, normalize_folder_path, path_text,
@@ -514,6 +514,38 @@ impl CatalogStore for SqliteStore {
             return Err(CatalogError::PhotoNotFound(id));
         }
         Ok(())
+    }
+
+    fn set_image_infos(&mut self, items: &[(PhotoId, ImageInfo)]) -> Result<BatchInfoOutcome> {
+        let mut outcome = BatchInfoOutcome::default();
+        if items.is_empty() {
+            return Ok(outcome);
+        }
+        // One transaction holds the whole batch (SQLite handles it without
+        // chunks). Any early return drops `tx`, which rolls back.
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE photos SET capture_time_ms = ?1, width = ?2, height = ?3 WHERE id = ?4",
+            )?;
+            for &(id, info) in items {
+                if info.width == Some(0) {
+                    return Err(CatalogError::ZeroDimension { field: "width" });
+                }
+                if info.height == Some(0) {
+                    return Err(CatalogError::ZeroDimension { field: "height" });
+                }
+                let changed =
+                    stmt.execute(params![info.capture_time_ms, info.width, info.height, id.0])?;
+                if changed == 0 {
+                    outcome.unknown.push(id);
+                } else {
+                    outcome.written += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(outcome)
     }
 
     fn update_labels(&mut self, ids: &[PhotoId], update: LabelUpdate) -> Result<()> {
