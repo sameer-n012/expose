@@ -1,5 +1,10 @@
 //! Shared numeric helpers.
 
+#![allow(
+    clippy::many_single_char_names,
+    reason = "spline math uses the usual one-letter names"
+)]
+
 use crate::develop::CurvePoint;
 
 /// A monotone cubic spline through control points.
