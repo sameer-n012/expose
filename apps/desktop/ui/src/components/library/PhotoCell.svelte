@@ -28,6 +28,8 @@
   const FLAG_TEXT = { none: '', pick: 'Pick', reject: 'Reject' } as const;
 
   const url = $derived(photo === undefined ? null : thumbnailUrl(photo));
+  /** The URL that failed to load: the placeholder shows instead. */
+  let failedUrl = $state<string | null>(null);
   const stars = $derived(photo === undefined ? '' : '★'.repeat(photo.rating) + '☆'.repeat(5 - photo.rating));
 </script>
 
@@ -48,8 +50,8 @@
     {ondblclick}
   >
     <span class="thumb">
-      {#if url !== null}
-        <img src={url} alt="" loading="lazy" draggable="false" />
+      {#if url !== null && url !== failedUrl}
+        <img src={url} alt="" loading="lazy" draggable="false" onerror={() => (failedUrl = url)} />
       {/if}
       {#if photo.flag !== 'none'}
         <span class="flag {photo.flag}" title={FLAG_TEXT[photo.flag]} data-testid="flag">
