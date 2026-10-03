@@ -911,6 +911,7 @@ name = "expose-editor"
 version = "0.1.0"
 dependencies = [
  "expose-core",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
