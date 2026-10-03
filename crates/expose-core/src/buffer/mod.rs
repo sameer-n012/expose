@@ -12,6 +12,7 @@
 //! back with [`WorkingImage::to_image`].
 
 mod convert;
+mod encode_lut;
 mod io;
 mod rect;
 mod resample;
