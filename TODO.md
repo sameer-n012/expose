@@ -12,11 +12,9 @@ No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature i
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **thumbnails** (O) — preview cache: decode (`expose-raw`), develop at small size (`expose-develop::render_preview`), resize (`expose_core::buffer::resample`) + `expose_raw::encode` JPEG, store in a cache folder keyed by photo ID + settings hash; custom URI protocol (or command) to serve them; plug into `ui/src/lib/library/thumbnail.ts`. Use an embedded JPEG preview from RAW files when present (fast path). Paths: `src-tauri` (+ the one UI file).
 2. [ ] **frame-transport** (O) — prototype how develop preview frames go from Rust to the UI (custom URI protocol with raw/encoded bytes vs. IPC binary vs. shared surface). Measure frames per second at 2560 px. Record the result as an ADR. Paths: `src-tauri` + `ui`. Runs after thumbnails (same paths).
 3. [ ] **develop-ui** (S after 2) — Develop module panel with sliders bound to `DevelopSettings`, live preview through the frame transport, settings saved to the catalog (`develop_settings` JSON, version from `DEVELOP_SETTINGS_VERSION`).
 4. [ ] **export-v1** (S/O) — encode API is done (PR #11). Remaining: export dialog in the UI (format, quality, color space, size, destination, file naming), Tauri command that runs decode → develop → resize → `encode_path` on a worker, progress + errors. FEATURES 5.1 P1.
-5. [ ] **to-image-speed** (O, can run in parallel: `expose-core` only) — output conversion `to_image` takes ~580 ms of a 790 ms 24 MP JPEG export; use LUTs for transfer functions (keep determinism + WASM-safe).
 6. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 
 ### Follow-ups from merged work
@@ -29,6 +27,7 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - [ ] **ui-polish** (S) — save panel layout between sessions; Tab shortcut conflicts with keyboard focus navigation; refresh shortcut tooltips after a remap.
 - [ ] **ui-catalog-followups** (S) — search box is a placeholder; per-request version for optimistic rollback (two quick changes can restore an old value); folder count is direct-only, so it differs from the grid total with "include subfolders".
 - [ ] **catalog-batch-info** (S) — `CatalogStore::set_image_infos` in one transaction (large imports); in-memory import tests in `src-tauri` now get metadata errors for fake files.
+- [ ] **thumbnail-followups** — RAW with non-default white balance: give the pipeline the as-shot `SourceInfo` (from `DecodeInfo.raw.multipliers`), not `SourceInfo::RENDERED`; apply crop/straighten when a geometry stage exists; reduce memory (scaled JPEG decode, or decode to 8-bit, instead of a full-size f32 image); cache size limit and removal of thumbnails of deleted photos; check the `thumb` scheme, CSP, and 304 handling in a real webview.
 - [ ] **encode-followups** — copy EXIF/XMP/IPTC into exported files; gamut mapping instead of clipping; JPEG optimized Huffman tables, progressive mode, gray output; TIFF ICC tag type UNDEFINED instead of BYTE.
 - [ ] **catalog-paths** (S) — case-insensitive path comparison on macOS; Windows paths in tests.
 - [ ] **wasm-check** — `expose-core` must compile for `wasm32-unknown-unknown`. The target is not installed (operator). `expose-raw` must build for WASM with `--no-default-features` (no `rawler`).
@@ -40,6 +39,10 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **to-image-speed** (PR #13) — exact encode lookup tables in `to_image` (`buffer/encode_lut.rs`); output identical to the old formula; 24 MP sRGB u8 437 → 66 ms, 24 MP JPEG export ~790 → ~200 ms. ADR 0007.
+
+- [x] **thumbnails** (PR #12) — `expose_raw::embedded_preview{,_min}` (TIFF-type RAW, JPEG EXIF, RAF, CR3; no `rawler`); thumbnail cache in `src-tauri/src/thumbnails.rs` (512 px JPEG, FNV-1a key, LIFO worker pool with de-duplication); `thumb` URI scheme with ETag/304; `thumbnailUrl` in the UI with placeholder fallback. ADR 0007.
 
 - [x] **export-encode** (PR #11) — Lanczos-3 `resize` + `fit_size` in `expose-core`; `encode`/`encode_path` in `expose-raw` (JPEG local baseline encoder, PNG, TIFF) with ICC v4 profiles (sRGB, Display P3, opRGB, Rec. 2020, ROMM RGB); decoder reads BT.2020/ROMM curves and small-TIFF ICC. ADR 0006.
 
