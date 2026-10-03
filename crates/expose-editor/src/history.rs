@@ -42,8 +42,9 @@ pub const DEFAULT_MAX_STEPS: usize = 50;
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEntry {
     name: String,
-    /// Undo edits (if applied) or redo edits (if undone), in the order of
-    /// the original operations.
+    /// Undo edits (if applied) or redo edits (if undone). They are always
+    /// applied from the last to the first: undo edits are in operation
+    /// order, redo edits are in reverse operation order.
     edits: Vec<Edit>,
 }
 
@@ -195,8 +196,9 @@ impl History {
         Ok(())
     }
 
-    /// Applies the edits of entry `index` in reverse order and stores their
-    /// inverses (in original order). An applied entry becomes undone, and
+    /// Applies the edits of entry `index` from the last to the first and
+    /// stores their inverses in the order of application. An applied entry
+    /// becomes undone, and
     /// an undone entry becomes applied.
     ///
     /// If an edit fails, the function applies the inverses that it already
@@ -232,8 +234,10 @@ impl History {
                 }
             }
         }
-        // `inverses` is in reverse order of the operations.
-        inverses.reverse();
+        // The edits were applied last to first, so `inverses` is in reverse
+        // order. The next flip applies them last to first again, which is
+        // the correct order for them. (Order matters, for example for
+        // overlapping pixel patches.)
         entry.edits = inverses;
         Ok(())
     }
