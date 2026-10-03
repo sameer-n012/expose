@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 expose-core.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
