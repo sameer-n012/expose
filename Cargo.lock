@@ -973,6 +973,8 @@ name = "expose-desktop"
 version = "0.1.0"
 dependencies = [
  "expose-catalog",
+ "expose-core",
+ "expose-develop",
  "expose-raw",
  "serde",
  "serde_json",
