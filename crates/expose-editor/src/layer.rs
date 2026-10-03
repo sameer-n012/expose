@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use expose_core::buffer::{Rect, WorkingImage};
+use expose_core::buffer::{GrayImage, Rect, WorkingImage};
 
 use crate::adjust::Adjustment;
 use crate::blend::BlendMode;
@@ -152,9 +152,7 @@ impl MaskFill {
 /// clamps values outside that range when it reads them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaskImage {
-    width: u32,
-    height: u32,
-    data: Vec<f32>,
+    inner: GrayImage,
 }
 
 impl MaskImage {
@@ -164,11 +162,9 @@ impl MaskImage {
     /// ([`MAX_DIMENSION`](crate::MAX_DIMENSION),
     /// [`MAX_PIXELS`](crate::MAX_PIXELS)).
     pub fn new_filled(width: u32, height: u32, fill: f32) -> EditorResult<Self> {
-        let count = check_size(width, height)?;
+        check_size(width, height)?;
         Ok(Self {
-            width,
-            height,
-            data: vec![fill; count],
+            inner: GrayImage::new_filled(width, height, fill)?,
         })
     }
 
@@ -182,45 +178,42 @@ impl MaskImage {
             });
         }
         Ok(Self {
-            width,
-            height,
-            data,
+            inner: GrayImage::from_data(width, height, data)?,
         })
     }
 
     /// Returns the width in pixels.
     pub const fn width(&self) -> u32 {
-        self.width
+        self.inner.width()
     }
 
     /// Returns the height in pixels.
     pub const fn height(&self) -> u32 {
-        self.height
+        self.inner.height()
     }
 
     /// Returns the rectangle `(0, 0, width, height)`.
     pub const fn bounds(&self) -> Rect {
-        Rect::from_size(self.width, self.height)
+        self.inner.bounds()
     }
 
     /// Returns all values in row-major order.
     pub fn data(&self) -> &[f32] {
-        &self.data
+        self.inner.data()
     }
 
     pub(crate) fn data_mut(&mut self) -> &mut [f32] {
-        &mut self.data
+        self.inner.data_mut()
     }
 
     /// Returns the value at `(x, y)`, or `None` if it is outside the image.
     pub fn get(&self, x: u32, y: u32) -> Option<f32> {
-        if x >= self.width || y >= self.height {
-            return None;
-        }
-        // The constructor proved that width * height fits in usize.
-        self.data
-            .get(y as usize * self.width as usize + x as usize)
-            .copied()
+        self.inner.get(x, y)
+    }
+
+    /// Returns the underlying single-channel image.
+    pub const fn as_gray(&self) -> &GrayImage {
+        &self.inner
     }
 }
 
