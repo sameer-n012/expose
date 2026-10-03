@@ -5,6 +5,15 @@
 //! This crate contains pixel buffers, color math, and edit parameter types.
 //! It does no I/O and no GPU work.
 //!
+//! # Modules
+//!
+//! - [`buffer`]: the working image (linear Rec. 2020 RGBA `f32`), 8-bit and
+//!   16-bit I/O images, rectangles, and conversion between them.
+//! - [`color`]: matrices, primaries, white points, transfer functions, and
+//!   color spaces.
+//! - [`develop`]: non-destructive develop parameter types (no processing).
+//! - [`error`]: the [`CoreError`] type.
+//!
 //! # Dependency rules
 //!
 //! - This crate must not depend on any other workspace crate.
@@ -13,15 +22,9 @@
 //!   traits for platform services, so that a WebAssembly build can supply
 //!   its own implementation.
 
-/// The name of this crate.
-pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
+pub mod buffer;
+pub mod color;
+pub mod develop;
+pub mod error;
 
-#[cfg(test)]
-mod tests {
-    use super::CRATE_NAME;
-
-    #[test]
-    fn crate_name_is_correct() {
-        assert_eq!(CRATE_NAME, "expose-core");
-    }
-}
+pub use error::{CoreError, CoreResult};

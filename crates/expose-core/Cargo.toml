@@ -9,6 +9,12 @@ publish.workspace = true
 
 # Rule: this crate must not depend on any other workspace crate.
 [dependencies]
+bytemuck.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true
