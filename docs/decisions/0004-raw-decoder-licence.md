@@ -17,5 +17,6 @@ ADR 0001 selects `rawler` for RAW decode. `rawler` uses the LGPL-2.1 licence. Th
 ## Consequences
 
 - Rust links `rawler` statically. To obey the LGPL, a distributed build must let users relink Expose with a modified `rawler` (for example: supply the object files, or put `rawler` in a separate dynamic library). Do this before the first public release.
+- Expose's own code uses the 0BSD licence (`LICENSE`). The LGPL applies only to `rawler`. It does not change the licence of Expose's code.
 - `rawler` is pure Rust, so the web version stays possible.
 - A build without the `rawler` feature can use only the permissive backends.

@@ -7,7 +7,8 @@ version = "0.1.0"
 edition = "2024"
 # Resolver 3 uses this value to select dependency versions that build on 1.88.
 rust-version = "1.88"
-license = "UNLICENSED"
+# Expose code uses 0BSD. Third-party crates keep their own licences (see ADR 0004).
+license = "0BSD"
 publish = false
 
 [workspace.dependencies]
