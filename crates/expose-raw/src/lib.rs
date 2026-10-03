@@ -1,11 +1,12 @@
-//! Image decode for Expose.
+//! Image decode and encode for Expose.
 //!
 //! # Responsibility
 //!
 //! This crate detects image formats, reads photo metadata (EXIF), decodes
 //! standard formats (JPEG, PNG, TIFF 8/16/32-bit, WebP), and decodes camera
 //! RAW files. All decoders give a [`WorkingImage`] (linear Rec. 2020 RGBA
-//! `f32`, ADR 0002).
+//! `f32`, ADR 0002). For export, it encodes a [`WorkingImage`] to JPEG, PNG,
+//! or TIFF with an embedded ICC profile.
 //!
 //! # Main functions
 //!
@@ -15,10 +16,13 @@
 //!   [`WorkingImage`].
 //! - [`raw::decode_raw`] and [`raw::demosaic()`]: RAW sensor data, and the
 //!   separate develop step to the working image.
+//! - [`encode`]: a working image to a JPEG, PNG, or TIFF file in memory
+//!   ([`EncodeOptions`]). [`icc_profile`] gives the ICC profile of an
+//!   output color space.
 //!
-//! All functions read from a byte slice. The file system helpers
-//! ([`decode_path`], [`read_metadata_path`]) need the `native` feature (on
-//! by default).
+//! All functions read from (or write to) a byte slice. The file system
+//! helpers ([`decode_path`], [`read_metadata_path`], [`encode_path`]) need
+//! the `native` feature (on by default).
 //!
 //! # Untrusted input
 //!
@@ -48,6 +52,7 @@
     reason = "pixel and color math uses conventional short names (x, y, r, g, b)"
 )]
 
+mod encode;
 mod error;
 mod format;
 mod icc;
@@ -61,7 +66,13 @@ mod tiff;
 use expose_core::buffer::WorkingImage;
 use serde::{Deserialize, Serialize};
 
-pub use error::{DecodeError, DecodeResult};
+#[cfg(feature = "native")]
+pub use encode::encode_path;
+pub use encode::{
+    BitDepth, ChromaSubsampling, EncodeOptions, OutputFormat, TiffCompression, encode,
+    icc_description, icc_profile,
+};
+pub use error::{DecodeError, DecodeResult, EncodeError, EncodeResult};
 pub use format::{ImageFormat, RawFormat, detect_format};
 pub use limits::{DEFAULT_MAX_PIXELS, Limits};
 #[cfg(feature = "native")]

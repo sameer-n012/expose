@@ -27,6 +27,9 @@ expose-core.workspace = true
 rawler = { version = "0.7", optional = true, default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp"] }
 kamadak-exif = "0.6"
+# TIFF encode with LZW/Deflate compression and an ICC profile tag (MIT).
+# The `image` crate already uses this version for TIFF decode.
+tiff = { version = "0.11", default-features = false, features = ["deflate", "lzw"] }
 serde.workspace = true
 thiserror.workspace = true
 
