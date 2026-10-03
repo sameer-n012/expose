@@ -273,7 +273,7 @@ This file is the master list of features for Expose.
 - [ ] **P2** Blur, sharpen, smudge tools
 - [ ] **P2** Clone source panel (several sources, offset, scale, rotation, overlay)
 - [ ] **P3** Remove tool (AI distraction removal by brush stroke)
-- [ ] **P3** AI generative fill and expand (from text prompt)
+- [ ] **P3** AI generative fill and expand (fill a selection or extend the canvas from a text prompt; model source to be decided)
 
 ### 3.7 Transform and warp
 - [ ] **P1** Free transform (move, scale, rotate) with reference point
@@ -413,13 +413,14 @@ This file is the master list of features for Expose.
 - [ ] **P3** Plug-in / extension system
 - [ ] **P3** Localization (multiple UI languages)
 - [ ] **P3** Accessibility (screen reader labels, high-contrast mode, full keyboard navigation)
+- [ ] **P3** Web version (runs in a browser; same core image engine; local files through browser file access)
 
 ---
 
 ## Out of Scope (until the operator approves)
 
 - Cloud sync and online storage
-- Mobile and web versions
+- Mobile versions
 - Multi-user collaboration
 - 3D model editing
 - Video editing
