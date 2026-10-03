@@ -5,7 +5,7 @@
  * result types are defined in one place.
  */
 import { invoke } from '@tauri-apps/api/core';
-import { toasts } from './stores/toasts.svelte';
+import { toasts, type ToastStore } from './stores/toasts.svelte';
 
 /**
  * Runs a backend call. If the call fails, shows an error toast with the
@@ -15,12 +15,17 @@ import { toasts } from './stores/toasts.svelte';
  * handle itself. Thus no backend error is lost.
  *
  * @param description What the call does, for the toast ("Load the catalog").
+ * @param store The toast store for the error. Default: the application store.
  */
-export async function callBackend<T>(description: string, call: () => Promise<T>): Promise<T | undefined> {
+export async function callBackend<T>(
+  description: string,
+  call: () => Promise<T>,
+  store: ToastStore = toasts,
+): Promise<T | undefined> {
   try {
     return await call();
   } catch (error: unknown) {
-    toasts.error(`${description} failed.`, error);
+    store.error(`${description} failed.`, error);
     return undefined;
   }
 }
