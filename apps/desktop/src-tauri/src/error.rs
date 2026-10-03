@@ -22,6 +22,10 @@ pub enum ErrorKind {
     /// The catalog did not open at startup. Use `catalog_status` to get the
     /// cause.
     Unavailable,
+    /// A newer request replaced this request before it started (for
+    /// example, a preview frame while a slider moves). This is not a
+    /// failure: the UI drops the request and shows no message.
+    Superseded,
     /// An internal error (for example, a worker thread stopped). This is
     /// a bug.
     Internal,
@@ -101,6 +105,7 @@ mod tests {
             (ErrorKind::Database, "database"),
             (ErrorKind::Io, "io"),
             (ErrorKind::Unavailable, "unavailable"),
+            (ErrorKind::Superseded, "superseded"),
             (ErrorKind::Internal, "internal"),
         ];
         for (kind, text) in kinds {

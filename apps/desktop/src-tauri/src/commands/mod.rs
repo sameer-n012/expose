@@ -14,6 +14,7 @@
 pub mod app;
 pub mod catalog;
 pub mod dialog;
+pub mod preview;
 
 use tauri::{AppHandle, Manager, Runtime};
 

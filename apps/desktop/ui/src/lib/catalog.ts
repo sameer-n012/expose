@@ -13,7 +13,14 @@ export type ColorLabel = 'none' | 'red' | 'yellow' | 'green' | 'blue' | 'purple'
 export type SortField = 'captureTime' | 'fileName' | 'rating' | 'importTime';
 export type SortDirection = 'ascending' | 'descending';
 
-export type ErrorKind = 'notFound' | 'invalidInput' | 'database' | 'io' | 'unavailable' | 'internal';
+export type ErrorKind =
+  | 'notFound'
+  | 'invalidInput'
+  | 'database'
+  | 'io'
+  | 'unavailable'
+  | 'superseded'
+  | 'internal';
 
 /** Structured error that a catalog command returns when it fails. */
 export interface CommandError {
