@@ -10,11 +10,12 @@
 use std::path::Path;
 
 use expose_catalog::{
-    CatalogStore, ColorLabel, FileSystem, Flag, FolderNode, ImportReport, Photo, PhotoId,
-    PhotoQuery, Rating,
+    CatalogStore, ColorLabel, FileSystem, Flag, FolderNode, ImportIssue, ImportReport, Photo,
+    PhotoId, PhotoQuery, Rating,
 };
 use serde::Serialize;
 
+use crate::capture::{self, MetadataJob};
 use crate::error::{CommandError, ErrorKind};
 use crate::scan::ScannedFileSystem;
 use crate::state::CatalogState;
@@ -95,6 +96,16 @@ fn sum_photo_counts(nodes: &[FolderNode]) -> u64 {
 /// The function scans `fs` first, with no lock (see [`crate::scan`]).
 /// Then it locks the catalog only for the database work.
 ///
+/// After the import, the function reads the metadata of each added file
+/// with no lock (see [`crate::capture`]), and then locks the catalog again
+/// to store the capture time and the image size of each photo.
+///
+/// A file whose metadata cannot be read or stored does not fail the
+/// import. The photo stays in the catalog with no capture time and size,
+/// and the problem is added to [`ImportReport::errors`]. A file with no
+/// EXIF data is not a problem: it gets no capture time, but it keeps its
+/// size if the file header gives it.
+///
 /// # Errors
 ///
 /// Returns [`ErrorKind::InvalidInput`] if `path` is not an absolute path,
@@ -115,8 +126,45 @@ pub fn import_folder(
     // Do not scan the file system if the import cannot be written.
     state.ensure_available()?;
     let scanned = ScannedFileSystem::scan(fs, root, recursive)?;
+    let mut report;
+    let mut jobs = Vec::new();
+    {
+        let mut store = state.lock()?;
+        report = store.import_folder(&scanned, root, recursive)?;
+        for &id in &report.added_ids {
+            match store.photo_path(id) {
+                Ok(Some(path)) => jobs.push(MetadataJob { id, path }),
+                Ok(None) => report.errors.push(ImportIssue {
+                    path: root.to_path_buf(),
+                    message: format!("photo {id} has no file path"),
+                }),
+                Err(error) => report.errors.push(ImportIssue {
+                    path: root.to_path_buf(),
+                    message: format!("cannot get the path of photo {id}: {error}"),
+                }),
+            }
+        }
+    } // The lock ends here: file reads must not block the catalog.
+
+    let outcomes = capture::read_image_infos(&jobs)?;
+    if outcomes.is_empty() {
+        return Ok(report);
+    }
     let mut store = state.lock()?;
-    Ok(store.import_folder(&scanned, root, recursive)?)
+    for outcome in outcomes {
+        let result = outcome.info.and_then(|info| {
+            store
+                .set_image_info(outcome.id, info)
+                .map_err(|e| e.to_string())
+        });
+        if let Err(message) = result {
+            report.errors.push(ImportIssue {
+                path: outcome.path,
+                message,
+            });
+        }
+    }
+    Ok(report)
 }
 
 /// Returns the folder tree, with the direct photo count of each folder.
@@ -313,6 +361,70 @@ mod tests {
         let second = import_folder(&state, &fs, "/photos", true).unwrap();
         assert_eq!(second.added, 0);
         assert_eq!(second.skipped, 3);
+    }
+
+    /// A JPEG with EXIF: capture time 2023-07-14 21:05:33, size 32 x 16.
+    const EXIF_JPEG: &[u8] =
+        include_bytes!("../../../../crates/expose-raw/tests/fixtures/pillow_exif.jpg");
+
+    #[test]
+    fn import_stores_capture_time_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("exif.jpg"), EXIF_JPEG).unwrap();
+        std::fs::write(dir.path().join("plain.png"), capture::tiny_png()).unwrap();
+        std::fs::write(dir.path().join("broken.jpg"), b"not an image").unwrap();
+
+        let state = open_state();
+        let path = dir.path().to_str().unwrap();
+        let report = import_folder(&state, &expose_catalog::StdFileSystem, path, false).unwrap();
+        assert_eq!(report.added, 3);
+
+        let by_name = |name: &str| {
+            let id = report
+                .added_ids
+                .iter()
+                .copied()
+                .find(|&id| get_photo(&state, id).unwrap().file_name == name)
+                .unwrap();
+            get_photo(&state, id).unwrap()
+        };
+        let exif = by_name("exif.jpg");
+        assert_eq!(exif.capture_time_ms, Some(1_689_368_733_000));
+        assert_eq!((exif.width, exif.height), (Some(32), Some(16)));
+
+        // No EXIF is normal: no capture time, but the size is known.
+        let plain = by_name("plain.png");
+        assert_eq!(plain.capture_time_ms, None);
+        assert_eq!((plain.width, plain.height), (Some(1), Some(1)));
+
+        // A corrupt file stays in the catalog and is reported.
+        let broken = by_name("broken.jpg");
+        assert_eq!(broken.capture_time_ms, None);
+        assert_eq!((broken.width, broken.height), (None, None));
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert_eq!(report.errors[0].path, dir.path().join("broken.jpg"));
+        assert!(report.errors[0].message.contains("metadata"));
+    }
+
+    #[test]
+    fn import_of_missing_files_reports_errors_but_succeeds() {
+        // The in-memory file system has no real files to read.
+        let (state, ids) = imported_state();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(get_photo(&state, ids[0]).unwrap().capture_time_ms, None);
+    }
+
+    #[test]
+    fn import_does_not_read_known_files_again() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("exif.jpg"), EXIF_JPEG).unwrap();
+        let state = open_state();
+        let path = dir.path().to_str().unwrap();
+        let fs = expose_catalog::StdFileSystem;
+        import_folder(&state, &fs, path, false).unwrap();
+        let second = import_folder(&state, &fs, path, false).unwrap();
+        assert_eq!(second.added, 0);
+        assert!(second.errors.is_empty());
     }
 
     #[test]
