@@ -210,6 +210,17 @@ impl DisplayEncoder {
         Ok(self.output.read_rgba8(ctx).await?)
     }
 
+    /// Reads the encoded frame into `dst` (exactly `width * height * 4`
+    /// bytes), for example after a header in one transport buffer.
+    ///
+    /// # Errors
+    ///
+    /// [`expose_gpu::GpuError::DataLength`] (as a develop error) for a
+    /// wrong `dst` length, and GPU read-back errors.
+    pub async fn read_into(&self, ctx: &GpuContext, dst: &mut [u8]) -> DevelopResult<()> {
+        Ok(self.output.read_rgba8_into(ctx, dst).await?)
+    }
+
     /// Runs [`Self::encode`] and then [`Self::read`].
     ///
     /// # Errors

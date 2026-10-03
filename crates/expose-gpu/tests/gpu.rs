@@ -352,6 +352,22 @@ fn rgba8_access_on_float_image_fails() {
             .await
             .expect_err("float image must fail");
         assert!(matches!(error, GpuError::FormatMismatch { .. }), "{error}");
+
+        let bytes = GpuImage::new(&ctx, 4, 4, ImageFormat::Rgba8Unorm)
+            .await
+            .expect("image");
+        let mut short = [0_u8; 63];
+        let error = bytes
+            .read_rgba8_into(&ctx, &mut short)
+            .await
+            .expect_err("short buffer must fail");
+        assert!(matches!(error, GpuError::DataLength { .. }), "{error}");
+        let mut exact = [1_u8; 64];
+        bytes
+            .read_rgba8_into(&ctx, &mut exact)
+            .await
+            .expect("exact buffer");
+        assert_eq!(exact, [0_u8; 64]);
     });
 }
 

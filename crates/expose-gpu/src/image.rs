@@ -333,14 +333,29 @@ impl GpuImage {
     /// [`GpuError::FormatMismatch`] when the image is not `Rgba8Unorm`, and
     /// the read-back errors of [`Self::read_rgba_f32`].
     pub async fn read_rgba8(&self, ctx: &GpuContext) -> Result<Vec<u8>, GpuError> {
-        self.require_format(ImageFormat::Rgba8Unorm)?;
         let mut output = vec![0_u8; self.sample_count()];
+        self.read_rgba8_into(ctx, &mut output).await?;
+        Ok(output)
+    }
+
+    /// Reads all pixels of an [`ImageFormat::Rgba8Unorm`] image into `dst`,
+    /// as [`Self::read_rgba8`] does. Use this to put the pixels after a
+    /// header in one buffer, with no extra copy.
+    ///
+    /// # Errors
+    ///
+    /// - [`GpuError::FormatMismatch`] when the image is not `Rgba8Unorm`.
+    /// - [`GpuError::DataLength`] when `dst.len()` is not
+    ///   `width * height * 4`.
+    /// - The read-back errors of [`Self::read_rgba_f32`].
+    pub async fn read_rgba8_into(&self, ctx: &GpuContext, dst: &mut [u8]) -> Result<(), GpuError> {
+        self.require_format(ImageFormat::Rgba8Unorm)?;
+        check_length(self.width, self.height, dst.len())?;
         let row_bytes = self.width as usize * CHANNELS;
         self.read_strips(ctx, |rows, unpad| {
-            unpad(&mut output[rows.start as usize * row_bytes..rows.end as usize * row_bytes]);
+            unpad(&mut dst[rows.start as usize * row_bytes..rows.end as usize * row_bytes]);
         })
-        .await?;
-        Ok(output)
+        .await
     }
 
     /// Copies the texture to a staging buffer in strips of rows, and calls
