@@ -7,6 +7,8 @@
 //!
 //! # Modules
 //!
+//! - [`buffer`]: the working image (linear Rec. 2020 RGBA `f32`), 8-bit and
+//!   16-bit I/O images, rectangles, and conversion between them.
 //! - [`color`]: matrices, primaries, white points, transfer functions, and
 //!   color spaces.
 //! - [`error`]: the [`CoreError`] type.
@@ -19,6 +21,7 @@
 //!   traits for platform services, so that a WebAssembly build can supply
 //!   its own implementation.
 
+pub mod buffer;
 pub mod color;
 pub mod error;
 

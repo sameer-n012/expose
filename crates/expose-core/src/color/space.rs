@@ -187,6 +187,12 @@ impl ColorSpaceId {
     }
 }
 
+impl From<ColorSpaceId> for ColorSpace {
+    fn from(id: ColorSpaceId) -> Self {
+        id.definition()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
