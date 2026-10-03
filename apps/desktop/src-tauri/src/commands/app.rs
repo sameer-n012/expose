@@ -1,8 +1,4 @@
-//! Tauri commands that the UI can call with `invoke`.
-//!
-//! Commands are in this module and not at the crate root. A `pub` command at
-//! the crate root makes the `#[tauri::command]` macro define its helper
-//! macros two times, and the crate does not compile.
+//! Application information commands.
 
 /// Returns the version of the application.
 ///
