@@ -17,6 +17,7 @@ Work tracker for Expose. `FEATURES.md` is the master feature list. This file tra
 - [ ] **capture-time** — read capture time and size at import (`set_image_info`). Needs raw-decode.
 - [ ] **gpu-core-types** — accept `expose-core::WorkingImage` at the `expose-gpu` API boundary.
 - [ ] **wasm-check** — `expose-core` must compile for `wasm32-unknown-unknown`. The target is not installed (operator).
+- [ ] **lgpl-relink** — before the first public release, make the distributed build let users relink with a modified `rawler` (ADR 0004).
 - [ ] **catalog-paths** — case-insensitive path comparison on macOS; Windows paths in tests.
 - [ ] **gpu-perf** — parameter buffer pool, double-buffered read-back, render graph.
 
