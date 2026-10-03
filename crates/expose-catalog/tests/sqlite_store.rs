@@ -657,3 +657,100 @@ fn photo_serializes_to_camel_case_json() {
     let back: expose_catalog::Photo = serde_json::from_value(value).unwrap();
     assert_eq!(back, photo);
 }
+
+// --- Batch image info ---
+
+fn info(t: i64, w: u32, h: u32) -> ImageInfo {
+    ImageInfo {
+        capture_time_ms: Some(t),
+        width: Some(w),
+        height: Some(h),
+    }
+}
+
+#[test]
+fn batch_info_writes_all_rows() {
+    let mut store = store();
+    let (_, ids) = folder_with_photos(&mut store, &["a.jpg", "b.jpg", "c.jpg"]);
+    let items: Vec<_> = ids
+        .iter()
+        .zip(1_u32..)
+        .map(|(&id, n)| (id, info(i64::from(n) * 10, 100 + n, 200)))
+        .collect();
+    let outcome = store.set_image_infos(&items).unwrap();
+    assert_eq!(outcome.written, 3);
+    assert!(outcome.unknown.is_empty());
+    for (id, expected) in items {
+        let p = store.get_photo(id).unwrap().unwrap();
+        assert_eq!(
+            (p.capture_time_ms, p.width, p.height),
+            (expected.capture_time_ms, expected.width, expected.height)
+        );
+    }
+}
+
+#[test]
+fn batch_info_reports_unknown_ids_and_writes_others() {
+    let mut store = store();
+    let (_, ids) = folder_with_photos(&mut store, &["a.jpg", "b.jpg"]);
+    let missing = PhotoId(999_999);
+    let outcome = store
+        .set_image_infos(&[
+            (ids[0], info(1, 10, 10)),
+            (missing, info(2, 20, 20)),
+            (ids[1], info(3, 30, 30)),
+        ])
+        .unwrap();
+    assert_eq!(outcome.written, 2);
+    assert_eq!(outcome.unknown, [missing]);
+    assert_eq!(store.get_photo(ids[1]).unwrap().unwrap().width, Some(30));
+}
+
+#[test]
+fn batch_info_rolls_back_on_error() {
+    let mut store = store();
+    let (_, ids) = folder_with_photos(&mut store, &["a.jpg", "b.jpg"]);
+    let bad = ImageInfo {
+        height: Some(0),
+        ..info(2, 20, 20)
+    };
+    let result = store.set_image_infos(&[(ids[0], info(1, 10, 10)), (ids[1], bad)]);
+    assert!(matches!(
+        result,
+        Err(CatalogError::ZeroDimension { field: "height" })
+    ));
+    // The first row is not written.
+    assert_eq!(store.get_photo(ids[0]).unwrap().unwrap().width, None);
+}
+
+#[test]
+fn batch_info_empty_input_is_a_no_op() {
+    let mut store = store();
+    let outcome = store.set_image_infos(&[]).unwrap();
+    assert_eq!(outcome, expose_catalog::BatchInfoOutcome::default());
+}
+
+#[test]
+#[ignore = "timing test; run with --ignored --nocapture"]
+fn batch_info_timing_50000_rows() {
+    // A file database, because commits cost more than in memory.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = SqliteStore::open(&dir.path().join("catalog.db")).unwrap();
+    let names: Vec<String> = (0..50_000).map(|i| format!("{i}.jpg")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (_, ids) = folder_with_photos(&mut store, &refs);
+    let items: Vec<_> = ids.iter().map(|&id| (id, info(5, 6000, 4000))).collect();
+
+    let start = Instant::now();
+    let outcome = store.set_image_infos(&items).unwrap();
+    let batch = start.elapsed();
+    assert_eq!(outcome.written, 50_000);
+
+    let start = Instant::now();
+    for &(id, i) in &items {
+        store.set_image_info(id, i).unwrap();
+    }
+    let looped = start.elapsed();
+    println!("batch: {batch:?}, loop: {looped:?}");
+    assert!(batch < looped);
+}

@@ -65,8 +65,8 @@ pub use import::{
     ImportIssue, ImportReport, SUPPORTED_EXTENSIONS, import_folder, is_supported_file,
 };
 pub use model::{
-    AddOutcome, ColorLabel, DevelopSettings, Flag, Folder, FolderId, FolderNode, ImageInfo,
-    InvalidRating, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
+    AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, Flag, Folder, FolderId, FolderNode,
+    ImageInfo, InvalidRating, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
 };
 pub use paths::{build_folder_tree, folder_name, normalize_folder_path};
 pub use platform::{
