@@ -22,6 +22,7 @@
 
 use expose_core::color::{TransferFunction, luminance};
 use expose_core::develop::{CurvePoint, MAX_CURVE_POINTS};
+use expose_core::math::MonotoneSpline;
 
 use crate::error::{EditorError, EditorResult, check_range};
 
@@ -269,10 +270,8 @@ fn validate_curve(channel: &'static str, points: &[CurvePoint]) -> EditorResult<
 /// output is clamped to `0..=1`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonotoneCubic {
-    xs: Vec<f32>,
-    ys: Vec<f32>,
-    /// Tangent at each point.
-    ms: Vec<f32>,
+    spline: MonotoneSpline,
+    identity: bool,
 }
 
 impl MonotoneCubic {
@@ -280,81 +279,32 @@ impl MonotoneCubic {
     /// more points, finite, `x` strictly increasing).
     pub fn new(points: &[CurvePoint]) -> EditorResult<Self> {
         validate_curve("curve", points)?;
-        let xs: Vec<f32> = points.iter().map(|p| p.x).collect();
-        let ys: Vec<f32> = points.iter().map(|p| p.y).collect();
-        let n = xs.len();
-        // Secant slopes. The validation proved x is strictly increasing, so
-        // each width is more than 0.
-        let d: Vec<f32> = (0..n - 1)
-            .map(|k| (ys[k + 1] - ys[k]) / (xs[k + 1] - xs[k]))
-            .collect();
-        let mut ms = vec![0.0_f32; n];
-        ms[0] = d[0];
-        ms[n - 1] = d[n - 2];
-        for k in 1..n - 1 {
-            ms[k] = if d[k - 1] * d[k] <= 0.0 {
-                0.0
-            } else {
-                f32::midpoint(d[k - 1], d[k])
-            };
-        }
-        // Limit the tangents so that each segment is monotone.
-        for k in 0..n - 1 {
-            if d[k] == 0.0 {
-                ms[k] = 0.0;
-                ms[k + 1] = 0.0;
-                continue;
-            }
-            let a = ms[k] / d[k];
-            let b = ms[k + 1] / d[k];
-            let s = a * a + b * b;
-            if s > 9.0 {
-                let tau = 3.0 / s.sqrt();
-                ms[k] = tau * a * d[k];
-                ms[k + 1] = tau * b * d[k];
-            }
-        }
-        Ok(Self { xs, ys, ms })
+        // Exact comparison is intended: only the exact default curve is
+        // skipped. A near-identity curve is evaluated normally.
+        #[allow(clippy::float_cmp)]
+        let identity = points.len() == 2
+            && points[0].x == 0.0
+            && points[0].y == 0.0
+            && points[1].x == 1.0
+            && points[1].y == 1.0;
+        let spline = MonotoneSpline::new(points).ok_or(EditorError::InvalidCurve {
+            channel: "curve",
+            reason: "a curve needs at least 2 points",
+        })?;
+        Ok(Self { spline, identity })
     }
 
     /// Returns `true` if the spline is the identity line from (0, 0) to (1, 1).
-    // Exact comparison is intended: only the exact default curve is
-    // skipped. A near-identity curve is evaluated normally.
-    #[allow(clippy::float_cmp)]
     fn is_identity(&self) -> bool {
-        self.xs.len() == 2
-            && self.xs[0] == 0.0
-            && self.ys[0] == 0.0
-            && self.xs[1] == 1.0
-            && self.ys[1] == 1.0
+        self.identity
     }
 
-    /// Evaluates the spline at `x`.
+    /// Evaluates the spline at `x`. The output is clamped to `0..=1`.
     pub fn eval(&self, x: f32) -> f32 {
-        let n = self.xs.len();
-        // `new` proved n >= 2.
-        if x <= self.xs[0] {
-            return self.ys[0];
-        }
-        if x >= self.xs[n - 1] {
-            return self.ys[n - 1];
-        }
-        // The first index with xs[i] > x is in 1..n, because
-        // xs[0] < x < xs[n - 1].
-        let i = self.xs.partition_point(|&xi| xi <= x);
-        let k = i - 1;
-        let h = self.xs[k + 1] - self.xs[k];
-        let t = (x - self.xs[k]) / h;
-        let t2 = t * t;
-        let t3 = t2 * t;
-        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-        let h10 = t3 - 2.0 * t2 + t;
-        let h01 = -2.0 * t3 + 3.0 * t2;
-        let h11 = t3 - t2;
-        let y = h00 * self.ys[k]
-            + h10 * h * self.ms[k]
-            + h01 * self.ys[k + 1]
-            + h11 * h * self.ms[k + 1];
+        // The clamp below keeps the value in 0..=1, so the cast loses
+        // only precision.
+        #[allow(clippy::cast_possible_truncation)]
+        let y = self.spline.eval(f64::from(x)) as f32;
         y.clamp(0.0, 1.0)
     }
 }
