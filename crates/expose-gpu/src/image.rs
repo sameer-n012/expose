@@ -34,17 +34,27 @@ pub enum ImageFormat {
     /// even). Values above 65504 become infinity. Read-back converts to
     /// `f32` without loss.
     Rgba16Float,
+    /// 4 x 8-bit unsigned normalized (`0..=255` maps to `0.0..=1.0`). For
+    /// display-encoded frames. 4 bytes per pixel.
+    ///
+    /// Kernels write `f32` values; the GPU clips them to `0.0..=1.0` and
+    /// converts them to 8 bits. To get an exact code `c`, write `c / 255`.
+    /// [`GpuImage::read_rgba8`] reads the bytes without conversion.
+    /// `f32` upload clips to `0.0..=1.0` and rounds to the nearest code;
+    /// `f32` read-back gives `code / 255`.
+    Rgba8Unorm,
 }
 
 impl ImageFormat {
     /// All formats, in a fixed order.
-    pub const ALL: [Self; 2] = [Self::Rgba32Float, Self::Rgba16Float];
+    pub const ALL: [Self; 3] = [Self::Rgba32Float, Self::Rgba16Float, Self::Rgba8Unorm];
 
     /// Index of this format in [`Self::ALL`].
     pub(crate) const fn index(self) -> usize {
         match self {
             Self::Rgba32Float => 0,
             Self::Rgba16Float => 1,
+            Self::Rgba8Unorm => 2,
         }
     }
 
@@ -53,6 +63,7 @@ impl ImageFormat {
         match self {
             Self::Rgba32Float => 16,
             Self::Rgba16Float => 8,
+            Self::Rgba8Unorm => 4,
         }
     }
 
@@ -61,6 +72,7 @@ impl ImageFormat {
         match self {
             Self::Rgba32Float => "rgba32float",
             Self::Rgba16Float => "rgba16float",
+            Self::Rgba8Unorm => "rgba8unorm",
         }
     }
 
@@ -68,8 +80,19 @@ impl ImageFormat {
         match self {
             Self::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
             Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+            Self::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
         }
     }
+}
+
+/// Converts a unit value to an 8-bit code: clip to `0.0..=1.0` (NaN gives
+/// 0), scale to 255, and round to the nearest code.
+fn unit_to_u8(v: f32) -> u8 {
+    let clipped = if v > 0.0 { v.min(1.0) } else { 0.0 };
+    // `clipped * 255.0` is in `0.0..=255.0`, so the cast cannot truncate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let code = (clipped * 255.0).round() as u8;
+    code
 }
 
 /// Gives each image a unique ID, so that kernels can detect when the same
@@ -188,10 +211,9 @@ impl GpuImage {
     pub async fn write_rgba_f32(&self, ctx: &GpuContext, data: &[f32]) -> Result<(), GpuError> {
         check_length(self.width, self.height, data.len())?;
         let row_samples = self.width as usize * CHANNELS;
-        // `Queue::write_texture` has no 256-byte row alignment rule (only
-        // buffer-to-texture copies have it). Thus rows stay tightly packed.
         let bytes_per_row = self.width * self.format.bytes_per_pixel();
         let mut half_rows: Vec<f16> = Vec::new();
+        let mut byte_rows: Vec<u8> = Vec::new();
         scoped(&ctx.device, || {
             for rows in self.strips(u64::from(bytes_per_row)) {
                 let samples =
@@ -203,20 +225,67 @@ impl GpuImage {
                         half_rows.convert_from_f32_slice(samples);
                         bytemuck::cast_slice(&half_rows)
                     }
+                    ImageFormat::Rgba8Unorm => {
+                        byte_rows.clear();
+                        byte_rows.extend(samples.iter().map(|&v| unit_to_u8(v)));
+                        &byte_rows
+                    }
                 };
-                ctx.queue.write_texture(
-                    self.copy_info(rows.start),
-                    bytes,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: Some(rows.end - rows.start),
-                    },
-                    self.strip_extent(&rows),
-                );
+                self.write_strip(ctx, &rows, bytes, bytes_per_row);
             }
         })
         .await
+    }
+
+    /// Replaces all pixels of an [`ImageFormat::Rgba8Unorm`] image with
+    /// RGBA8 bytes (interleaved, row-major, no row padding).
+    ///
+    /// # Errors
+    ///
+    /// - [`GpuError::FormatMismatch`] when the image is not `Rgba8Unorm`.
+    /// - [`GpuError::DataLength`] when `data.len()` is not
+    ///   `width * height * 4`.
+    pub async fn write_rgba8(&self, ctx: &GpuContext, data: &[u8]) -> Result<(), GpuError> {
+        self.require_format(ImageFormat::Rgba8Unorm)?;
+        check_length(self.width, self.height, data.len())?;
+        let bytes_per_row = self.width * self.format.bytes_per_pixel();
+        let row_bytes = bytes_per_row as usize;
+        scoped(&ctx.device, || {
+            for rows in self.strips(u64::from(bytes_per_row)) {
+                let bytes = &data[rows.start as usize * row_bytes..rows.end as usize * row_bytes];
+                self.write_strip(ctx, &rows, bytes, bytes_per_row);
+            }
+        })
+        .await
+    }
+
+    /// Queues the upload of one strip of tightly packed rows.
+    fn write_strip(&self, ctx: &GpuContext, rows: &Range<u32>, bytes: &[u8], bytes_per_row: u32) {
+        // `Queue::write_texture` has no 256-byte row alignment rule (only
+        // buffer-to-texture copies have it). Thus rows stay tightly packed.
+        ctx.queue.write_texture(
+            self.copy_info(rows.start),
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(rows.end - rows.start),
+            },
+            self.strip_extent(rows),
+        );
+    }
+
+    /// Returns [`GpuError::FormatMismatch`] when the image format is not
+    /// `expected`.
+    fn require_format(&self, expected: ImageFormat) -> Result<(), GpuError> {
+        if self.format == expected {
+            Ok(())
+        } else {
+            Err(GpuError::FormatMismatch {
+                expected,
+                actual: self.format,
+            })
+        }
     }
 
     /// Reads all pixels back as RGBA `f32` data (interleaved, row-major, no
@@ -226,6 +295,79 @@ impl GpuImage {
     /// Each buffer row is padded to a multiple of 256 bytes, as WebGPU
     /// requires; this function removes the padding.
     pub async fn read_rgba_f32(&self, ctx: &GpuContext) -> Result<Vec<f32>, GpuError> {
+        let mut output = vec![0.0_f32; self.sample_count()];
+        let mut half_rows: Vec<f16> = Vec::new();
+        let row_samples = self.width as usize * CHANNELS;
+        let format = self.format;
+        self.read_strips(ctx, |rows, unpad| {
+            let first = rows.start as usize * row_samples;
+            let last = rows.end as usize * row_samples;
+            match format {
+                ImageFormat::Rgba32Float => {
+                    unpad(bytemuck::cast_slice_mut(&mut output[first..last]));
+                }
+                ImageFormat::Rgba16Float => {
+                    half_rows.resize(last - first, f16::ZERO);
+                    unpad(bytemuck::cast_slice_mut(&mut half_rows));
+                    half_rows.convert_to_f32_slice(&mut output[first..last]);
+                }
+                ImageFormat::Rgba8Unorm => {
+                    let mut bytes = vec![0_u8; last - first];
+                    unpad(&mut bytes);
+                    for (dst, &code) in output[first..last].iter_mut().zip(&bytes) {
+                        *dst = f32::from(code) / 255.0;
+                    }
+                }
+            }
+        })
+        .await?;
+        Ok(output)
+    }
+
+    /// Reads all pixels of an [`ImageFormat::Rgba8Unorm`] image as RGBA8
+    /// bytes (interleaved, row-major, no row padding). The bytes are the
+    /// texel codes, with no conversion.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError::FormatMismatch`] when the image is not `Rgba8Unorm`, and
+    /// the read-back errors of [`Self::read_rgba_f32`].
+    pub async fn read_rgba8(&self, ctx: &GpuContext) -> Result<Vec<u8>, GpuError> {
+        let mut output = vec![0_u8; self.sample_count()];
+        self.read_rgba8_into(ctx, &mut output).await?;
+        Ok(output)
+    }
+
+    /// Reads all pixels of an [`ImageFormat::Rgba8Unorm`] image into `dst`,
+    /// as [`Self::read_rgba8`] does. Use this to put the pixels after a
+    /// header in one buffer, with no extra copy.
+    ///
+    /// # Errors
+    ///
+    /// - [`GpuError::FormatMismatch`] when the image is not `Rgba8Unorm`.
+    /// - [`GpuError::DataLength`] when `dst.len()` is not
+    ///   `width * height * 4`.
+    /// - The read-back errors of [`Self::read_rgba_f32`].
+    pub async fn read_rgba8_into(&self, ctx: &GpuContext, dst: &mut [u8]) -> Result<(), GpuError> {
+        self.require_format(ImageFormat::Rgba8Unorm)?;
+        check_length(self.width, self.height, dst.len())?;
+        let row_bytes = self.width as usize * CHANNELS;
+        self.read_strips(ctx, |rows, unpad| {
+            unpad(&mut dst[rows.start as usize * row_bytes..rows.end as usize * row_bytes]);
+        })
+        .await
+    }
+
+    /// Copies the texture to a staging buffer in strips of rows, and calls
+    /// `sink` once for each strip (top to bottom). `sink` gets the rows of
+    /// the strip and a function that copies the strip, without the row
+    /// padding, into a byte slice of exactly
+    /// `rows * width * bytes_per_pixel` bytes.
+    async fn read_strips(
+        &self,
+        ctx: &GpuContext,
+        mut sink: impl FnMut(Range<u32>, &mut dyn FnMut(&mut [u8])),
+    ) -> Result<(), GpuError> {
         // The width is at most the device limit (16384 or less on current
         // hardware), so `width * 16` rounded up to 256 fits in `u32`.
         let unpadded_u32 = self.width * self.format.bytes_per_pixel();
@@ -249,9 +391,6 @@ impl GpuImage {
         })
         .await?;
 
-        let mut output = vec![0.0_f32; self.sample_count()];
-        let mut half_rows: Vec<f16> = Vec::new();
-        let row_samples = self.width as usize * CHANNELS;
         let unpadded = unpadded_u32 as usize;
         let padded = padded_u32 as usize;
 
@@ -284,24 +423,11 @@ impl GpuImage {
                 let mapped = staging
                     .get_mapped_range(0..strip_bytes)
                     .map_err(|error| GpuError::BufferMap(error.to_string()))?;
-                let first = rows.start as usize * row_samples;
-                let last = rows.end as usize * row_samples;
-                match self.format {
-                    ImageFormat::Rgba32Float => {
-                        let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut output[first..last]);
-                        unpad_rows(&mapped, dst, padded, unpadded);
-                    }
-                    ImageFormat::Rgba16Float => {
-                        half_rows.resize(last - first, f16::ZERO);
-                        let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut half_rows);
-                        unpad_rows(&mapped, dst, padded, unpadded);
-                        half_rows.convert_to_f32_slice(&mut output[first..last]);
-                    }
-                }
+                sink(rows, &mut |dst| unpad_rows(&mapped, dst, padded, unpadded));
             }
             staging.unmap();
         }
-        Ok(output)
+        Ok(())
     }
 
     /// Splits the rows into strips of at most [`STRIP_BYTES`] (at least one

@@ -2,7 +2,11 @@
 //! has no GPU adapter, so that CI without a GPU still passes.
 
 // Test helpers panic on failure, and test indices are small.
-#![allow(clippy::expect_used, clippy::cast_precision_loss)]
+#![allow(
+    clippy::expect_used,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 
 use expose_gpu::{GpuContext, GpuContextOptions, GpuError, GpuImage, ImageFormat, Kernel, kernels};
 
@@ -267,6 +271,103 @@ fn invalid_inputs_return_errors() {
             .await
             .expect_err("missing token must fail");
         assert!(matches!(error, GpuError::InvalidKernel { .. }), "{error}");
+    });
+}
+
+#[test]
+fn rgba8_bytes_round_trip_exactly() {
+    let Some(ctx) = context() else { return };
+    // Odd width: 37 * 4 = 148 bytes per row, padded to 256 on read-back.
+    let bytes: Vec<u8> = (0..WIDTH as usize * HEIGHT as usize * 4)
+        .map(|i| (i * 7 % 256) as u8)
+        .collect();
+    let back = pollster::block_on(async {
+        let image = GpuImage::new(&ctx, WIDTH, HEIGHT, ImageFormat::Rgba8Unorm).await?;
+        image.write_rgba8(&ctx, &bytes).await?;
+        image.read_rgba8(&ctx).await
+    })
+    .expect("round trip failed");
+    assert_eq!(back, bytes);
+}
+
+#[test]
+fn kernel_writes_exact_codes_to_rgba8() {
+    let Some(ctx) = context() else { return };
+    // Write `code / 255` for each code; the copy kernel must keep each code.
+    // Values outside 0..=1 must clip.
+    let mut pixels: Vec<f32> = (0..WIDTH as usize * HEIGHT as usize * 4)
+        .map(|i| (i % 256) as f32 / 255.0)
+        .collect();
+    pixels[0] = -0.5;
+    pixels[1] = 7.0;
+    let (codes, floats) = pollster::block_on(async {
+        let input =
+            GpuImage::from_rgba_f32(&ctx, WIDTH, HEIGHT, ImageFormat::Rgba32Float, &pixels).await?;
+        let output = GpuImage::new(&ctx, WIDTH, HEIGHT, ImageFormat::Rgba8Unorm).await?;
+        ctx.run_kernel(&kernels::COPY, &(), &input, &output).await?;
+        Ok::<_, GpuError>((
+            output.read_rgba8(&ctx).await?,
+            output.read_rgba_f32(&ctx).await?,
+        ))
+    })
+    .expect("kernel run failed");
+    assert_eq!(codes[0], 0);
+    assert_eq!(codes[1], 255);
+    for (i, &code) in codes.iter().enumerate().skip(2) {
+        assert_eq!(usize::from(code), i % 256, "sample {i}");
+        assert!((floats[i] - f32::from(code) / 255.0).abs() < 1e-7);
+    }
+}
+
+#[test]
+fn rgba8_f32_upload_rounds_and_clips() {
+    let Some(ctx) = context() else { return };
+    let mut pixels = vec![0.5_f32; 4 * 4];
+    pixels[0] = -1.0;
+    pixels[1] = 2.0;
+    pixels[2] = f32::NAN;
+    pixels[3] = 0.1;
+    let back = pollster::block_on(async {
+        let image = GpuImage::from_rgba_f32(&ctx, 4, 1, ImageFormat::Rgba8Unorm, &pixels).await?;
+        image.read_rgba8(&ctx).await
+    })
+    .expect("round trip failed");
+    assert_eq!(&back[..5], &[0, 255, 0, 26, 128]);
+}
+
+#[test]
+fn rgba8_access_on_float_image_fails() {
+    let Some(ctx) = context() else { return };
+    pollster::block_on(async {
+        let image = GpuImage::new(&ctx, 4, 4, ImageFormat::Rgba32Float)
+            .await
+            .expect("image");
+        let error = image
+            .read_rgba8(&ctx)
+            .await
+            .expect_err("float image must fail");
+        assert!(matches!(error, GpuError::FormatMismatch { .. }), "{error}");
+        let error = image
+            .write_rgba8(&ctx, &[0; 64])
+            .await
+            .expect_err("float image must fail");
+        assert!(matches!(error, GpuError::FormatMismatch { .. }), "{error}");
+
+        let bytes = GpuImage::new(&ctx, 4, 4, ImageFormat::Rgba8Unorm)
+            .await
+            .expect("image");
+        let mut short = [0_u8; 63];
+        let error = bytes
+            .read_rgba8_into(&ctx, &mut short)
+            .await
+            .expect_err("short buffer must fail");
+        assert!(matches!(error, GpuError::DataLength { .. }), "{error}");
+        let mut exact = [1_u8; 64];
+        bytes
+            .read_rgba8_into(&ctx, &mut exact)
+            .await
+            .expect("exact buffer");
+        assert_eq!(exact, [0_u8; 64]);
     });
 }
 

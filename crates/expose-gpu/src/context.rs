@@ -70,9 +70,9 @@ pub struct GpuLimits {
 /// The context requests **no optional wgpu features**. All texture usages
 /// that this crate needs are guaranteed by the WebGPU core specification:
 ///
-/// - `rgba32float` and `rgba16float`: sampled texture with an *unfilterable*
-///   float sample type, write-only storage texture, copy source, and copy
-///   destination.
+/// - `rgba32float`, `rgba16float`, and `rgba8unorm`: sampled texture with an
+///   *unfilterable* float sample type, write-only storage texture, copy
+///   source, and copy destination.
 /// - Kernels read pixels with `textureLoad`, not with a sampler. Thus
 ///   `rgba32float` does not need to be filterable (the optional
 ///   `float32-filterable` feature is not requested).

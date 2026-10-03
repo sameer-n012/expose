@@ -8,9 +8,11 @@
 //! # Main types
 //!
 //! - [`GpuContext`]: a headless device and queue, with a pipeline cache.
-//! - [`GpuImage`]: a 2D RGBA float texture ([`ImageFormat::Rgba32Float`] or
-//!   [`ImageFormat::Rgba16Float`]) with upload from `&[f32]` and read-back
-//!   to `Vec<f32>`.
+//! - [`GpuImage`]: a 2D RGBA texture ([`ImageFormat::Rgba32Float`],
+//!   [`ImageFormat::Rgba16Float`], or [`ImageFormat::Rgba8Unorm`]) with
+//!   upload from `&[f32]` and read-back to `Vec<f32>`. `Rgba8Unorm` images
+//!   also have byte upload and read-back ([`GpuImage::write_rgba8`],
+//!   [`GpuImage::read_rgba8`]), for display-encoded frames.
 //! - [`Kernel`] and [`GpuContext::run_kernel`]: run a WGSL compute shader
 //!   from one input image to one output image, with a parameter block.
 //! - [`kernels`]: the built-in kernels.

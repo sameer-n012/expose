@@ -135,9 +135,11 @@ pub fn status_of(error: &ThumbnailError) -> StatusCode {
         ThumbnailError::Catalog(e) => match e.kind {
             ErrorKind::NotFound => StatusCode::NOT_FOUND,
             ErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            ErrorKind::InvalidInput | ErrorKind::Database | ErrorKind::Io | ErrorKind::Internal => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ErrorKind::InvalidInput
+            | ErrorKind::Database
+            | ErrorKind::Io
+            | ErrorKind::Superseded
+            | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         },
         ThumbnailError::Io { .. }
         | ThumbnailError::Decode(_)

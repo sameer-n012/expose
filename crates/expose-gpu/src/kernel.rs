@@ -13,7 +13,8 @@
 //!
 //! - Read the input with `textureLoad` (the input is not filterable).
 //! - The text `OUTPUT_FORMAT` is replaced with the WGSL texel format of the
-//!   output image (`rgba32float` or `rgba16float`) when the pipeline is built.
+//!   output image (`rgba32float`, `rgba16float`, or `rgba8unorm`) when the
+//!   pipeline is built.
 //! - The workgroup size must be [`WORKGROUP_SIZE`] x [`WORKGROUP_SIZE`] x 1.
 //!   The dispatch covers the image with whole workgroups, so the shader must
 //!   ignore invocations outside the image.

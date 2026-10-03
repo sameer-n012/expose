@@ -16,6 +16,10 @@
 //! - [`thumbnails`]: the thumbnail cache and its worker pool.
 //! - [`thumbnail_protocol`]: the `thumb` URI scheme that serves the
 //!   thumbnails to the UI.
+//! - [`preview`]: the develop preview engine (GPU render thread) and the
+//!   binary frame format.
+//! - [`preview_protocol`]: the `preview` URI scheme, the alternative frame
+//!   transport (used by the transport benchmark).
 //! - [`commands`]: the `#[tauri::command]` wrappers.
 //! - [`error`]: the error type that the UI receives.
 //!
@@ -28,6 +32,8 @@
 pub mod capture;
 pub mod commands;
 pub mod error;
+pub mod preview;
+pub mod preview_protocol;
 pub mod scan;
 pub mod service;
 pub mod state;
@@ -36,6 +42,7 @@ pub mod thumbnails;
 
 use tauri::Manager;
 
+use crate::preview::PreviewEngine;
 use crate::state::CatalogState;
 use crate::thumbnails::{THUMB_DIR_NAME, ThumbnailService, default_workers};
 
@@ -80,11 +87,26 @@ pub fn run() -> tauri::Result<()> {
                     "cannot find the application cache directory; no thumbnails"
                 ),
             }
+            // The engine thread starts now; the GPU context is made at the
+            // first preview open. Without the engine, the preview commands
+            // return an internal error and the scheme answers 503.
+            match PreviewEngine::start() {
+                Ok(engine) => {
+                    app.manage(engine);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "cannot start the preview render thread");
+                }
+            }
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol(
             thumbnail_protocol::SCHEME,
             thumbnail_protocol::handle,
+        )
+        .register_asynchronous_uri_scheme_protocol(
+            preview_protocol::SCHEME,
+            preview_protocol::handle,
         )
         .invoke_handler(tauri::generate_handler![
             commands::app::app_version,
@@ -97,6 +119,11 @@ pub fn run() -> tauri::Result<()> {
             commands::catalog::set_flag,
             commands::catalog::set_color_label,
             commands::dialog::pick_folder,
+            commands::preview::preview_open,
+            commands::preview::preview_open_test_pattern,
+            commands::preview::preview_render,
+            commands::preview::preview_close,
+            commands::preview::preview_bench_channel,
         ])
         .run(tauri::generate_context!())
 }

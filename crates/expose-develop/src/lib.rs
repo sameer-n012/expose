@@ -78,6 +78,7 @@ pub mod auto_tone;
     reason = "spline math uses the usual one-letter names"
 )]
 pub mod curve;
+mod display;
 mod error;
 mod gpu;
 mod pipeline;
@@ -95,6 +96,7 @@ pub mod tone;
 pub mod white_balance;
 
 pub use auto_tone::{LuminanceHistogram, auto_tone};
+pub use display::{DISPLAY_ENCODE_KERNEL, DisplayEncoder, DisplayParams, DisplaySpace};
 pub use error::{DevelopError, DevelopResult};
 pub use gpu::{DEVELOP_KERNEL, GpuParams};
 pub use pipeline::{Pipeline, Stage};

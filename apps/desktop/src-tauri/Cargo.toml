@@ -27,8 +27,16 @@ tauri-plugin-dialog = "2"
 expose-catalog.workspace = true
 # Image buffers, resize, and develop settings for thumbnails.
 expose-core.workspace = true
-# CPU develop pipeline for thumbnails of edited photos.
+# CPU develop pipeline for thumbnails of edited photos; GPU preview and
+# display encode for the develop view.
 expose-develop.workspace = true
+# GPU context for the develop preview (the preview engine owns it).
+expose-gpu.workspace = true
+# MIT OR Apache-2.0. Runs the `async` GPU API on the preview render thread.
+pollster = "0.4"
+# MIT. One-shot reply channels from the preview render thread to async
+# commands. Tauri already depends on tokio.
+tokio = { version = "1", default-features = false, features = ["sync"] }
 # Reads photo metadata at import. Enables `rawler` (LGPL-2.1) by default;
 # this is the approved exception (ADR 0004).
 expose-raw.workspace = true
