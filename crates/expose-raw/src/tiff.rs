@@ -1,7 +1,8 @@
 //! A small, bounds-checked TIFF directory (IFD) reader.
 //!
-//! This reader is only for format detection. It reads tag values of a few
-//! simple types. It never panics on bad input: each read is bounds-checked
+//! This reader is for format detection, and for the ICC profile of small
+//! TIFF files (see `standard.rs`). It reads tag values of a few simple
+//! types. It never panics on bad input: each read is bounds-checked
 //! and returns `None` when the data is not valid.
 
 /// Byte order of a TIFF file.
@@ -36,6 +37,8 @@ pub(crate) mod tag {
     pub const DNG_VERSION: u16 = 50706;
     /// DNG default crop size.
     pub const DEFAULT_CROP_SIZE: u16 = 50720;
+    /// Embedded ICC profile.
+    pub const ICC_PROFILE: u16 = 34675;
 }
 
 /// Photometric interpretation values of sensor data.
@@ -190,6 +193,18 @@ impl<'a> TiffReader<'a> {
                 }
             })
             .collect()
+    }
+
+    /// Returns the ICC profile (tag 34675, type BYTE or UNDEFINED) of the
+    /// first IFD, if present and inside the data.
+    pub fn icc_profile(&self) -> Option<&'a [u8]> {
+        let ifd = self.ifd(self.first_ifd)?;
+        let e = ifd.get(tag::ICC_PROFILE)?;
+        if e.typ != 1 && e.typ != 7 {
+            return None;
+        }
+        let (pos, _) = self.value_pos(e)?;
+        self.bytes(pos, usize::try_from(e.count).ok()?)
     }
 
     /// Returns the first integer value of `e`.
