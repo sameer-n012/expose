@@ -11,6 +11,8 @@
 //! - [`service`]: the logic of the catalog commands, with no Tauri
 //!   dependency, so that tests can call it.
 //! - [`scan`]: the file system scan before an import.
+//! - [`capture`]: capture time and image size, read from file metadata
+//!   after an import.
 //! - [`commands`]: the `#[tauri::command]` wrappers.
 //! - [`error`]: the error type that the UI receives.
 //!
@@ -20,6 +22,7 @@
 //! - This crate can depend on all feature crates and on `expose-core`.
 //! - Keep pixel processing out of this crate. Put it in the feature crates.
 
+pub mod capture;
 pub mod commands;
 pub mod error;
 pub mod scan;

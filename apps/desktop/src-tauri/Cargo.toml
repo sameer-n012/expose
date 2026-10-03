@@ -25,6 +25,9 @@ tauri = { version = "2", features = [] }
 # Native folder picker for import (MIT OR Apache-2.0).
 tauri-plugin-dialog = "2"
 expose-catalog.workspace = true
+# Reads photo metadata at import. Enables `rawler` (LGPL-2.1) by default;
+# this is the approved exception (ADR 0004).
+expose-raw.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
