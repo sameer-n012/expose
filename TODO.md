@@ -4,14 +4,15 @@ Work tracker for Expose. `FEATURES.md` is the master feature list. This file tra
 
 ## In progress
 
-- [ ] **ui-shell** — `apps/desktop/ui`: main window layout, module switch (Library, Develop, Editor), keyboard shortcut registry, theme tokens.
 - [ ] **raw-decode** — `expose-raw`: standard formats (JPEG, PNG, TIFF, WebP) and RAW decode with `rawler` into the working format; EXIF read.
 - [ ] **develop-pipeline-v1** — `expose-develop`: exposure, white balance, contrast, highlights/shadows/whites/blacks, tone curve, on CPU (reference) and GPU.
 - [ ] **shell-catalog-commands** — `apps/desktop/src-tauri`: Tauri commands for the catalog (open, import folder, folder tree, list photos, ratings/flags/labels).
 
 ## Next
 
-- [ ] **frame-transport** — prototype how preview frames go from Rust to the UI, and measure the speed (risk from ADR 0001). Needs ui-shell.
+- [ ] **frame-transport** — prototype how preview frames go from Rust to the UI, and measure the speed (risk from ADR 0001). Starts after shell-catalog-commands merges (same paths).
+- [ ] **ui-catalog** — Library grid and folder tree in the UI, with the catalog commands. Needs shell-catalog-commands.
+- [ ] **ui-polish** — save panel layout between sessions; Tab shortcut conflicts with keyboard focus navigation; refresh shortcut tooltips after a remap.
 - [ ] **thumbnails** — `expose-catalog`: thumbnail and preview cache. Needs raw-decode.
 - [ ] **capture-time** — read capture time and size at import (`set_image_info`). Needs raw-decode.
 - [ ] **gpu-core-types** — accept `expose-core::WorkingImage` at the `expose-gpu` API boundary.
@@ -21,6 +22,7 @@ Work tracker for Expose. `FEATURES.md` is the master feature list. This file tra
 
 ## Done
 
+- [x] **ui-shell** (PR #4) — layout, module switching, shortcut registry, theme tokens, toasts.
 - [x] **core-foundation** (PR #2) — color math, image buffers, develop parameter types.
 - [x] **gpu-foundation** (PR #1) — wgpu context, float images, compute kernels (24 MP exposure round trip ~103–133 ms on M3 Pro).
 - [x] **catalog-foundation** (PR #3) — SQLite store, folder tree, ratings/flags/labels, import in place. ADR 0003 records the decisions.
