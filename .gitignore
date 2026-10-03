@@ -1,5 +1,6 @@
 CLAUDE.md
 scratch/
+.claude/worktrees/
 
 # Build output
 target/
