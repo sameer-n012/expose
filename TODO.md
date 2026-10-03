@@ -12,21 +12,23 @@ No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature i
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-2. [ ] **frame-transport** (O) — prototype how develop preview frames go from Rust to the UI (custom URI protocol with raw/encoded bytes vs. IPC binary vs. shared surface). Measure frames per second at 2560 px. Record the result as an ADR. Paths: `src-tauri` + `ui`. Runs after thumbnails (same paths).
-3. [ ] **develop-ui** (S after 2) — Develop module panel with sliders bound to `DevelopSettings`, live preview through the frame transport, settings saved to the catalog (`develop_settings` JSON, version from `DEVELOP_SETTINGS_VERSION`).
+1. [ ] **transport-measure** (operator) — run the webview benchmark (ADR 0008, "Open"): `npm --prefix apps/desktop/ui run tauri dev`, then `location.search = '?bench=transport'` in the developer console. This is also the first start of the app in a real webview (check thumbnails too).
+2. [ ] **develop-ui** (S) — Develop module panel with sliders bound to `DevelopSettings`, live preview through `PreviewCanvas` / `PreviewClient` (`ui/src/lib/develop/`, commands `preview_open`/`preview_render`/`preview_close`), settings saved to the catalog (`develop_settings` JSON, version from `DEVELOP_SETTINGS_VERSION`).
+3. [ ] **import-batch-info** (S) — see follow-ups. Same paths as develop-ui (`src-tauri`), so run it before or after.
 4. [ ] **export-v1** (S/O) — encode API is done (PR #11). Remaining: export dialog in the UI (format, quality, color space, size, destination, file naming), Tauri command that runs decode → develop → resize → `encode_path` on a worker, progress + errors. FEATURES 5.1 P1.
 6. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 
 ### Follow-ups from merged work
 
-- [ ] **core-additions** (S) — move shared code into `expose-core`: single-channel f32 image (editor masks), monotone cubic spline (develop + editor have copies), orientation transform and `Image<f32>` float I/O (raw has local copies), signed `Rect` helpers, public `Chromaticity::to_uv`, smooth tangent in `temperature_tint_to_chromaticity` near 4000 K.
+- [ ] **preview-followups** — render at the canvas display size instead of a fixed 2560 px (fewer bytes per frame); move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
+- [ ] **core-followups** (S) — `Rect::translated` is not used yet (editor `add_offset` works on tuples); the Planckian locus also has a piece boundary at 2222 K (y fit) with a small kink.
 - [ ] **gpu-api** (O) — kernels with different input/output size (GPU downsample), multiple inputs / storage buffers, parameter buffer reuse, double-buffered read-back, `WorkingImage` at the API boundary, render graph.
 - [ ] **raw-real-samples** (operator + S) — run `EXPOSE_RAW_SAMPLES=/path cargo test -p expose-raw -- --ignored real_samples --nocapture` on real camera files and fix what fails. Then: forward matrices, BaselineExposure, DNG black level origin check, multi-threaded/tiled demosaic.
 - [ ] **develop-tuning** — tune slider strengths and zone centers on real photos; local (edge-aware) tone zones; RAW white balance as camera-space gains.
 - [ ] **editor-storage** — sparse tiled layer storage; history memory budget; clipping masks; layer effects.
 - [ ] **ui-polish** (S) — save panel layout between sessions; Tab shortcut conflicts with keyboard focus navigation; refresh shortcut tooltips after a remap.
 - [ ] **ui-catalog-followups** (S) — search box is a placeholder; per-request version for optimistic rollback (two quick changes can restore an old value); folder count is direct-only, so it differs from the grid total with "include subfolders".
-- [ ] **catalog-batch-info** (S) — `CatalogStore::set_image_infos` in one transaction (large imports); in-memory import tests in `src-tauri` now get metadata errors for fake files.
+- [ ] **import-batch-info** (S, `src-tauri`) — call `CatalogStore::set_image_infos` (PR #14) from import in `src-tauri` instead of one `set_image_info` per photo; in-memory import tests in `src-tauri` get metadata errors for fake files.
 - [ ] **thumbnail-followups** — RAW with non-default white balance: give the pipeline the as-shot `SourceInfo` (from `DecodeInfo.raw.multipliers`), not `SourceInfo::RENDERED`; apply crop/straighten when a geometry stage exists; reduce memory (scaled JPEG decode, or decode to 8-bit, instead of a full-size f32 image); cache size limit and removal of thumbnails of deleted photos; check the `thumb` scheme, CSP, and 304 handling in a real webview.
 - [ ] **encode-followups** — copy EXIF/XMP/IPTC into exported files; gamut mapping instead of clipping; JPEG optimized Huffman tables, progressive mode, gray output; TIFF ICC tag type UNDEFINED instead of BYTE.
 - [ ] **catalog-paths** (S) — case-insensitive path comparison on macOS; Windows paths in tests.
@@ -39,6 +41,12 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **frame-transport** (PR #16) — GPU display encode to 8-bit sRGB/Display P3 (`expose_develop::display`), `Rgba8Unorm` in `expose-gpu`, preview engine (one render thread, ≤ 2 sessions, latest wins), commands `preview_open`/`preview_render`/`preview_close` (raw `ipc::Response`), `preview://` scheme, `PreviewClient` + `PreviewCanvas`, benchmark at `?bench=transport`. Rust side about 4.3 ms per 2560 px frame. ADR 0008.
+
+- [x] **core-additions** (PR #15) — `expose_core::math::MonotoneSpline` (shared by develop and editor), `buffer::GrayImage` (editor `MaskImage` wraps it), `buffer::Orientation` (moved from `expose-raw`, re-exported there; `apply` returns `CoreResult`), `Rect::intersection_signed`/`translated`, public `Chromaticity::to_uv`/`from_uv`, Planckian locus blended over 3800–4200 K (continuous tint direction). ADR 0008.
+
+- [x] **catalog-batch-info** (PR #14) — `CatalogStore::set_image_infos` → `BatchInfoOutcome { written, unknown }`; one SQLite transaction; unknown IDs skipped and reported; other errors roll back. 50 000 rows: 53 ms vs. 415 ms. ADR 0008.
 
 - [x] **to-image-speed** (PR #13) — exact encode lookup tables in `to_image` (`buffer/encode_lut.rs`); output identical to the old formula; 24 MP sRGB u8 437 → 66 ms, 24 MP JPEG export ~790 → ~200 ms. ADR 0007.
 
