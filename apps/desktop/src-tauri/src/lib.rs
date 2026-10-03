@@ -13,6 +13,9 @@
 //! - [`scan`]: the file system scan before an import.
 //! - [`capture`]: capture time and image size, read from file metadata
 //!   after an import.
+//! - [`thumbnails`]: the thumbnail cache and its worker pool.
+//! - [`thumbnail_protocol`]: the `thumb` URI scheme that serves the
+//!   thumbnails to the UI.
 //! - [`commands`]: the `#[tauri::command]` wrappers.
 //! - [`error`]: the error type that the UI receives.
 //!
@@ -28,10 +31,13 @@ pub mod error;
 pub mod scan;
 pub mod service;
 pub mod state;
+pub mod thumbnail_protocol;
+pub mod thumbnails;
 
 use tauri::Manager;
 
 use crate::state::CatalogState;
+use crate::thumbnails::{THUMB_DIR_NAME, ThumbnailService, default_workers};
 
 /// Starts the application and blocks until the application stops.
 ///
@@ -55,8 +61,31 @@ pub fn run() -> tauri::Result<()> {
                 ),
             };
             app.manage(state);
+            // Without a cache folder the library shows placeholders; the
+            // `thumb` scheme then answers 503.
+            match app.path().app_cache_dir() {
+                Ok(dir) => {
+                    match ThumbnailService::new(dir.join(THUMB_DIR_NAME), default_workers()) {
+                        Ok(service) => {
+                            tracing::info!(dir = %service.dir().display(), "thumbnail cache opened");
+                            app.manage(service);
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "the thumbnail cache is not available");
+                        }
+                    }
+                }
+                Err(error) => tracing::error!(
+                    %error,
+                    "cannot find the application cache directory; no thumbnails"
+                ),
+            }
             Ok(())
         })
+        .register_asynchronous_uri_scheme_protocol(
+            thumbnail_protocol::SCHEME,
+            thumbnail_protocol::handle,
+        )
         .invoke_handler(tauri::generate_handler![
             commands::app::app_version,
             commands::catalog::catalog_status,

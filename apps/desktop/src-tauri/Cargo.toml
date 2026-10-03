@@ -25,6 +25,10 @@ tauri = { version = "2", features = [] }
 # Native folder picker for import (MIT OR Apache-2.0).
 tauri-plugin-dialog = "2"
 expose-catalog.workspace = true
+# Image buffers, resize, and develop settings for thumbnails.
+expose-core.workspace = true
+# CPU develop pipeline for thumbnails of edited photos.
+expose-develop.workspace = true
 # Reads photo metadata at import. Enables `rawler` (LGPL-2.1) by default;
 # this is the approved exception (ADR 0004).
 expose-raw.workspace = true
