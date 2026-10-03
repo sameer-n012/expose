@@ -7,8 +7,31 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["native", "rawler"]
+# File system helpers (`decode_path`, `read_metadata_path`). Disable this
+# feature for WebAssembly builds.
+native = []
+# RAW decode backend `rawler`.
+#
+# LICENCE NOTE: `rawler` is LGPL-2.1. The operator approved it as an
+# exception to the permissive-licence rule, for `rawler` only. A distributed
+# application that includes this feature must let users relink it against a
+# modified `rawler` (for example, supply the object files or the source of
+# the application). Do not add LGPL code to other crates. Without this
+# feature, the crate uses only permissive code (built-in DNG backend).
+rawler = ["dep:rawler"]
+
 [dependencies]
 expose-core.workspace = true
+rawler = { version = "0.7", optional = true, default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp"] }
+kamadak-exif = "0.6"
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true
