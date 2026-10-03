@@ -10,6 +10,17 @@ publish.workspace = true
 # Rule: this is the only crate that may use wgpu directly.
 [dependencies]
 expose-core.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# MIT OR Apache-2.0. Version 30 has rust-version 1.87 (workspace MSRV is 1.88).
+wgpu = "30"
+# MIT OR Apache-2.0. Converts f32 <-> f16 for `Rgba16Float` textures.
+half = { version = "2", features = ["bytemuck"] }
+
+[dev-dependencies]
+# MIT OR Apache-2.0. Blocking executor for tests and examples only.
+pollster = "0.4"
 
 [lints]
 workspace = true
