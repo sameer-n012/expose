@@ -18,6 +18,28 @@ const MAX_PROFILE_LEN: usize = 16 * 1024 * 1024;
 /// older profiles. The candidate spaces differ by much more than this.
 const COLORANT_TOLERANCE: f64 = 0.01;
 
+/// Parameters `[g, a, b, c, d]` of the ICC `para` function type 3 for the
+/// sRGB curve: `Y = (aX + b)^g` for `X >= d`, else `Y = cX`.
+pub(crate) const SRGB_PARA: [f64; 5] = [2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.040_45];
+
+/// BT.2020 OETF constant alpha (the exact value for curve continuity).
+const REC2020_ALPHA: f64 = 1.099_296_826_809_44;
+/// BT.2020 OETF constant beta (end of the linear segment, linear side).
+const REC2020_BETA: f64 = 0.018_053_968_510_807;
+
+/// `para` type 3 parameters of the BT.2020 curve (inverse of the OETF).
+pub(crate) const REC2020_PARA: [f64; 5] = [
+    1.0 / 0.45,
+    1.0 / REC2020_ALPHA,
+    (REC2020_ALPHA - 1.0) / REC2020_ALPHA,
+    1.0 / 4.5,
+    4.5 * REC2020_BETA,
+];
+
+/// `para` type 3 parameters of the ROMM RGB curve: gamma 1.8, with a
+/// linear segment (slope 1/16) below the encoded value 16/512.
+pub(crate) const PROPHOTO_PARA: [f64; 5] = [1.8, 1.0, 0.0, 1.0 / 16.0, 16.0 / 512.0];
+
 /// The data color space of a profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProfileKind {
@@ -38,6 +60,10 @@ pub(crate) enum ToneCurve {
     Gamma(f32),
     /// The sRGB piecewise curve.
     Srgb,
+    /// The BT.2020 piecewise curve (inverse OETF).
+    Rec2020,
+    /// The ROMM RGB piecewise curve (gamma 1.8 with a linear segment).
+    ProPhoto,
     /// A curve that the parser cannot classify.
     Other,
 }
@@ -172,14 +198,17 @@ fn curve(d: &[u8], sig: [u8; 4]) -> Option<ToneCurve> {
                     Some(gamma_curve(g as f32))
                 }
                 3 if p.len() >= 5 => {
-                    // Y = (aX + b)^g for X >= d, else cX. Compare with sRGB.
-                    let srgb = [2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.040_45];
-                    let close = p.iter().zip(srgb).all(|(a, b)| (a - b).abs() < 2e-3);
-                    Some(if close {
-                        ToneCurve::Srgb
-                    } else {
-                        ToneCurve::Other
-                    })
+                    // Y = (aX + b)^g for X >= d, else cX. Compare with the
+                    // known piecewise curves.
+                    let known = [
+                        (ToneCurve::Srgb, SRGB_PARA),
+                        (ToneCurve::Rec2020, REC2020_PARA),
+                        (ToneCurve::ProPhoto, PROPHOTO_PARA),
+                    ];
+                    let found = known.into_iter().find(|(_, params)| {
+                        p.iter().zip(params).all(|(a, b)| (a - b).abs() < 2e-3)
+                    });
+                    Some(found.map_or(ToneCurve::Other, |(c, _)| c))
                 }
                 _ => Some(ToneCurve::Other),
             }

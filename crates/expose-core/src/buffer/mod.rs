@@ -5,6 +5,8 @@
 //! - [`Image`] (with the aliases [`Image8`] and [`Image16`]): integer
 //!   buffers for decode and encode, with a [`ChannelLayout`].
 //! - [`Rect`]: a pixel rectangle for tiles and crops.
+//! - [`resize`] and [`fit_size`]: high-quality resampling (Lanczos-3 in
+//!   linear light) and output size computation for export.
 //!
 //! Convert I/O images to the working format with [`Image::to_working`], and
 //! back with [`WorkingImage::to_image`].
@@ -12,10 +14,12 @@
 mod convert;
 mod io;
 mod rect;
+mod resample;
 mod working;
 
 pub use io::{ChannelLayout, Image, Image8, Image16, Sample};
 pub use rect::Rect;
+pub use resample::{AlphaMode, ResizeMode, fit_size, resize};
 pub use working::{Rgba, WORKING_CHANNELS, WorkingImage};
 
 use crate::error::{CoreError, CoreResult};

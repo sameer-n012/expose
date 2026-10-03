@@ -114,6 +114,8 @@ fn transfer_for(id: ColorSpaceId, curve: ToneCurve) -> Option<SourceTransfer> {
     match curve {
         ToneCurve::Linear => Some(SourceTransfer::Linear),
         ToneCurve::Srgb => Some(SourceTransfer::Srgb),
+        ToneCurve::Rec2020 => Some(SourceTransfer::Rec2020),
+        ToneCurve::ProPhoto => Some(SourceTransfer::ProPhoto),
         // ICC stores gamma as u8.8 fixed point: 2.2 is 563/256 (opRGB) and
         // 1.8 is 461/256. The ProPhoto curve has a short linear part near
         // black, and a gamma 1.8 profile is its usual approximation.
@@ -209,7 +211,16 @@ pub(crate) fn decode_standard(
     let mut decoder = reader.into_decoder()?;
     let (w, h) = decoder.dimensions();
     limits.check(u64::from(w), u64::from(h))?;
-    let icc = decoder.icc_profile()?;
+    let mut icc = decoder.icc_profile()?;
+    if icc.is_none() && format == ImageFormat::Tiff {
+        // The TIFF decoder of `image` limits tag data to a size derived
+        // from the pixel buffer size, so it does not return the profile of
+        // a small image (less than about 13 KB of pixels for a 0.5 KB
+        // profile). Read the tag with the local bounds-checked reader.
+        icc = crate::tiff::TiffReader::new(data, &[])
+            .and_then(|r| r.icc_profile())
+            .map(<[u8]>::to_vec);
+    }
     let img = DynamicImage::from_decoder(decoder)?;
 
     let float = matches!(
