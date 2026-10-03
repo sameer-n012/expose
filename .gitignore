@@ -1,6 +1,7 @@
 CLAUDE.md
 scratch/
 .claude/worktrees/
+.claude/agents/
 
 # Build output
 target/
