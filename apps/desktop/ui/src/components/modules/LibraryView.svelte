@@ -1,57 +1,62 @@
 <!--
-  Center view of the Library module (placeholder).
-  Grid view shows placeholder cells. A double-click on a cell opens the
-  loupe view (one large photo).
+  Center view of the Library module.
+
+  First it reads the catalog status. If the catalog is not available, the
+  view shows the error instead of the grid. Else it shows the toolbar and
+  the photo grid. A double-click on a cell opens the loupe view (one large
+  photo; a placeholder until the preview exists).
 -->
 <script lang="ts">
+  import { formatCaptureTime } from '../../lib/library/dateFormat';
+  import type { LibraryStore } from '../../lib/stores/library.svelte';
   import type { ModuleStore } from '../../lib/stores/modules.svelte';
+  import LibraryGrid from '../library/LibraryGrid.svelte';
+  import LibraryToolbar from '../library/LibraryToolbar.svelte';
 
   interface Props {
     modules: ModuleStore;
+    library: LibraryStore;
   }
 
-  let { modules }: Props = $props();
+  let { modules, library }: Props = $props();
 
-  const CELL_COUNT = 30;
-  const cells = Array.from({ length: CELL_COUNT }, (_, i) => i);
-  let filter = $state('');
-  let current = $state(0);
+  let loupeIndex = $state(0);
+  const loupePhoto = $derived(library.photoAt(loupeIndex));
+
+  $effect(() => {
+    void library.init();
+  });
 
   function openLoupe(index: number): void {
-    current = index;
+    loupeIndex = index;
     modules.libraryView = 'loupe';
   }
 </script>
 
 <div class="library">
-  <div class="filterbar">
-    <input
-      type="search"
-      class="filter"
-      placeholder="Search photos"
-      aria-label="Search photos"
-      bind:value={filter}
-    />
-    <span class="mode">{modules.libraryView === 'grid' ? 'Grid' : 'Loupe'}</span>
-  </div>
-
-  {#if modules.libraryView === 'grid'}
-    <div class="grid" data-testid="library-grid">
-      {#each cells as i (i)}
-        <button
-          type="button"
-          class="cell"
-          class:selected={i === current}
-          aria-label="Photo {i + 1}"
-          onclick={() => (current = i)}
-          ondblclick={() => openLoupe(i)}
-        ></button>
-      {/each}
+  {#if library.view.kind === 'loading'}
+    <p class="message" role="status">Loading the catalog…</p>
+  {:else if library.view.kind === 'unavailable'}
+    <div class="message error" role="alert" data-testid="catalog-unavailable">
+      <strong>The catalog is not available.</strong>
+      <span>{library.view.message}</span>
     </div>
   {:else}
-    <div class="loupe" data-testid="library-loupe">
-      <div class="photo">Photo {current + 1}</div>
-    </div>
+    <LibraryToolbar {library} mode={modules.libraryView === 'grid' ? 'Grid' : 'Loupe'} />
+    {#if modules.libraryView === 'grid'}
+      <LibraryGrid {library} onopen={openLoupe} />
+    {:else}
+      <div class="loupe" data-testid="library-loupe">
+        <div class="photo">
+          {#if loupePhoto === undefined}
+            No photo
+          {:else}
+            <div>{loupePhoto.fileName}</div>
+            <div class="date">{formatCaptureTime(loupePhoto.captureTimeMs)}</div>
+          {/if}
+        </div>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -61,56 +66,18 @@
     display: flex;
     flex-direction: column;
   }
-  .filterbar {
+  .message {
+    margin: auto;
     display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
     align-items: center;
-    gap: var(--space-4);
-    padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-bg-panel);
-  }
-  .filter {
-    width: 240px;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-bg-app);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius-sm);
-    color: var(--color-text);
-    font: inherit;
-    font-size: var(--font-size-sm);
-    user-select: text;
-    -webkit-user-select: text;
-  }
-  .filter::placeholder {
-    color: var(--color-text-faint);
-  }
-  .mode {
-    font-size: var(--font-size-sm);
+    max-width: 480px;
+    text-align: center;
     color: var(--color-text-muted);
   }
-  .grid {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: var(--space-3);
-    padding: var(--space-4);
-    align-content: start;
-  }
-  .cell {
-    aspect-ratio: 3 / 2;
-    background: var(--color-bg-placeholder);
-    border: 2px solid transparent;
-    border-radius: var(--radius-sm);
-    padding: 0;
-    cursor: pointer;
-  }
-  .cell:hover {
-    border-color: var(--color-border-strong);
-  }
-  .cell.selected {
-    border-color: var(--color-text-muted);
+  .message.error {
+    color: var(--color-danger);
   }
   .loupe {
     flex: 1;
@@ -122,8 +89,13 @@
     width: min(100%, 900px);
     aspect-ratio: 3 / 2;
     display: grid;
-    place-items: center;
+    place-content: center;
+    gap: var(--space-2);
+    text-align: center;
     background: var(--color-bg-placeholder);
     color: var(--color-text-muted);
+  }
+  .date {
+    font-size: var(--font-size-sm);
   }
 </style>

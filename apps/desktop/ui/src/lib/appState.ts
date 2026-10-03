@@ -4,17 +4,20 @@
  * this function, so that both get the same wiring.
  */
 import { registerAppActions } from './appActions';
+import { registerLibraryActions } from './library/libraryActions';
 import type { Platform } from './shortcuts/keys';
 import { ShortcutRegistry } from './shortcuts/registry';
 import { LayoutStore } from './stores/layout.svelte';
+import { LibraryStore } from './stores/library.svelte';
 import { ModuleStore } from './stores/modules.svelte';
 import type { ToastStore } from './stores/toasts.svelte';
 
 export interface AppState {
   readonly modules: ModuleStore;
   readonly layout: LayoutStore;
+  readonly library: LibraryStore;
   readonly registry: ShortcutRegistry;
-  /** Removes the shell actions from the registry. */
+  /** Removes the shell and library actions from the registry. */
   readonly dispose: () => void;
 }
 
@@ -30,6 +33,18 @@ export function createAppState({ platform, toasts }: AppStateOptions): AppState 
   const registry = new ShortcutRegistry(platform, {
     onError: (error, action) => toasts.error(`The action "${action.label}" failed.`, error),
   });
-  const dispose = registerAppActions(registry, { modules, layout });
-  return { modules, layout, registry, dispose };
+  const library = new LibraryStore(toasts);
+  const removeAppActions = registerAppActions(registry, { modules, layout });
+  let removeLibraryActions: () => void;
+  try {
+    removeLibraryActions = registerLibraryActions(registry, library.commands);
+  } catch (error: unknown) {
+    removeAppActions();
+    throw error;
+  }
+  const dispose = (): void => {
+    removeLibraryActions();
+    removeAppActions();
+  };
+  return { modules, layout, library, registry, dispose };
 }

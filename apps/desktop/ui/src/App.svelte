@@ -10,7 +10,7 @@
   import { detectPlatform } from './lib/shortcuts/keys';
   import { toasts } from './lib/stores/toasts.svelte';
 
-  const { modules, layout, registry, dispose } = createAppState({
+  const { modules, layout, library, registry, dispose } = createAppState({
     platform: detectPlatform(typeof navigator === 'undefined' ? undefined : navigator),
     toasts,
   });
@@ -31,4 +31,4 @@
   });
 </script>
 
-<AppShell {modules} {layout} {registry} {toasts} {version} />
+<AppShell {modules} {layout} {library} {registry} {toasts} {version} />
