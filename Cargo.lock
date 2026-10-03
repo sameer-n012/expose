@@ -975,7 +975,9 @@ dependencies = [
  "expose-catalog",
  "expose-core",
  "expose-develop",
+ "expose-gpu",
  "expose-raw",
+ "pollster",
  "serde",
  "serde_json",
  "tauri",
@@ -983,6 +985,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
