@@ -1,0 +1,4 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+# Words that docs may use without backticks. ".." keeps the default list.
+doc-valid-idents = ["SQLite", "WebGPU", "WebAssembly", "WGSL", "opRGB", "sRGB", ".."]

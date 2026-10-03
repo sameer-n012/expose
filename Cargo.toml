@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Resolver 3 uses this value to select dependency versions that build on 1.88.
+rust-version = "1.88"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+# Internal crates. Dependency direction: apps -> feature crates -> expose-core.
+expose-core = { path = "crates/expose-core" }
+expose-gpu = { path = "crates/expose-gpu" }
+expose-develop = { path = "crates/expose-develop" }
+expose-raw = { path = "crates/expose-raw" }
+expose-catalog = { path = "crates/expose-catalog" }
+expose-editor = { path = "crates/expose-editor" }
+
+# Common external crates. Use only MIT, Apache-2.0, BSD, or zlib licenses.
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[workspace.lints.rust]
+# Unsafe code is denied in all crates. A crate that needs unsafe code (for
+# example, GPU buffer access) must override this lint in its own Cargo.toml
+# and document each unsafe block with a `// SAFETY:` comment.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+# Pedantic lints that add noise with little value in this project.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

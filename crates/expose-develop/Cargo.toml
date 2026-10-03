@@ -1,0 +1,15 @@
+[package]
+name = "expose-develop"
+description = "Non-destructive develop pipeline for Expose."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+expose-core.workspace = true
+expose-gpu.workspace = true
+
+[lints]
+workspace = true

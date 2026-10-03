@@ -1,0 +1,15 @@
+[package]
+name = "expose-gpu"
+description = "GPU context, shader pipelines, and tiled render graph for Expose."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Rule: this is the only crate that may use wgpu directly.
+[dependencies]
+expose-core.workspace = true
+
+[lints]
+workspace = true
