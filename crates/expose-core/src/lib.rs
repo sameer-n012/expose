@@ -13,6 +13,7 @@
 //!   color spaces.
 //! - [`develop`]: non-destructive develop parameter types (no processing).
 //! - [`error`]: the [`CoreError`] type.
+//! - [`math`]: shared numeric helpers (monotone cubic spline).
 //!
 //! # Dependency rules
 //!
@@ -26,5 +27,6 @@ pub mod buffer;
 pub mod color;
 pub mod develop;
 pub mod error;
+pub mod math;
 
 pub use error::{CoreError, CoreResult};

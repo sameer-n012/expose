@@ -86,6 +86,35 @@ impl Rect {
         let height = u32::try_from(y1 - u64::from(y0)).ok()?;
         Some(Rect::new(x0, y0, width, height))
     }
+
+    /// Returns the overlap of this rectangle with a rectangle of size
+    /// `width` x `height` at the signed position `(x, y)`. Use it to clamp
+    /// a layer with a signed offset to a region. The result is in the same
+    /// coordinates as `self`. `None` means no overlap.
+    pub fn intersection_signed(&self, x: i32, y: i32, width: u32, height: u32) -> Option<Rect> {
+        let x0 = i64::from(x).max(i64::from(self.x));
+        let y0 = i64::from(y).max(i64::from(self.y));
+        let x1 = (i64::from(x) + i64::from(width)).min(i64::from(self.x) + i64::from(self.width));
+        let y1 = (i64::from(y) + i64::from(height)).min(i64::from(self.y) + i64::from(self.height));
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        // The overlap is inside `self`, so all values fit in u32.
+        Some(Rect::new(
+            u32::try_from(x0).ok()?,
+            u32::try_from(y0).ok()?,
+            u32::try_from(x1 - x0).ok()?,
+            u32::try_from(y1 - y0).ok()?,
+        ))
+    }
+
+    /// Moves the rectangle by a signed offset. Returns `None` if the new
+    /// corner is negative or does not fit in `u32`.
+    pub fn translated(&self, dx: i32, dy: i32) -> Option<Rect> {
+        let x = u32::try_from(i64::from(self.x) + i64::from(dx)).ok()?;
+        let y = u32::try_from(i64::from(self.y) + i64::from(dy)).ok()?;
+        Some(Rect::new(x, y, self.width, self.height))
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +135,20 @@ mod tests {
         assert_eq!(a.intersection(&Rect::new(10, 0, 5, 5)), None);
         assert_eq!(a.intersection(&Rect::new(20, 20, 5, 5)), None);
         assert_eq!(a.intersection(&Rect::new(2, 2, 0, 5)), None);
+    }
+
+    #[test]
+    fn signed_intersection_and_translation() {
+        let r = Rect::new(2, 2, 6, 6);
+        assert_eq!(
+            r.intersection_signed(-3, 0, 6, 4),
+            Some(Rect::new(2, 2, 1, 2))
+        );
+        assert_eq!(r.intersection_signed(i32::MIN, 0, 5, 5), None);
+        assert_eq!(r.intersection_signed(8, 2, 3, 3), None);
+        assert_eq!(r.translated(-2, 1), Some(Rect::new(0, 3, 6, 6)));
+        assert_eq!(r.translated(-3, 0), None);
+        assert_eq!(Rect::new(u32::MAX, 0, 1, 1).translated(1, 0), None);
     }
 
     #[test]

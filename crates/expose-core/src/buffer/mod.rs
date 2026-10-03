@@ -13,12 +13,16 @@
 
 mod convert;
 mod encode_lut;
+mod gray;
 mod io;
+mod orientation;
 mod rect;
 mod resample;
 mod working;
 
+pub use gray::GrayImage;
 pub use io::{ChannelLayout, Image, Image8, Image16, Sample};
+pub use orientation::Orientation;
 pub use rect::Rect;
 pub use resample::{AlphaMode, ResizeMode, fit_size, resize};
 pub use working::{Rgba, WORKING_CHANNELS, WorkingImage};

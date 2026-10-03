@@ -116,10 +116,10 @@ impl SourceInfo {
     }
 }
 
-/// Converts CIE 1931 xy to CIE 1960 UCS uv.
+/// Converts CIE 1931 xy to CIE 1960 UCS uv (see [`Chromaticity::to_uv`]).
+#[inline]
 fn to_uv(c: Chromaticity) -> (f64, f64) {
-    let d = -2.0 * c.x + 12.0 * c.y + 3.0;
-    (4.0 * c.x / d, 6.0 * c.y / d)
+    c.to_uv()
 }
 
 /// The number of coarse search steps on the mired scale.

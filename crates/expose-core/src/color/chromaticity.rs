@@ -48,13 +48,13 @@ impl Chromaticity {
     }
 
     /// Converts to CIE 1960 UCS (u, v).
-    fn to_uv(self) -> (f64, f64) {
+    pub fn to_uv(self) -> (f64, f64) {
         let d = -2.0 * self.x + 12.0 * self.y + 3.0;
         (4.0 * self.x / d, 6.0 * self.y / d)
     }
 
     /// Converts from CIE 1960 UCS (u, v).
-    fn from_uv(u: f64, v: f64) -> Self {
+    pub fn from_uv(u: f64, v: f64) -> Self {
         let d = 2.0 * u - 8.0 * v + 4.0;
         Self::new(3.0 * u / d, 2.0 * v / d)
     }
@@ -161,20 +161,36 @@ pub fn planckian_chromaticity(kelvin: f64) -> CoreResult<Chromaticity> {
     check_kelvin(kelvin, PLANCKIAN_MIN_KELVIN, PLANCKIAN_MAX_KELVIN)?;
     let t = kelvin;
     let (t2, t3) = (t * t, t * t * t);
-    let x = if t <= 4000.0 {
-        -0.266_123_9e9 / t3 - 0.234_358_9e6 / t2 + 0.877_695_6e3 / t + 0.179_910
-    } else {
-        -3.025_846_9e9 / t3 + 2.107_037_9e6 / t2 + 0.222_634_7e3 / t + 0.240_390
-    };
+    // The published fit has two pieces that meet at 4000 K with a kink in
+    // the slope. The kink would turn the tint direction (the locus normal)
+    // by a visible angle. Blend the two pieces with a smoothstep weight
+    // over `BLEND_LOW..=BLEND_HIGH`, so that the locus has a continuous
+    // tangent. Outside the window the result is the published fit.
+    let w = smoothstep(BLEND_LOW, BLEND_HIGH, t);
+    let x_low = -0.266_123_9e9 / t3 - 0.234_358_9e6 / t2 + 0.877_695_6e3 / t + 0.179_910;
+    let x_high = -3.025_846_9e9 / t3 + 2.107_037_9e6 / t2 + 0.222_634_7e3 / t + 0.240_390;
+    let x = x_low + w * (x_high - x_low);
     let (x2, x3) = (x * x, x * x * x);
+    let y_mid = -0.954_947_6 * x3 - 1.374_185_93 * x2 + 2.091_370_15 * x - 0.167_488_67;
+    let y_high = 3.081_758_0 * x3 - 5.873_386_70 * x2 + 3.751_129_97 * x - 0.370_014_83;
     let y = if t <= 2222.0 {
         -1.106_381_4 * x3 - 1.348_110_20 * x2 + 2.185_558_32 * x - 0.202_196_83
-    } else if t <= 4000.0 {
-        -0.954_947_6 * x3 - 1.374_185_93 * x2 + 2.091_370_15 * x - 0.167_488_67
     } else {
-        3.081_758_0 * x3 - 5.873_386_70 * x2 + 3.751_129_97 * x - 0.370_014_83
+        y_mid + w * (y_high - y_mid)
     };
     Ok(Chromaticity::new(x, y))
+}
+
+/// Start of the blend window around the 4000 K piece boundary.
+const BLEND_LOW: f64 = 3800.0;
+/// End of the blend window around the 4000 K piece boundary.
+const BLEND_HIGH: f64 = 4200.0;
+
+/// Smooth step from 0 (at `lo` and below) to 1 (at `hi` and above). The
+/// slope is 0 at both ends.
+fn smoothstep(lo: f64, hi: f64, t: f64) -> f64 {
+    let s = ((t - lo) / (hi - lo)).clamp(0.0, 1.0);
+    s * s * (3.0 - 2.0 * s)
 }
 
 /// Returns the chromaticity of the CIE daylight locus (D-series illuminants).
@@ -340,6 +356,37 @@ mod tests {
         let b = planckian_chromaticity(5000.0).unwrap();
         close(a.x, b.x, 1e-12);
         close(a.y, b.y, 1e-12);
+    }
+
+    /// The direction angle, in degrees, of the tint offset at `kelvin`.
+    fn tint_direction_deg(kelvin: f64) -> f64 {
+        let on = planckian_chromaticity(kelvin).unwrap().to_uv();
+        let off = temperature_tint_to_chromaticity(kelvin, 30.0)
+            .unwrap()
+            .to_uv();
+        (off.1 - on.1).atan2(off.0 - on.0).to_degrees()
+    }
+
+    #[test]
+    fn tint_direction_is_continuous_near_4000_kelvin() {
+        let mut prev = tint_direction_deg(3990.0);
+        let mut k = 3990.5;
+        while k <= 4010.0 {
+            let a = tint_direction_deg(k);
+            assert!((a - prev).abs() < 0.5, "jump of {} deg at {k} K", a - prev);
+            prev = a;
+            k += 0.5;
+        }
+        assert!((tint_direction_deg(4010.0) - tint_direction_deg(3990.0)).abs() < 0.5);
+    }
+
+    #[test]
+    fn uv_round_trip() {
+        let c = Chromaticity::new(0.31, 0.33);
+        let (u, v) = c.to_uv();
+        let back = Chromaticity::from_uv(u, v);
+        close(back.x, c.x, 1e-12);
+        close(back.y, c.y, 1e-12);
     }
 
     #[test]
