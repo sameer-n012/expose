@@ -13,7 +13,22 @@ export const APP_ACTION = {
   editor: 'module.editor',
   toggleSidePanels: 'panels.toggleSides',
   toggleAllPanels: 'panels.toggleAll',
+  exportPhotos: 'export.photos',
 } as const;
+
+/**
+ * The action that opens the export dialog. The shell registers it, because
+ * the shell knows which photos to export.
+ */
+export function exportAction(run: () => void): ShortcutAction {
+  return {
+    id: APP_ACTION.exportPhotos,
+    label: 'Export photos',
+    scope: 'global',
+    defaultBinding: 'Mod+Shift+E',
+    run,
+  };
+}
 
 export interface AppActionTargets {
   readonly modules: ModuleStore;
