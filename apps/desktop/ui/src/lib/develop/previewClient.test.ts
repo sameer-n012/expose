@@ -176,6 +176,25 @@ describe('PreviewClient', () => {
     await expect(client.idle()).resolves.toBeUndefined();
   });
 
+  it('does not parse a body that arrives after dispose and sends nothing more', async () => {
+    const { transport, client, frames, errors } = setup(2);
+    client.setSession(1);
+    client.request(ev(1));
+    client.request(ev(2));
+    expect(transport.calls).toHaveLength(2);
+    client.dispose();
+    client.setTargetLongEdge(640);
+    // A body that is not a frame: a parse would report an error.
+    transport.call(0).resolve(new ArrayBuffer(3));
+    transport.call(1).reject(new Error('late failure'));
+    await flush();
+    expect(frames).toHaveLength(0);
+    expect(errors).toHaveLength(0);
+    expect(transport.calls).toHaveLength(2);
+    expect(client.inFlight).toBe(0);
+    expect(client.stats).toMatchObject({ dropped: 2, failed: 0, delivered: 0 });
+  });
+
   it('with two slots, drops a frame that arrives after a newer one', async () => {
     const { transport, client, frames } = setup(2);
     client.setSession(1);

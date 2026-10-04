@@ -5,8 +5,25 @@
  *
  * Run: start the app with `npm --prefix apps/desktop/ui run tauri dev`,
  * open the web inspector, and enter `location.search = '?bench=transport'`.
- * Optional query values: `frames` (default 60), `long` (preview long edge,
- * default 2560). The page shows a table and logs it to the console.
+ * Optional query values:
+ *
+ * - `frames`: measured frames per candidate (default 60).
+ * - `long`: preview long edge of the session (default 2560).
+ * - `only`: a comma-separated list of candidate names. Only these
+ *   candidates run, in the list order of the table below. Example:
+ *   `?bench=transport&only=slider-ipc,ipc-rgba8-bitmap`. Use the names of
+ *   the result table (`@<n>` names are half of `long`, for example
+ *   `@1280`). An unknown name stops the run with an error that lists the
+ *   valid names.
+ * - `reverse=1`: runs the candidates in the opposite order.
+ * - `settle`: the pause between two candidates, in milliseconds (default
+ *   500, `0` for no pause). The pause lets the web view finish work of
+ *   the previous candidate (for example, garbage collection).
+ *
+ * To find out if the order of the candidates changes a result, run the
+ * same subset with and without `reverse=1`, and compare the rows.
+ *
+ * The page shows a table and logs it to the console.
  *
  * The source is a synthetic 6000 x 4000 test image in the shell, so no
  * photo is necessary. Each frame has new develop settings (exposure
@@ -103,6 +120,61 @@ export function formatResults(results: readonly BenchResult[]): string {
       .join('  ')
       .trimEnd();
   return [line(header), line(widths.map((w) => '-'.repeat(w))), ...rows.map(line)].join('\n');
+}
+
+/** The default pause between two candidates, in milliseconds. */
+export const DEFAULT_SETTLE_MS = 500;
+
+/** Which candidates run, in which order, and the pause between them. */
+export interface BenchSelection {
+  /** Candidate names to run, or null for all. */
+  readonly only: readonly string[] | null;
+  /** Runs the candidates in the opposite order. */
+  readonly reverse: boolean;
+  /** The pause between two candidates, in milliseconds. */
+  readonly settleMs: number;
+}
+
+/** Reads `only`, `reverse`, and `settle` from a URL query (see the module docs). */
+export function parseBenchQuery(search: string): BenchSelection {
+  const params = new URLSearchParams(search);
+  const onlyText = params.get('only');
+  const only = onlyText === null
+    ? null
+    : onlyText
+        .split(',')
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0);
+  const reverseText = params.get('reverse');
+  const reverse = reverseText !== null && reverseText !== '0' && reverseText !== 'false';
+  const settleText = params.get('settle');
+  const settle = settleText === null ? Number.NaN : Number(settleText);
+  return {
+    only: only === null || only.length === 0 ? null : only,
+    reverse,
+    settleMs: Number.isFinite(settle) && settle >= 0 ? settle : DEFAULT_SETTLE_MS,
+  };
+}
+
+/**
+ * Applies a selection to the candidate list. Keeps the list order (then
+ * reverses it if set). Throws if `only` names a candidate that does not
+ * exist, so that a typing error does not give a silent empty run.
+ */
+export function selectCandidates<T>(
+  candidates: ReadonlyArray<readonly [string, T]>,
+  selection: Pick<BenchSelection, 'only' | 'reverse'>,
+): Array<readonly [string, T]> {
+  const names = candidates.map(([name]) => name);
+  if (selection.only !== null) {
+    const unknown = selection.only.filter((name) => !names.includes(name));
+    if (unknown.length > 0) {
+      throw new Error(`Unknown bench candidate(s): ${unknown.join(', ')}. Valid names: ${names.join(', ')}.`);
+    }
+  }
+  const only = selection.only;
+  const chosen = only === null ? [...candidates] : candidates.filter(([name]) => only.includes(name));
+  return selection.reverse ? chosen.reverse() : chosen;
 }
 
 /** Settings for frame `i`: exposure steps, so that each frame is a new render. */
@@ -370,6 +442,11 @@ async function sliderCandidate(
   pipelined: boolean,
   longEdge: number | null = null,
 ): Promise<BenchResult> {
+  // Warm-up frame at the target size, not measured. When the size is not
+  // the size of the previous candidate, the shell makes a new GPU view
+  // (a slow step in a debug build); without the warm-up that time goes
+  // into the mean shell time of this candidate.
+  await transport.render(bench.session.session, benchSettings(0), { longEdge });
   const samples: FrameSample[] = [];
   const draws = new DrawTimes();
   const presenter = pipelined
@@ -431,14 +508,20 @@ async function sliderCandidate(
   return { ...result, drawMs: draws.mean };
 }
 
-/** Runs all candidates and returns the results. `log` gets progress lines. */
+/**
+ * Runs the selected candidates and returns the results. `log` gets
+ * progress lines. When `selection` is not given, it comes from the query
+ * of the page (`only`, `reverse`, `settle`; see the module docs).
+ */
 export async function runTransportBench(options: {
   readonly canvas: HTMLCanvasElement;
   readonly frames?: number;
   readonly longEdge?: number;
+  readonly selection?: BenchSelection;
   readonly log?: (line: string) => void;
 }): Promise<BenchResult[]> {
   const log = options.log ?? ((line: string) => console.info(line));
+  const selection = options.selection ?? parseBenchQuery(typeof location === 'undefined' ? '' : location.search);
   const ctx = frameContext(options.canvas);
   if (ctx === null) {
     throw new Error('The web view has no 2D canvas.');
@@ -455,7 +538,7 @@ export async function runTransportBench(options: {
   options.canvas.height = session.height;
   const bench: BenchContext = { session, ctx, frames: options.frames ?? 60 };
   const half = Math.round(Math.max(session.width, session.height) / 2);
-  const candidates: Array<[string, () => Promise<BenchResult>]> = [
+  const all: Array<readonly [string, () => Promise<BenchResult>]> = [
     // Production path: two requests in flight + presenter.
     ['pipelined-ipc-rgba8-bitmap', () => pipelinedCandidate(bench, ipcTransport, 'bitmap')],
     ['pipelined-ipc-rgba8-put', () => pipelinedCandidate(bench, ipcTransport, 'put')],
@@ -478,7 +561,16 @@ export async function runTransportBench(options: {
   ];
   const results: BenchResult[] = [];
   try {
-    for (const [name, run] of candidates) {
+    // In the `try` block: an unknown name must close the session too.
+    const candidates = selectCandidates(all, selection);
+    log(
+      `Candidates: ${candidates.map(([name]) => name).join(', ')}` +
+        `${selection.reverse ? ' (reversed)' : ''}; settle ${selection.settleMs} ms.`,
+    );
+    for (const [index, [name, run]] of candidates.entries()) {
+      if (index > 0 && selection.settleMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, selection.settleMs));
+      }
       log(`Running ${name}...`);
       try {
         results.push(await run());
