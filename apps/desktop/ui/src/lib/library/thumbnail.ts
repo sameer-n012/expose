@@ -10,9 +10,11 @@
  * The query `v=<file modified ms>` changes when the file changes, so the
  * web view does not show an old image. The shell ignores the query. It
  * also sends an ETag, so a change of the develop settings gives a new
- * image at the next load.
+ * image at the next load. The query `e=<edit revision>` (only after an
+ * edit in this run) makes the web view load the image again.
  */
 import type { Photo } from '../catalog';
+import { thumbnailRevision } from './thumbnailRevisions.svelte';
 
 /** The name of the URI scheme of the shell. */
 export const THUMBNAIL_SCHEME = 'thumb';
@@ -33,9 +35,10 @@ const HTTP_FORM: boolean =
  * Returns the thumbnail URL of a photo for the given URL form.
  * Exported for tests; use `thumbnailUrl` in components.
  */
-export function thumbnailUrlFor(photo: Photo, httpForm: boolean): string {
+export function thumbnailUrlFor(photo: Photo, httpForm: boolean, revision = 0): string {
   const base = httpForm ? `http://${THUMBNAIL_SCHEME}.localhost` : `${THUMBNAIL_SCHEME}://localhost`;
-  return `${base}/${encodeURIComponent(String(photo.id))}?v=${encodeURIComponent(String(photo.fileModifiedMs))}`;
+  const edits = revision > 0 ? `&e=${revision}` : '';
+  return `${base}/${encodeURIComponent(String(photo.id))}?v=${encodeURIComponent(String(photo.fileModifiedMs))}${edits}`;
 }
 
 /**
@@ -44,5 +47,5 @@ export function thumbnailUrlFor(photo: Photo, httpForm: boolean): string {
  * (for example, the file is offline or cannot be decoded).
  */
 export function thumbnailUrl(photo: Photo): string | null {
-  return thumbnailUrlFor(photo, HTTP_FORM);
+  return thumbnailUrlFor(photo, HTTP_FORM, thumbnailRevision(photo.id));
 }

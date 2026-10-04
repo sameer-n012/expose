@@ -30,6 +30,10 @@ describe('thumbnailUrlFor', () => {
     const changed = { ...photo, fileModifiedMs: photo.fileModifiedMs + 1 };
     expect(thumbnailUrlFor(changed, false)).not.toBe(thumbnailUrlFor(photo, false));
   });
+
+  it('changes when the photo is edited', () => {
+    expect(thumbnailUrlFor(photo, false, 2)).toBe('thumb://localhost/42?v=1700000000123&e=2');
+  });
 });
 
 describe('usesHttpSchemeForm', () => {

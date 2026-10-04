@@ -11,7 +11,11 @@
   registers the actions (see createAppState).
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { APP_ACTION } from '../../lib/appActions';
+  import { DevelopStore } from '../../lib/stores/develop.svelte';
+  import BasicPanel from '../develop/BasicPanel.svelte';
+  import DevelopView from '../modules/DevelopView.svelte';
   import { MODULE_LABELS, type ModuleId } from '../../lib/modules';
   import type { ShortcutRegistry } from '../../lib/shortcuts/registry';
   import type { LayoutStore, Region, Side } from '../../lib/stores/layout.svelte';
@@ -39,6 +43,10 @@
   }
 
   let { modules, layout, library, registry, toasts, version = '' }: Props = $props();
+
+  // The shell owns the develop store. The props do not change for the
+  // life of the shell, so the store reads them once.
+  const develop = untrack(() => new DevelopStore({ library, modules, toasts }));
 
   /** Shortcut text per module. Null if the action is not registered or has no key. */
   function shortcutFor(actionId: string): string | null {
@@ -96,7 +104,15 @@
         {#if id === 'library' && side === 'left'}
           <FolderPanel {library} />
         {/if}
-        <PanelSections sections={PANEL_SECTIONS[id][side]} />
+        {#if id === 'develop' && side === 'right'}
+          {@const sections = PANEL_SECTIONS.develop.right}
+          {@const basicAt = sections.indexOf('Basic')}
+          <PanelSections sections={sections.slice(0, basicAt)} />
+          <BasicPanel {develop} />
+          <PanelSections sections={sections.slice(basicAt + 1)} />
+        {:else}
+          <PanelSections sections={PANEL_SECTIONS[id][side]} />
+        {/if}
       </div>
     {/each}
   </SidePanel>
@@ -130,7 +146,7 @@
           {#if id === 'library'}
             <LibraryView {modules} {library} />
           {:else if id === 'develop'}
-            <CanvasPlaceholder title="Develop" hint="The photo preview appears here." />
+            <DevelopView {develop} />
           {:else}
             <CanvasPlaceholder title="Editor" hint="The document canvas appears here." />
           {/if}
