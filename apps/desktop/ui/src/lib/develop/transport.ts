@@ -37,6 +37,16 @@ export const DEFAULT_TRANSPORT: TransportName = 'ipc';
 /** The localStorage key that overrides the default transport. */
 export const TRANSPORT_STORAGE_KEY = 'expose.previewTransport';
 
+/** Options of one frame request. */
+export interface RenderOptions {
+  /**
+   * The target long edge of the frame in pixels. The shell clamps it to
+   * the session size and to a minimum; the frame header has the real
+   * size. `null` or absent: the session size.
+   */
+  readonly longEdge?: number | null;
+}
+
 /** Gets frame bodies for a session. */
 export interface FrameTransport {
   readonly name: TransportName;
@@ -45,7 +55,7 @@ export interface FrameTransport {
    * `CommandError` (for example kind `superseded` when a newer request
    * replaced this one in the shell) or another error.
    */
-  render(session: number, settings: DevelopSettingsJson): Promise<ArrayBuffer>;
+  render(session: number, settings: DevelopSettingsJson, options?: RenderOptions): Promise<ArrayBuffer>;
 }
 
 /** Opens a preview session for a photo (decode + GPU upload in the shell). */
@@ -68,8 +78,8 @@ export function closePreview(session: number): Promise<void> {
 /** The `ipc` transport: the `preview_render` command. */
 export const ipcTransport: FrameTransport = {
   name: 'ipc',
-  render(session, settings) {
-    return invoke<ArrayBuffer>('preview_render', { session, settings });
+  render(session, settings, options = {}) {
+    return invoke<ArrayBuffer>('preview_render', { session, settings, longEdge: options.longEdge ?? null });
   },
 };
 
@@ -81,9 +91,14 @@ export function previewSchemeBase(httpForm: boolean): string {
 /** The URL form of this web view. Computed once. */
 const HTTP_FORM: boolean = typeof navigator !== 'undefined' && usesHttpSchemeForm(navigator.userAgent);
 
-/** The URL of a frame of `session` in the given format. */
-export function previewFrameUrl(session: number, format: 'rgba8' | 'jpeg' | 'png' = 'rgba8'): string {
-  return `${previewSchemeBase(HTTP_FORM)}/${encodeURIComponent(String(session))}?format=${format}`;
+/** The URL of a frame of `session` in the given format, with an optional target long edge. */
+export function previewFrameUrl(
+  session: number,
+  format: 'rgba8' | 'jpeg' | 'png' = 'rgba8',
+  longEdge: number | null = null,
+): string {
+  const long = longEdge === null ? '' : `&long=${Math.round(longEdge)}`;
+  return `${previewSchemeBase(HTTP_FORM)}/${encodeURIComponent(String(session))}?format=${format}${long}`;
 }
 
 /** A failed scheme request, with the HTTP status. */
@@ -119,8 +134,8 @@ export function schemeErrorKind(status: number): 'superseded' | 'notFound' | 'in
 /** The `scheme` transport: `fetch()` POST to the `preview` URI scheme. */
 export const schemeTransport: FrameTransport = {
   name: 'scheme',
-  async render(session, settings) {
-    const response = await fetch(previewFrameUrl(session), {
+  async render(session, settings, options = {}) {
+    const response = await fetch(previewFrameUrl(session, 'rgba8', options.longEdge ?? null), {
       method: 'POST',
       // `text/plain` keeps the request a CORS "simple request" (no preflight).
       headers: { 'Content-Type': 'text/plain' },

@@ -6,7 +6,9 @@
  * - `bitmap`: `createImageBitmap(ImageData)` and then `drawImage`. The
  *   browser can upload the bitmap to the GPU off the main thread.
  *
- * The transport benchmark measures both.
+ * The transport benchmark measures both. The application draws through
+ * `FramePresenter` (`presenter.ts`), which uses the helpers of this
+ * module.
  */
 import type { Frame } from './frame';
 import type { DisplaySpace } from './transport';
