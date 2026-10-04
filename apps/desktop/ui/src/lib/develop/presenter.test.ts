@@ -185,4 +185,73 @@ describe('FramePresenter', () => {
     tick();
     expect(putImageData).not.toHaveBeenCalled();
   });
+
+  it('closes a ready bitmap at dispose and does not draw it', async () => {
+    const bitmap = new FakeBitmap(0);
+    const { presenter, drawImage, scheduled, tick } = setup({
+      createBitmap: () => Promise.resolve(bitmap as unknown as ImageBitmap),
+      mode: 'bitmap',
+    });
+    presenter.present(event(0));
+    await flush();
+    expect(scheduled).toHaveLength(1);
+    presenter.dispose();
+    expect(bitmap.closed).toBe(true);
+    // The display-frame callback that was already scheduled draws nothing.
+    tick();
+    expect(drawImage).not.toHaveBeenCalled();
+    expect(presenter.idle).toBe(true);
+  });
+
+  it('closes a bitmap that becomes ready after dispose', async () => {
+    let resolve: ((bitmap: ImageBitmap) => void) | undefined;
+    const createBitmap = () => new Promise<ImageBitmap>((r) => (resolve = r));
+    const { presenter, drawImage, scheduled } = setup({ createBitmap, mode: 'bitmap' });
+    presenter.present(event(0));
+    presenter.dispose();
+    const bitmap = new FakeBitmap(0);
+    resolve?.(bitmap as unknown as ImageBitmap);
+    await flush();
+    expect(bitmap.closed).toBe(true);
+    expect(scheduled).toHaveLength(0);
+    expect(drawImage).not.toHaveBeenCalled();
+    expect(presenter.idle).toBe(true);
+  });
+
+  it('closes the bitmap when the draw fails', async () => {
+    const bitmap = new FakeBitmap(0);
+    const { presenter, errors, tick } = setup({
+      context: () => null,
+      createBitmap: () => Promise.resolve(bitmap as unknown as ImageBitmap),
+      mode: 'bitmap',
+    });
+    presenter.present(event(0));
+    await flush();
+    tick();
+    expect(errors).toHaveLength(1);
+    expect(bitmap.closed).toBe(true);
+  });
+
+  it('closes every bitmap it makes in a long stream', async () => {
+    const made: FakeBitmap[] = [];
+    const { presenter, tick } = setup({
+      createBitmap: () => {
+        const bitmap = new FakeBitmap(made.length);
+        made.push(bitmap);
+        return Promise.resolve(bitmap as unknown as ImageBitmap);
+      },
+      mode: 'bitmap',
+    });
+    for (let seq = 0; seq < 50; seq += 1) {
+      presenter.present(event(seq));
+      await flush();
+      if (seq % 3 === 0) {
+        tick();
+      }
+    }
+    tick();
+    presenter.dispose();
+    expect(made.length).toBeGreaterThan(0);
+    expect(made.filter((b) => !b.closed)).toHaveLength(0);
+  });
 });
