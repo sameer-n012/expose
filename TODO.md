@@ -6,21 +6,23 @@ No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature i
 
 ## In progress
 
-- **export-v1**, split in two agents that share one command contract (`export_start` / `export_cancel`, `ExportEvent` channel): export-backend (`feat/export-backend`, `src-tauri`) and export-ui (`feat/export-ui`, `ui`).
+- (none — all agent branches are merged)
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **export-v1** (S/O) — encode API is done (PR #11). Remaining: export dialog in the UI (format, quality, color space, size, destination, file naming), Tauri command that runs decode → develop → resize → `encode_path` on a worker, progress + errors. FEATURES 5.1 P1.
-2. [ ] **develop-panels** (S) — Tone curve, Detail (sharpening), and crop/straighten UI for the existing `DevelopSettings` fields; histogram (needs a shell command).
+0. [ ] **operator check** — try export in the real webview (dialog, progress, cancel, output files and color spaces). After that, the `FEATURES.md` 5.1 P1 items and the Develop Basic items can be marked `[x]`.
+1. [ ] **develop-geometry-detail** (O) — crop/straighten and sharpening stages in `expose-develop` (CPU reference + GPU), used by preview, thumbnails, and export. Needs neighborhood and size-changing kernels (see gpu-api).
+2. [ ] **develop-panels** (S) — Tone curve, Detail (sharpening), and crop/straighten UI for the existing `DevelopSettings` fields; histogram (needs a shell command). The crop and Detail UI need item 1.
 3. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 
 ### Follow-ups from merged work
 
 - [ ] **develop-ui-followups** (S) — the TS slider ranges in `ui/src/lib/develop/settings.ts` are copies of the Rust constants (add a test or generate them); the shell drops unknown settings fields (ADR 0009).
 
-- [ ] **bench-regression** (O, agent `feat/bench-regression`) — benchmark candidates that run after the pipelined ones are 3–15× slower than on 2026-10-03 (ADR 0008, "Webview measurement after pipelining"). Most likely background load on the machine (operator). Scope: a short leak audit of `FramePresenter`/`PreviewClient`, and benchmark options (`only=`, reverse order) so the operator can re-check on a quiet machine.
+- [ ] **export-followups** — apply crop and sharpening (after develop-geometry-detail); copy metadata (see encode-followups); output sharpening, naming templates, presets (P2); the UI `Mod+Shift+E` does nothing while the dialog is open (by design, the dialog stops key events).
+- [ ] **bench-recheck** (operator, optional) — on a quiet machine: `?bench=transport&only=slider-ipc` and `&only=ipc-rgba8-bitmap` against the 2026-10-03 rows. PR #22 found no leak; the slow rows were most likely background load.
 - [ ] **preview-followups** — the slider simulation is limited by main-thread time (timer ticks), not the transport; one waiting slot per session in the engine if a prefetch supersedes a visible request; update the target size when the display pixel density changes; move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
 - [ ] **core-followups** (S) — `Rect::translated` is not used yet (editor `add_offset` works on tuples); the Planckian locus also has a piece boundary at 2222 K (y fit) with a small kink.
 - [ ] **gpu-api** (O) — kernels with different input/output size (GPU downsample), multiple inputs / storage buffers, parameter buffer reuse, double-buffered read-back, `WorkingImage` at the API boundary, render graph.
@@ -41,6 +43,9 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **bench-regression** (PR #22) — no leak in the preview path; release tests added (bitmaps closed, late responses dropped before parse). Benchmark options `only=`, `reverse=1`, `settle=<ms>`. The 12 ms shell time at `@1280` was one GPU view rebuild in the mean; slider candidates now render a warm-up frame.
+- [x] **export-v1** (PRs #20, #21) — `export_start`/`export_cancel` with an event channel; one worker, one photo at a time, CPU develop (about 0.73 s per 24 MP photo); conflict policies; never writes to a catalog original. Export dialog, `Mod+Shift+E`, progress with cancel. ADR 0010.
 
 - [x] **develop-ui** (PR #19) — commands `get_develop_settings`/`set_develop_settings`; `DevelopStore` (debounced save, flush on photo/module change); Develop view with `PreviewCanvas` and the Basic panel (white balance, exposure, contrast, highlights, shadows, whites, blacks; per-slider reset, Reset all); thumbnails refresh after a save. ADR 0009.
 
