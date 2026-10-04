@@ -2,7 +2,7 @@
 
 Work tracker for Expose. `FEATURES.md` is the master feature list. This file tracks the work in progress and partial work.
 
-No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature is available in the UI with tests from end to end.
+`FEATURES.md` items marked `[x]` (2026-10-04, after the operator check in the real webview): 2.2 exposure, contrast, highlights/shadows/whites/blacks; 5.1 the four P1 export items. White balance stays open (presets in the UI and the eyedropper are missing); automatic tone stays open (no UI yet).
 
 ## In progress
 
@@ -12,8 +12,7 @@ No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature i
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-0. [ ] **operator check** — try export in the real webview (dialog, progress, cancel, output files and color spaces). After that, the `FEATURES.md` 5.1 P1 items and the Develop Basic items can be marked `[x]`.
-1. [ ] **develop-geometry-detail** (O) — crop/straighten and sharpening stages in `expose-develop` (CPU reference + GPU), used by preview, thumbnails, and export. Needs neighborhood and size-changing kernels (see gpu-api).
+1. [ ] **develop-geometry-detail** (O, wait for the operator go-ahead) — crop/straighten and sharpening stages in `expose-develop` (CPU reference + GPU), used by preview, thumbnails, and export. Needs neighborhood and size-changing kernels (see gpu-api).
 2. [ ] **develop-panels** (S) — Tone curve, Detail (sharpening), and crop/straighten UI for the existing `DevelopSettings` fields; histogram (needs a shell command). The crop and Detail UI need item 1.
 3. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 

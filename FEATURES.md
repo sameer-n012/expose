@@ -90,9 +90,9 @@ This file is the master list of features for Expose.
 
 ### 2.2 Basic adjustments
 - [ ] **P1** White balance: temperature and tint, presets (as shot, daylight, cloudy, …), eyedropper picker
-- [ ] **P1** Exposure
-- [ ] **P1** Contrast
-- [ ] **P1** Highlights, shadows, whites, blacks
+- [x] **P1** Exposure
+- [x] **P1** Contrast
+- [x] **P1** Highlights, shadows, whites, blacks
 - [ ] **P1** Automatic tone
 - [ ] **P2** Texture, clarity, dehaze
 - [ ] **P2** Vibrance and saturation
@@ -369,10 +369,10 @@ This file is the master list of features for Expose.
 ## 5. Output
 
 ### 5.1 Export
-- [ ] **P1** Export to JPEG, PNG, TIFF
-- [ ] **P1** Size options: long edge, short edge, width/height, megapixels, percent
-- [ ] **P1** Quality and bit-depth options
-- [ ] **P1** Output color space (sRGB, Display P3, opRGB, ProPhoto RGB)
+- [x] **P1** Export to JPEG, PNG, TIFF
+- [x] **P1** Size options: long edge, short edge, width/height, megapixels, percent
+- [x] **P1** Quality and bit-depth options
+- [x] **P1** Output color space (sRGB, Display P3, opRGB, ProPhoto RGB)
 - [ ] **P2** Export to WebP, HEIF/HEIC, AVIF, JPEG XL, DNG, PSD
 - [ ] **P2** File naming templates and destination folder rules
 - [ ] **P2** Output sharpening (screen, matte paper, glossy paper)
