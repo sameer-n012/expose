@@ -71,6 +71,33 @@ pub async fn set_flag<R: Runtime>(
     with_catalog(app, move |state| service::set_flag(state, &ids, &flag)).await
 }
 
+/// Returns the develop settings of the photo (the default settings if
+/// none are stored).
+#[tauri::command]
+pub async fn get_develop_settings<R: Runtime>(
+    app: AppHandle<R>,
+    photo_id: PhotoId,
+) -> Result<serde_json::Value, CommandError> {
+    with_catalog(app, move |state| {
+        service::get_develop_settings(state, photo_id)
+    })
+    .await
+}
+
+/// Validates and stores the develop settings of the photo. Returns the
+/// stored settings.
+#[tauri::command]
+pub async fn set_develop_settings<R: Runtime>(
+    app: AppHandle<R>,
+    photo_id: PhotoId,
+    settings: serde_json::Value,
+) -> Result<serde_json::Value, CommandError> {
+    with_catalog(app, move |state| {
+        service::set_develop_settings(state, photo_id, settings)
+    })
+    .await
+}
+
 /// Sets the color label of the photos.
 #[tauri::command]
 pub async fn set_color_label<R: Runtime>(

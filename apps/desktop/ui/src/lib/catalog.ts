@@ -5,6 +5,7 @@
  * desktop shell commands in `src-tauri/src/commands/`. Keep them in sync.
  */
 import { invoke } from '@tauri-apps/api/core';
+import type { DevelopDocument } from './develop/settings';
 
 export type PhotoId = number;
 export type FolderId = number;
@@ -117,6 +118,19 @@ export function listPhotos(query: PhotoQuery): Promise<PhotoPage> {
 
 export function getPhoto(id: PhotoId): Promise<Photo> {
   return invoke<Photo>('get_photo', { id });
+}
+
+/**
+ * Returns the stored develop settings of a photo (the default settings if
+ * none are stored). Rejects with `internal` if the stored document is not valid.
+ */
+export function getDevelopSettings(photoId: PhotoId): Promise<DevelopDocument> {
+  return invoke<DevelopDocument>('get_develop_settings', { photoId });
+}
+
+/** Stores the develop settings of a photo. Returns the stored (validated) settings. */
+export function setDevelopSettings(photoId: PhotoId, settings: DevelopDocument): Promise<DevelopDocument> {
+  return invoke<DevelopDocument>('set_develop_settings', { photoId, settings });
 }
 
 export function setRating(ids: PhotoId[], rating: number): Promise<void> {

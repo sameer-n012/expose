@@ -60,6 +60,9 @@ export class FakeCatalog {
     return this.calls.filter((call) => call.command === command);
   }
 
+  /** The stored develop settings per photo id. */
+  readonly developSettings = new Map<number, unknown>();
+
   /** Arrow function, so that it can be passed as a mock implementation. */
   readonly invoke = (command: string, rawArgs?: InvokeArgs): Promise<unknown> => {
     // The catalog commands always send an object. Binary arguments do not occur.
@@ -89,6 +92,21 @@ export class FakeCatalog {
         return void this.patch(args['ids'] as number[], { flag: args['flag'] as Photo['flag'] });
       case 'set_color_label':
         return void this.patch(args['ids'] as number[], { colorLabel: args['label'] as Photo['colorLabel'] });
+      case 'get_develop_settings':
+        return (
+          this.developSettings.get(args['photoId'] as number) ?? {
+            version: 1,
+            white_balance: { mode: 'as_shot', temperature: 5500, tint: 0 },
+            tone: { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 },
+          }
+        );
+      case 'set_develop_settings':
+        this.developSettings.set(args['photoId'] as number, args['settings']);
+        return args['settings'];
+      case 'preview_open':
+        return { session: 1, width: 4, height: 3 };
+      case 'preview_close':
+        return undefined;
       case 'pick_folder':
         return this.pickedPath;
       case 'import_folder':

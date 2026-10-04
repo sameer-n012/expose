@@ -118,6 +118,8 @@ pub fn run() -> tauri::Result<()> {
             commands::catalog::set_rating,
             commands::catalog::set_flag,
             commands::catalog::set_color_label,
+            commands::catalog::get_develop_settings,
+            commands::catalog::set_develop_settings,
             commands::dialog::pick_folder,
             commands::preview::preview_open,
             commands::preview::preview_open_test_pattern,
