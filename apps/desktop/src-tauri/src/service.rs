@@ -7,15 +7,16 @@
 //! The functions block: they lock the catalog and do database work. Call
 //! them on a blocking thread, not on the main thread.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use expose_catalog::{
-    CatalogStore, ColorLabel, FileSystem, Flag, FolderNode, ImportIssue, ImportReport, Photo,
-    PhotoId, PhotoQuery, Rating,
+    CatalogStore, ColorLabel, FileSystem, Flag, FolderNode, ImageInfo, ImportIssue, ImportReport,
+    Photo, PhotoId, PhotoQuery, Rating,
 };
 use serde::Serialize;
 
-use crate::capture::{self, MetadataJob};
+use crate::capture::{self, MetadataJob, MetadataOutcome};
 use crate::error::{CommandError, ErrorKind};
 use crate::scan::ScannedFileSystem;
 use crate::state::CatalogState;
@@ -150,21 +151,93 @@ pub fn import_folder(
     if outcomes.is_empty() {
         return Ok(report);
     }
-    let mut store = state.lock()?;
-    for outcome in outcomes {
-        let result = outcome.info.and_then(|info| {
-            store
-                .set_image_info(outcome.id, info)
-                .map_err(|e| e.to_string())
-        });
-        if let Err(message) = result {
-            report.errors.push(ImportIssue {
-                path: outcome.path,
-                message,
-            });
+    let plan = plan_info_batch(outcomes);
+    report.errors.extend(plan.issues);
+    if plan.batch.is_empty() {
+        return Ok(report);
+    }
+    // One batch write, one transaction, one lock.
+    let result = state.lock()?.set_image_infos(&plan.batch);
+    match result {
+        Ok(outcome) => {
+            for id in outcome.unknown {
+                report.errors.push(ImportIssue {
+                    path: plan
+                        .paths
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| root.to_path_buf()),
+                    message: format!(
+                        "photo {id} is not in the catalog: image information not stored"
+                    ),
+                });
+            }
+        }
+        // The batch writes nothing on error. Report each photo, so the
+        // user can see which files have no information.
+        Err(error) => {
+            for (id, _) in &plan.batch {
+                report.errors.push(ImportIssue {
+                    path: plan
+                        .paths
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| root.to_path_buf()),
+                    message: format!("cannot store the image information: {error}"),
+                });
+            }
         }
     }
     Ok(report)
+}
+
+/// The batch write of image information, and the problems found while
+/// the batch was built.
+struct InfoBatchPlan {
+    /// The items to write.
+    batch: Vec<(PhotoId, ImageInfo)>,
+    /// The file path of each photo in `batch`.
+    paths: HashMap<PhotoId, PathBuf>,
+    /// One issue for each outcome that cannot be written.
+    issues: Vec<ImportIssue>,
+}
+
+/// Builds the batch for `set_image_infos` from the metadata outcomes.
+///
+/// An outcome with a read error, or with a width or height of 0, becomes an
+/// issue and is not in the batch. The store rejects the whole batch for a
+/// zero size, so the filter stops one bad file from dropping the others.
+fn plan_info_batch(outcomes: Vec<MetadataOutcome>) -> InfoBatchPlan {
+    let mut plan = InfoBatchPlan {
+        batch: Vec::new(),
+        paths: HashMap::new(),
+        issues: Vec::new(),
+    };
+    for outcome in outcomes {
+        let message = match outcome.info {
+            Err(message) => message,
+            Ok(info) => {
+                let zero = if info.width == Some(0) {
+                    Some("width")
+                } else if info.height == Some(0) {
+                    Some("height")
+                } else {
+                    None
+                };
+                let Some(field) = zero else {
+                    plan.paths.insert(outcome.id, outcome.path);
+                    plan.batch.push((outcome.id, info));
+                    continue;
+                };
+                format!("image {field} must be at least 1")
+            }
+        };
+        plan.issues.push(ImportIssue {
+            path: outcome.path,
+            message,
+        });
+    }
+    plan
 }
 
 /// Returns the folder tree, with the direct photo count of each folder.
@@ -408,10 +481,83 @@ mod tests {
 
     #[test]
     fn import_of_missing_files_reports_errors_but_succeeds() {
-        // The in-memory file system has no real files to read.
+        // The in-memory file system has no real files to read. Each fake
+        // file must give one metadata error, and no information is stored.
+        let state = open_state();
+        let report = import_folder(&state, &sample_fs(), "/photos", true).unwrap();
+        assert_eq!(report.added_ids.len(), 3);
+        assert_eq!(report.errors.len(), 3, "{:?}", report.errors);
+        for issue in &report.errors {
+            assert!(issue.message.contains("metadata"), "{issue:?}");
+        }
+        for &id in &report.added_ids {
+            let photo = get_photo(&state, id).unwrap();
+            assert_eq!(photo.capture_time_ms, None);
+            assert_eq!((photo.width, photo.height), (None, None));
+        }
+    }
+
+    fn outcome(id: PhotoId, name: &str, info: Result<ImageInfo, String>) -> MetadataOutcome {
+        MetadataOutcome {
+            id,
+            path: PathBuf::from(name),
+            info,
+        }
+    }
+
+    fn info(width: Option<u32>, height: Option<u32>) -> ImageInfo {
+        ImageInfo {
+            capture_time_ms: Some(5),
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn info_batch_filters_zero_sizes_and_read_errors() {
+        let (_, ids) = imported_state();
+        let plan = plan_info_batch(vec![
+            outcome(ids[0], "good.jpg", Ok(info(Some(4), Some(3)))),
+            outcome(ids[1], "zero_w.jpg", Ok(info(Some(0), Some(3)))),
+            outcome(ids[2], "zero_h.jpg", Ok(info(Some(4), Some(0)))),
+            outcome(ids[0], "unread.jpg", Err("cannot read the metadata".into())),
+        ]);
+        assert_eq!(plan.batch.len(), 1);
+        assert_eq!(plan.batch[0].0, ids[0]);
+        assert_eq!(plan.paths[&ids[0]], PathBuf::from("good.jpg"));
+        let issues: Vec<_> = plan
+            .issues
+            .iter()
+            .map(|i| (i.path.to_str().unwrap(), i.message.as_str()))
+            .collect();
+        assert_eq!(
+            issues,
+            [
+                ("zero_w.jpg", "image width must be at least 1"),
+                ("zero_h.jpg", "image height must be at least 1"),
+                ("unread.jpg", "cannot read the metadata"),
+            ]
+        );
+    }
+
+    #[test]
+    fn info_batch_with_zero_size_still_stores_the_other_photos() {
         let (state, ids) = imported_state();
-        assert_eq!(ids.len(), 3);
-        assert_eq!(get_photo(&state, ids[0]).unwrap().capture_time_ms, None);
+        let plan = plan_info_batch(vec![
+            outcome(ids[0], "a", Ok(info(Some(4), Some(3)))),
+            outcome(ids[1], "b", Ok(info(Some(0), Some(0)))),
+            outcome(ids[2], "c", Ok(info(Some(8), Some(6)))),
+        ]);
+        let written = state.lock().unwrap().set_image_infos(&plan.batch).unwrap();
+        assert_eq!(written.written, 2);
+        assert!(written.unknown.is_empty());
+        let size = |id| {
+            let p = get_photo(&state, id).unwrap();
+            (p.width, p.height)
+        };
+        assert_eq!(size(ids[0]), (Some(4), Some(3)));
+        assert_eq!(size(ids[1]), (None, None));
+        assert_eq!(size(ids[2]), (Some(8), Some(6)));
     }
 
     #[test]
