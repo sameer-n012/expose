@@ -14,6 +14,7 @@ use expose_catalog::{
     CatalogStore, ColorLabel, FileSystem, Flag, FolderNode, ImageInfo, ImportIssue, ImportReport,
     Photo, PhotoId, PhotoQuery, Rating,
 };
+use expose_core::develop::{DEVELOP_SETTINGS_VERSION, DevelopSettings};
 use serde::Serialize;
 
 use crate::capture::{self, MetadataJob, MetadataOutcome};
@@ -335,6 +336,79 @@ pub fn set_color_label(
     Ok(state.lock()?.set_color_label(ids, label)?)
 }
 
+/// Returns the develop settings of a photo as a JSON value.
+///
+/// A photo with no stored settings gives the default settings. Stored
+/// settings are parsed and validated (finite out-of-range values are
+/// clamped).
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::NotFound`] if the photo does not exist. Returns
+/// [`ErrorKind::Internal`] if the stored document does not parse or does
+/// not validate. The error is not hidden: the UI shows the message.
+pub fn get_develop_settings(
+    state: &CatalogState,
+    id: PhotoId,
+) -> Result<serde_json::Value, CommandError> {
+    let store = state.lock()?;
+    if store.get_photo(id)?.is_none() {
+        return Err(CommandError::new(
+            ErrorKind::NotFound,
+            format!("photo {id} does not exist"),
+        ));
+    }
+    let settings = match store.get_develop_settings(id)? {
+        None => DevelopSettings::default(),
+        Some(stored) => {
+            let mut settings: DevelopSettings = serde_json::from_value(stored.settings)
+                .map_err(|e| stored_settings_error(id, &e.to_string()))?;
+            settings
+                .validate()
+                .map_err(|e| stored_settings_error(id, &e.to_string()))?;
+            settings
+        }
+    };
+    settings_to_json(&settings)
+}
+
+/// Validates and stores the develop settings of a photo. Returns the
+/// stored settings (after clamping).
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::InvalidInput`] if `settings` does not parse or
+/// does not validate, and [`ErrorKind::NotFound`] if the photo does not
+/// exist. If an error occurs, the stored settings do not change.
+pub fn set_develop_settings(
+    state: &CatalogState,
+    id: PhotoId,
+    settings: serde_json::Value,
+) -> Result<serde_json::Value, CommandError> {
+    let mut settings: DevelopSettings = serde_json::from_value(settings).map_err(|e| {
+        CommandError::invalid_input(format!("the develop settings are not valid: {e}"))
+    })?;
+    settings.validate().map_err(|e| {
+        CommandError::invalid_input(format!("the develop settings are not valid: {e}"))
+    })?;
+    let value = settings_to_json(&settings)?;
+    state
+        .lock()?
+        .set_develop_settings(id, DEVELOP_SETTINGS_VERSION, &value)?;
+    Ok(value)
+}
+
+fn settings_to_json(settings: &DevelopSettings) -> Result<serde_json::Value, CommandError> {
+    serde_json::to_value(settings)
+        .map_err(|e| CommandError::internal(format!("cannot encode the develop settings: {e}")))
+}
+
+fn stored_settings_error(id: PhotoId, detail: &str) -> CommandError {
+    CommandError::internal(format!(
+        "the stored develop settings of photo {id} are not valid: {detail}"
+    ))
+}
+
 fn join_names<const N: usize>(names: [&str; N]) -> String {
     names.join(", ")
 }
@@ -613,11 +687,77 @@ mod tests {
             set_rating(&state, &ids, 3).unwrap_err(),
             set_flag(&state, &ids, "pick").unwrap_err(),
             set_color_label(&state, &ids, "red").unwrap_err(),
+            get_develop_settings(&state, PhotoId(1)).unwrap_err(),
+            set_develop_settings(&state, PhotoId(1), serde_json::json!({})).unwrap_err(),
         ];
         for error in errors {
             assert_eq!(error.kind, ErrorKind::Unavailable, "{error}");
             assert!(error.message.contains("disk full"), "{error}");
         }
+    }
+
+    #[test]
+    fn develop_settings_default_when_none_stored() {
+        let (state, ids) = imported_state();
+        let value = get_develop_settings(&state, ids[0]).unwrap();
+        let settings: DevelopSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings, DevelopSettings::default());
+        let missing = get_develop_settings(&state, PhotoId(999)).unwrap_err();
+        assert_eq!(missing.kind, ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn develop_settings_round_trip_and_clamp() {
+        let (state, ids) = imported_state();
+        let stored = set_develop_settings(
+            &state,
+            ids[0],
+            serde_json::json!({ "tone": { "exposure": 1.5, "contrast": 400.0 } }),
+        )
+        .unwrap();
+        assert_eq!(stored["tone"]["exposure"], 1.5);
+        assert_eq!(stored["tone"]["contrast"], 100.0);
+        assert_eq!(get_develop_settings(&state, ids[0]).unwrap(), stored);
+        // Other photos do not change.
+        let other: DevelopSettings =
+            serde_json::from_value(get_develop_settings(&state, ids[1]).unwrap()).unwrap();
+        assert_eq!(other, DevelopSettings::default());
+    }
+
+    #[test]
+    fn set_develop_settings_rejects_bad_input() {
+        let (state, ids) = imported_state();
+        let good = set_develop_settings(
+            &state,
+            ids[0],
+            serde_json::json!({ "tone": { "exposure": 1.0 } }),
+        )
+        .unwrap();
+        for bad in [
+            serde_json::json!({ "tone": { "exposure": "high" } }),
+            serde_json::json!({ "version": 99 }),
+            serde_json::json!(5),
+        ] {
+            let error = set_develop_settings(&state, ids[0], bad).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::InvalidInput, "{error}");
+        }
+        assert_eq!(get_develop_settings(&state, ids[0]).unwrap(), good);
+        let missing =
+            set_develop_settings(&state, PhotoId(999), serde_json::json!({})).unwrap_err();
+        assert_eq!(missing.kind, ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn stored_develop_settings_that_do_not_parse_give_an_error() {
+        let (state, ids) = imported_state();
+        state
+            .lock()
+            .unwrap()
+            .set_develop_settings(ids[0], 1, &serde_json::json!({ "version": 99 }))
+            .unwrap();
+        let error = get_develop_settings(&state, ids[0]).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Internal);
+        assert!(error.message.contains("not valid"), "{error}");
     }
 
     #[test]
