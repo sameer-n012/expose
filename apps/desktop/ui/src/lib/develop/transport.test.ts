@@ -39,7 +39,13 @@ describe('commands', () => {
     const body = new ArrayBuffer(8);
     vi.mocked(invoke).mockResolvedValue(body);
     await expect(ipcTransport.render(3, { tone: { exposure: 1 } })).resolves.toBe(body);
-    expect(invoke).toHaveBeenCalledWith('preview_render', { session: 3, settings: { tone: { exposure: 1 } } });
+    expect(invoke).toHaveBeenCalledWith('preview_render', {
+      session: 3,
+      settings: { tone: { exposure: 1 } },
+      longEdge: null,
+    });
+    await ipcTransport.render(3, {}, { longEdge: 1280 });
+    expect(invoke).toHaveBeenLastCalledWith('preview_render', { session: 3, settings: {}, longEdge: 1280 });
   });
 
   it('open and close send the arguments in camelCase', async () => {
@@ -69,6 +75,10 @@ describe('scheme transport', () => {
     expect(init.method).toBe('POST');
     expect(init.headers).toEqual({ 'Content-Type': 'text/plain' });
     expect(JSON.parse(String(init.body))).toEqual({ tone: { exposure: 0.5 } });
+
+    fetchMock.mockResolvedValue(new Response(new ArrayBuffer(4), { status: 200 }));
+    await schemeTransport.render(7, {}, { longEdge: 1280 });
+    expect(fetchMock.mock.calls[1]?.[0]).toMatch(/\/7\?format=rgba8&long=1280$/);
   });
 
   it('turns an HTTP error into a command error', async () => {

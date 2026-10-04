@@ -11,11 +11,21 @@
  * The source is a synthetic 6000 x 4000 test image in the shell, so no
  * photo is necessary. Each frame has new develop settings (exposure
  * steps), so each frame is a real GPU render.
+ *
+ * Candidates:
+ *
+ * - `pipelined-*`: the production path. Two requests in flight and a
+ *   `FramePresenter`. `@<n>` sends the target long edge `n`.
+ * - `slider-*`: a request every 4 ms for 2 s. `-pipelined` is the
+ *   production path; the others keep one request in flight.
+ * - `ipc-*`, `scheme-*`, `channel-*`: one frame at a time (the paths
+ *   before pipelining) and encoded frames, for comparison.
  */
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { drawFrame, frameContext, type DrawMode } from './draw';
-import { parseFrame, type Frame } from './frame';
+import { FRAME_HEADER_BYTES, parseFrame, type Frame } from './frame';
 import { describeError } from '../stores/toasts.svelte';
+import { FramePresenter } from './presenter';
 import { PreviewClient } from './previewClient';
 import {
   closePreview,
@@ -173,8 +183,13 @@ function encodedFetchCandidate(bench: BenchContext, format: 'jpeg' | 'png'): Pro
         bytes: blob.size,
       };
     },
-    'lossy at q85; shell encode on CPU',
+    encodedNote(format),
   );
+}
+
+/** The note of an encoded-frame candidate. */
+export function encodedNote(format: 'jpeg' | 'png'): string {
+  return format === 'jpeg' ? 'lossy at q85; shell encode on CPU' : 'lossless 8-bit; shell encode on CPU';
 }
 
 /** JPEG frames through an `<img>` element (GET; default settings, so the render is the same each time). */
@@ -228,31 +243,170 @@ async function channelCandidate(bench: BenchContext): Promise<BenchResult> {
   return summarize('channel-rgba8-put', samples, performance.now() - started, 'push; transfer = gap between frames');
 }
 
-/** A slider simulation: `request()` every 4 ms for 2 s through the client (latest wins). */
-async function sliderCandidate(bench: BenchContext, transport: FrameTransport): Promise<BenchResult> {
+/** Waits until `done()` is true or `timeoutMs` has passed. */
+async function waitFor(done: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (!done() && performance.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/** The name suffix for a target long edge. */
+function sizeSuffix(longEdge: number | null): string {
+  return longEdge === null ? '' : `@${longEdge}`;
+}
+
+/** The mean of the draw times of a presenter. */
+class DrawTimes {
+  #sum = 0;
+  #count = 0;
+  add(ms: number): void {
+    this.#sum += ms;
+    this.#count += 1;
+  }
+  get mean(): number {
+    return this.#count === 0 ? 0 : this.#sum / this.#count;
+  }
+}
+
+/**
+ * The production path as a stream: the client keeps two requests in
+ * flight (render of frame N + 1 overlaps the transfer of frame N), and a
+ * `FramePresenter` draws at most once per display frame. Each received
+ * frame sends the next request at once, so the shell never waits for the
+ * UI. `fps` counts received frames; the note gives the drawn frames (the
+ * display refresh rate limits them).
+ */
+async function pipelinedCandidate(
+  bench: BenchContext,
+  transport: FrameTransport,
+  mode: DrawMode,
+  longEdge: number | null = null,
+): Promise<BenchResult> {
+  const total = WARMUP_FRAMES + bench.frames;
   const samples: FrameSample[] = [];
+  const draws = new DrawTimes();
+  let failure: unknown = null;
+  let received = 0;
+  let next = 0;
+  let started = performance.now();
+  let lastAt = started;
+  const presenter = new FramePresenter({
+    context: () => bench.ctx,
+    mode,
+    onPresented: (event) => draws.add(event.drawMs),
+    onError: (error) => {
+      failure = error;
+    },
+  });
+  const sendNext = (): void => {
+    if (next < total) {
+      client.request(benchSettings(next));
+      next += 1;
+    }
+  };
   const client = new PreviewClient({
     transport,
+    maxInFlight: 2,
     onFrame: (event) => {
-      const t0 = performance.now();
-      bench.ctx.putImageData(new ImageData(event.frame.pixels, event.frame.width, event.frame.height), 0, 0);
-      const drawMs = performance.now() - t0;
+      received += 1;
+      const now = performance.now();
+      if (received === WARMUP_FRAMES) {
+        started = now;
+      } else if (received > WARMUP_FRAMES) {
+        samples.push({
+          transferMs: event.roundTripMs,
+          drawMs: 0,
+          shellMs: event.frame.renderUs / 1000,
+          bytes: event.frame.pixels.byteLength + FRAME_HEADER_BYTES,
+        });
+        lastAt = now;
+      }
+      presenter.present(event);
+      sendNext();
+    },
+    onError: (error) => {
+      failure = error;
+    },
+  });
+  client.setSession(bench.session.session);
+  client.setTargetLongEdge(longEdge);
+  try {
+    // Restart the stream if it stops (for example, after a superseded
+    // request), until all requests are sent.
+    while (next < total && failure === null) {
+      sendNext();
+      sendNext();
+      await client.idle();
+    }
+    await waitFor(() => presenter.idle, 1000);
+  } finally {
+    client.dispose();
+    presenter.dispose();
+  }
+  if (failure !== null) {
+    throw failure;
+  }
+  const c = client.stats;
+  const result = summarize(
+    `pipelined-${transport.name}-rgba8-${mode}${sizeSuffix(longEdge)}`,
+    samples,
+    lastAt - started,
+    `drawn ${presenter.stats.presented}, superseded ${c.superseded}, dropped ${c.dropped}`,
+  );
+  return { ...result, drawMs: draws.mean };
+}
+
+/**
+ * A slider simulation: `request()` every 4 ms for 2 s through the client
+ * (latest wins). `pipelined` uses the production path (two requests in
+ * flight, `FramePresenter` in `bitmap` mode); else one request in flight
+ * and `putImageData` in the frame function (the path before pipelining).
+ * The note gives the timer ticks: few ticks mean a busy main thread.
+ */
+async function sliderCandidate(
+  bench: BenchContext,
+  transport: FrameTransport,
+  pipelined: boolean,
+  longEdge: number | null = null,
+): Promise<BenchResult> {
+  const samples: FrameSample[] = [];
+  const draws = new DrawTimes();
+  const presenter = pipelined
+    ? new FramePresenter({
+        context: () => bench.ctx,
+        onPresented: (event) => draws.add(event.drawMs),
+        onError: (error) => console.error('bench slider draw failed', error),
+      })
+    : null;
+  const client = new PreviewClient({
+    transport,
+    maxInFlight: pipelined ? 2 : 1,
+    onFrame: (event) => {
       samples.push({
         transferMs: event.roundTripMs,
-        drawMs,
+        drawMs: 0,
         shellMs: event.frame.renderUs / 1000,
-        bytes: event.frame.pixels.byteLength,
+        bytes: event.frame.pixels.byteLength + FRAME_HEADER_BYTES,
       });
+      if (presenter !== null) {
+        presenter.present(event);
+        return;
+      }
+      const t0 = performance.now();
+      bench.ctx.putImageData(new ImageData(event.frame.pixels, event.frame.width, event.frame.height), 0, 0);
+      draws.add(performance.now() - t0);
     },
     onError: (error) => console.error('bench slider frame failed', error),
   });
   client.setSession(bench.session.session);
+  client.setTargetLongEdge(longEdge);
   const started = performance.now();
-  let i = 0;
+  let ticks = 0;
   await new Promise<void>((resolve) => {
     const timer = setInterval(() => {
-      client.request(benchSettings(i));
-      i += 1;
+      client.request(benchSettings(ticks));
+      ticks += 1;
       if (performance.now() - started >= 2000) {
         clearInterval(timer);
         resolve();
@@ -261,14 +415,20 @@ async function sliderCandidate(bench: BenchContext, transport: FrameTransport): 
   });
   await client.idle();
   const elapsed = performance.now() - started;
+  if (presenter !== null) {
+    await waitFor(() => presenter.idle, 1000);
+    presenter.dispose();
+  }
   client.dispose();
   const s = client.stats;
-  return summarize(
-    `slider-${transport.name}`,
+  const drawn = presenter === null ? samples.length : presenter.stats.presented;
+  const result = summarize(
+    `slider-${transport.name}${pipelined ? '-pipelined' : ''}${sizeSuffix(longEdge)}`,
     samples,
     elapsed,
-    `requests ${s.requested}, sent ${s.sent}, superseded ${s.superseded}`,
+    `ticks ${ticks}, sent ${s.sent}, superseded ${s.superseded}, dropped ${s.dropped}, drawn ${drawn}`,
   );
+  return { ...result, drawMs: draws.mean };
 }
 
 /** Runs all candidates and returns the results. `log` gets progress lines. */
@@ -294,17 +454,27 @@ export async function runTransportBench(options: {
   options.canvas.width = session.width;
   options.canvas.height = session.height;
   const bench: BenchContext = { session, ctx, frames: options.frames ?? 60 };
+  const half = Math.round(Math.max(session.width, session.height) / 2);
   const candidates: Array<[string, () => Promise<BenchResult>]> = [
+    // Production path: two requests in flight + presenter.
+    ['pipelined-ipc-rgba8-bitmap', () => pipelinedCandidate(bench, ipcTransport, 'bitmap')],
+    ['pipelined-ipc-rgba8-put', () => pipelinedCandidate(bench, ipcTransport, 'put')],
+    ['pipelined-scheme-rgba8-bitmap', () => pipelinedCandidate(bench, schemeTransport, 'bitmap')],
+    [`pipelined-ipc-rgba8-bitmap@${half}`, () => pipelinedCandidate(bench, ipcTransport, 'bitmap', half)],
+    ['slider-ipc-pipelined', () => sliderCandidate(bench, ipcTransport, true)],
+    [`slider-ipc-pipelined@${half}`, () => sliderCandidate(bench, ipcTransport, true, half)],
+    // The paths before pipelining, for comparison.
     ['ipc-rgba8-put', () => rawCandidate(bench, ipcTransport, 'put')],
     ['ipc-rgba8-bitmap', () => rawCandidate(bench, ipcTransport, 'bitmap')],
     ['scheme-rgba8-put', () => rawCandidate(bench, schemeTransport, 'put')],
     ['scheme-rgba8-bitmap', () => rawCandidate(bench, schemeTransport, 'bitmap')],
     ['channel-rgba8-put', () => channelCandidate(bench)],
+    ['slider-ipc', () => sliderCandidate(bench, ipcTransport, false)],
+    ['slider-scheme', () => sliderCandidate(bench, schemeTransport, false)],
+    // Encoded frames (slow in a debug build of the shell).
     ['scheme-jpeg-bitmap', () => encodedFetchCandidate(bench, 'jpeg')],
     ['scheme-png-bitmap', () => encodedFetchCandidate(bench, 'png')],
     ['scheme-jpeg-img', () => jpegImageCandidate(bench)],
-    ['slider-ipc', () => sliderCandidate(bench, ipcTransport)],
-    ['slider-scheme', () => sliderCandidate(bench, schemeTransport)],
   ];
   const results: BenchResult[] = [];
   try {

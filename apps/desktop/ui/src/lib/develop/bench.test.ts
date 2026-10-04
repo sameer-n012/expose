@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { benchSettings, formatResults, shellMsFromHeader, summarize } from './bench';
+import { benchSettings, encodedNote, formatResults, shellMsFromHeader, summarize } from './bench';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), Channel: vi.fn() }));
 
@@ -29,6 +29,12 @@ describe('bench helpers', () => {
     expect(shellMsFromHeader('2560,1707,3,10,4500')).toBe(4.5);
     expect(shellMsFromHeader(null)).toBe(0);
     expect(shellMsFromHeader('garbage')).toBe(0);
+  });
+
+  it('describes PNG frames as lossless and JPEG frames as lossy', () => {
+    expect(encodedNote('jpeg')).toMatch(/lossy at q85/);
+    expect(encodedNote('png')).toMatch(/lossless/);
+    expect(encodedNote('png')).not.toMatch(/lossy|q85/);
   });
 
   it('gives each frame new settings', () => {

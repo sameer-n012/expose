@@ -19,13 +19,32 @@
 //! Open and close jobs do not coalesce. They run in order, before a waiting
 //! frame request.
 //!
+//! # Pipelining
+//!
+//! The UI client keeps up to two frame requests in flight. While the UI
+//! receives frame N, this thread renders frame N + 1 (the waiting
+//! request). Thus render and transfer overlap. The single waiting slot is
+//! the backpressure: a third request supersedes the waiting one, so the
+//! engine never holds more than one running and one waiting frame.
+//!
 //! # Sessions
 //!
-//! A session is one photo: the downsampled source on the GPU, the develop
-//! output, and the display encoder. The engine keeps at most
+//! A session is one photo: the downsampled source in CPU memory (the
+//! "base", at the long edge of the open), and one GPU view of it (source,
+//! develop output, and display encoder). The engine keeps at most
 //! [`MAX_SESSIONS`] sessions; an open beyond this closes the session that
 //! was used least recently. One 2560 px session uses about 160 MB of GPU
-//! memory (two `rgba32float` images and one `rgba8unorm` image).
+//! memory (two `rgba32float` images and one `rgba8unorm` image) and 70 MB
+//! of CPU memory (the base).
+//!
+//! # Frame size
+//!
+//! A frame request can ask for a smaller long edge than the base (for
+//! example, the device-pixel size of the canvas). The engine clamps the
+//! value to [`MIN_LONG_EDGE`]..=base long edge (see
+//! [`effective_long_edge`]). When the clamped size is not the size of the
+//! GPU view, the engine makes a new view from the base. It frees the old
+//! view first, so the GPU memory does not increase.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -37,6 +56,7 @@ use expose_core::buffer::WorkingImage;
 use expose_core::develop::DevelopSettings;
 use expose_develop::{
     DevelopError, DisplayEncoder, DisplaySpace, Pipeline, PreviewRenderer, SourceInfo,
+    downsample_area, preview_size,
 };
 use expose_gpu::{GpuContext, GpuContextOptions, GpuError};
 use expose_raw::{BitDepth, EncodeError, EncodeOptions, encode};
@@ -50,6 +70,12 @@ pub const DEFAULT_LONG_EDGE: u32 = 2560;
 
 /// The largest preview long edge that a caller can request.
 pub const MAX_LONG_EDGE: u32 = 8192;
+
+/// The smallest long edge of a frame. A smaller requested value is
+/// increased to this value. Reason: very small frames give no useful
+/// preview, and a resize of the window to near zero must not make a 1 px
+/// GPU view.
+pub const MIN_LONG_EDGE: u32 = 64;
 
 /// The maximum number of open sessions.
 pub const MAX_SESSIONS: usize = 2;
@@ -203,6 +229,35 @@ pub struct RenderRequest {
     pub settings: DevelopSettings,
     /// The body form.
     pub format: FrameFormat,
+    /// The requested long edge of the frame in pixels. `None` gives the
+    /// base size of the session. See [`effective_long_edge`].
+    pub long_edge: Option<u32>,
+}
+
+/// Returns the long edge of a frame for a session with a base long edge
+/// of `base_long_edge`, when the caller requests `requested`.
+///
+/// - `None` gives `base_long_edge`.
+/// - The value is clamped to `MIN_LONG_EDGE..=base_long_edge`. Frames are
+///   never larger than the base (no upscale). If the base is smaller than
+///   [`MIN_LONG_EDGE`], the base size applies.
+///
+/// # Errors
+///
+/// [`PreviewError::InvalidSize`] if `requested` is 0 or larger than
+/// [`MAX_LONG_EDGE`]. These values are a bug in the caller, so the engine
+/// does not clamp them.
+pub fn effective_long_edge(
+    base_long_edge: u32,
+    requested: Option<u32>,
+) -> Result<u32, PreviewError> {
+    let Some(requested) = requested else {
+        return Ok(base_long_edge);
+    };
+    if requested == 0 || requested > MAX_LONG_EDGE {
+        return Err(PreviewError::InvalidSize(requested));
+    }
+    Ok(requested.max(MIN_LONG_EDGE).min(base_long_edge))
 }
 
 enum Job {
@@ -431,12 +486,72 @@ fn next_work(shared: &Shared) -> Work {
     }
 }
 
-struct Session {
-    id: SessionId,
+/// The GPU objects of a session at one frame size.
+struct View {
     renderer: PreviewRenderer,
     encoder: DisplayEncoder,
+}
+
+impl View {
+    /// Downsamples `base` to `long_edge` and uploads it.
+    fn new(
+        ctx: &GpuContext,
+        base: &WorkingImage,
+        long_edge: u32,
+        space: DisplaySpace,
+    ) -> Result<Self, PreviewError> {
+        pollster::block_on(async {
+            let renderer = PreviewRenderer::new(ctx, base, long_edge).await?;
+            let (width, height) = renderer.size();
+            let encoder = DisplayEncoder::new(ctx, width, height, space).await?;
+            Ok::<_, DevelopError>(Self { renderer, encoder })
+        })
+        .map_err(PreviewError::from)
+    }
+}
+
+struct Session {
+    id: SessionId,
+    /// The source, downsampled to the long edge of the open. Views of
+    /// other sizes are made from it.
+    base: WorkingImage,
+    /// The GPU view. `None` only after a failed resize; the next frame
+    /// tries again.
+    view: Option<View>,
+    space: DisplaySpace,
     source: SourceInfo,
     next_seq: u32,
+}
+
+impl Session {
+    fn base_long_edge(&self) -> u32 {
+        self.base.width().max(self.base.height())
+    }
+
+    /// Returns a view of the size for `long_edge`. Makes a new view if the
+    /// current view has another size; frees the old view first.
+    fn view_for(&mut self, ctx: &GpuContext, long_edge: u32) -> Result<&View, PreviewError> {
+        let wanted = preview_size(self.base.width(), self.base.height(), long_edge)?;
+        let fits = self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.renderer.size() == wanted);
+        if !fits {
+            // Free the GPU memory of the old view before the new upload.
+            self.view = None;
+            let view = View::new(ctx, &self.base, long_edge, self.space)?;
+            tracing::debug!(
+                session = self.id,
+                width = wanted.0,
+                height = wanted.1,
+                "preview view resized"
+            );
+            self.view = Some(view);
+        }
+        self.view
+            .as_ref()
+            .ok_or(PreviewError::Internal("the session view is missing"))
+    }
 }
 
 /// The state of the render thread.
@@ -471,12 +586,9 @@ impl Renderer {
             return Err(PreviewError::InvalidSize(request.max_long_edge));
         }
         let ctx = self.gpu()?;
-        let (renderer, encoder) = pollster::block_on(async {
-            let renderer = PreviewRenderer::new(ctx, &request.image, request.max_long_edge).await?;
-            let (width, height) = renderer.size();
-            let encoder = DisplayEncoder::new(ctx, width, height, request.space).await?;
-            Ok::<_, DevelopError>((renderer, encoder))
-        })?;
+        let base = downsample_area(&request.image, request.max_long_edge)?;
+        let base_long_edge = base.width().max(base.height());
+        let view = View::new(ctx, &base, base_long_edge, request.space)?;
         if self.sessions.len() >= MAX_SESSIONS {
             let closed = self.sessions.remove(0);
             tracing::debug!(
@@ -485,12 +597,13 @@ impl Renderer {
             );
         }
         self.next_id += 1;
-        let (width, height) = renderer.size();
+        let (width, height) = view.renderer.size();
         let id = self.next_id;
         self.sessions.push(Session {
             id,
-            renderer,
-            encoder,
+            base,
+            view: Some(view),
+            space: request.space,
             source: request.source,
             next_seq: 0,
         });
@@ -524,10 +637,12 @@ impl Renderer {
             .sessions
             .last_mut()
             .ok_or(PreviewError::Internal("the session list is empty"))?;
+        let long_edge = effective_long_edge(session.base_long_edge(), job.request.long_edge)?;
+        let pipeline = Pipeline::new(&job.request.settings, &session.source)?;
         let seq = session.next_seq;
         session.next_seq = seq.wrapping_add(1);
-        let (width, height) = session.renderer.size();
-        let pipeline = Pipeline::new(&job.request.settings, &session.source)?;
+        let view = session.view_for(ctx, long_edge)?;
+        let (width, height) = view.renderer.size();
         let mut header = FrameHeader {
             width,
             height,
@@ -536,20 +651,16 @@ impl Renderer {
         };
         let mut body = match job.request.format {
             FrameFormat::Rgba8 => pollster::block_on(async {
-                session.renderer.develop(ctx, &pipeline).await?;
-                session
-                    .encoder
-                    .encode(ctx, session.renderer.output())
-                    .await?;
+                view.renderer.develop(ctx, &pipeline).await?;
+                view.encoder.encode(ctx, view.renderer.output()).await?;
                 let mut body = vec![0_u8; rgba8_body_len(width, height)];
-                session
-                    .encoder
+                view.encoder
                     .read_into(ctx, &mut body[super::frame::FRAME_HEADER_BYTES..])
                     .await?;
                 Ok::<_, DevelopError>(body)
             })?,
             format @ (FrameFormat::Jpeg | FrameFormat::Png) => {
-                let image = pollster::block_on(session.renderer.render(ctx, &pipeline))?;
+                let image = pollster::block_on(view.renderer.render(ctx, &pipeline))?;
                 let options = if format == FrameFormat::Jpeg {
                     EncodeOptions::jpeg(FRAME_JPEG_QUALITY)
                 } else {
@@ -737,6 +848,7 @@ mod tests {
                     session: info.session,
                     settings: exposure(0.5),
                     format: FrameFormat::Rgba8,
+                    long_edge: None,
                 })
                 .unwrap();
             assert_eq!(frame.body.len(), rgba8_body_len(640, 427));
@@ -767,6 +879,7 @@ mod tests {
                     session: info.session,
                     settings: DevelopSettings::default(),
                     format,
+                    long_edge: None,
                 })
                 .unwrap();
             assert!(frame.body.starts_with(magic), "{format:?}");
@@ -783,6 +896,7 @@ mod tests {
                 session: info.session + 100,
                 settings: DevelopSettings::default(),
                 format: FrameFormat::Rgba8,
+                long_edge: None,
             })
             .unwrap_err();
         assert!(matches!(error, PreviewError::SessionNotFound(_)), "{error}");
@@ -792,6 +906,7 @@ mod tests {
                 session: info.session,
                 settings: exposure(f32::NAN),
                 format: FrameFormat::Rgba8,
+                long_edge: None,
             })
             .unwrap_err();
         assert_eq!(CommandError::from(error).kind, ErrorKind::InvalidInput);
@@ -802,6 +917,7 @@ mod tests {
                 session: info.session,
                 settings: DevelopSettings::default(),
                 format: FrameFormat::Rgba8,
+                long_edge: None,
             })
             .unwrap_err();
         assert!(matches!(error, PreviewError::SessionNotFound(_)), "{error}");
@@ -831,6 +947,7 @@ mod tests {
                 session: first.session,
                 settings: DevelopSettings::default(),
                 format: FrameFormat::Rgba8,
+                long_edge: None,
             })
             .unwrap_err();
         assert!(matches!(error, PreviewError::SessionNotFound(_)), "{error}");
@@ -854,6 +971,7 @@ mod tests {
                     session: info.session,
                     settings,
                     format: FrameFormat::Rgba8,
+                    long_edge: None,
                 },
                 Box::new(move |result| drop(sender.send((i, result)))),
             );
@@ -891,9 +1009,160 @@ mod tests {
                 session: 1,
                 settings: DevelopSettings::default(),
                 format: FrameFormat::Rgba8,
+                long_edge: None,
             })
             .unwrap_err();
         assert!(matches!(error, PreviewError::Stopped(_)), "{error}");
+    }
+
+    /// An engine with no render thread: requests stay in the queue, so the
+    /// queue rules can be tested with no GPU and no timing.
+    fn engine_without_thread() -> PreviewEngine {
+        PreviewEngine {
+            shared: Arc::new(Shared {
+                queue: Mutex::new(Queue::default()),
+                wake: Condvar::new(),
+            }),
+            thread: None,
+        }
+    }
+
+    fn rgba8_request(session: SessionId, long_edge: Option<u32>) -> RenderRequest {
+        RenderRequest {
+            session,
+            settings: DevelopSettings::default(),
+            format: FrameFormat::Rgba8,
+            long_edge,
+        }
+    }
+
+    #[test]
+    fn effective_long_edge_validates_and_clamps() {
+        assert_eq!(effective_long_edge(2560, None).unwrap(), 2560);
+        assert_eq!(effective_long_edge(2560, Some(1200)).unwrap(), 1200);
+        // No upscale beyond the base.
+        assert_eq!(effective_long_edge(2560, Some(4000)).unwrap(), 2560);
+        assert_eq!(
+            effective_long_edge(2560, Some(MAX_LONG_EDGE)).unwrap(),
+            2560
+        );
+        // Small values increase to the minimum.
+        assert_eq!(effective_long_edge(2560, Some(1)).unwrap(), MIN_LONG_EDGE);
+        // A base below the minimum keeps its size.
+        assert_eq!(effective_long_edge(40, Some(1)).unwrap(), 40);
+        assert!(matches!(
+            effective_long_edge(2560, Some(0)),
+            Err(PreviewError::InvalidSize(0))
+        ));
+        assert!(matches!(
+            effective_long_edge(2560, Some(MAX_LONG_EDGE + 1)),
+            Err(PreviewError::InvalidSize(_))
+        ));
+    }
+
+    #[test]
+    fn waiting_slot_holds_only_the_newest_frame_request() {
+        let engine = engine_without_thread();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for i in 0..3_u32 {
+            let sender = sender.clone();
+            engine.render(
+                rgba8_request(u64::from(i), None),
+                Box::new(move |result| drop(sender.send((i, result)))),
+            );
+        }
+        drop(sender);
+        // The first two requests are superseded at once, in order.
+        let replies: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(replies.len(), 2);
+        for (expected, (i, result)) in replies.iter().enumerate() {
+            assert_eq!(*i, u32::try_from(expected).unwrap());
+            assert!(matches!(result, Err(PreviewError::Superseded)));
+        }
+        // Only the newest request waits.
+        let queue = engine.shared.lock();
+        let waiting = queue.render.as_ref().map(|job| job.request.session);
+        assert_eq!(waiting, Some(2));
+    }
+
+    #[test]
+    fn open_and_close_jobs_run_before_the_waiting_frame() {
+        let engine = engine_without_thread();
+        engine.render(rgba8_request(1, None), Box::new(drop));
+        engine.close(7);
+        engine.close(8);
+        let order: Vec<String> = (0..3)
+            .map(|_| match next_work(&engine.shared) {
+                Work::Job(Job::Close(id)) => format!("close {id}"),
+                Work::Job(Job::Open(..)) => "open".to_owned(),
+                Work::Render(job) => format!("render {}", job.request.session),
+                Work::Stop(..) => "stop".to_owned(),
+            })
+            .collect();
+        assert_eq!(order, ["close 7", "close 8", "render 1"]);
+    }
+
+    #[test]
+    fn two_requests_in_flight_both_complete_in_order() {
+        let Some((engine, info)) = engine_with_session(1024, 683) else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let send = |i: u32| {
+            let sender = sender.clone();
+            engine.render(
+                rgba8_request(info.session, None),
+                Box::new(move |result| drop(sender.send((i, result)))),
+            );
+        };
+        send(0);
+        // Wait until the render thread takes the first request. Then the
+        // second request waits in the slot and nothing supersedes it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while engine.shared.lock().render.is_some() {
+            assert!(Instant::now() < deadline, "the render thread did not start");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        send(1);
+        drop(sender);
+        let results: Vec<_> = receiver.iter().collect();
+        let seqs: Vec<(u32, u32)> = results
+            .into_iter()
+            .map(|(i, result)| (i, result.unwrap().header.seq))
+            .collect();
+        assert_eq!(seqs, [(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn frames_follow_the_requested_long_edge() {
+        let Some((engine, info)) = engine_with_session(640, 427) else {
+            return;
+        };
+        let size = |long_edge| {
+            engine
+                .render_blocking(rgba8_request(info.session, long_edge))
+                .map(|frame| {
+                    assert_eq!(
+                        frame.body.len(),
+                        rgba8_body_len(frame.header.width, frame.header.height)
+                    );
+                    (frame.header.width, frame.header.height, frame.header.seq)
+                })
+        };
+        let small = preview_size(640, 427, 320).unwrap();
+        assert_eq!(size(Some(320)).unwrap(), (small.0, small.1, 0));
+        let min = preview_size(640, 427, MIN_LONG_EDGE).unwrap();
+        assert_eq!(size(Some(3)).unwrap(), (min.0, min.1, 1));
+        // Larger than the base: the base size.
+        assert_eq!(size(Some(5000)).unwrap(), (640, 427, 2));
+        assert!(matches!(size(Some(0)), Err(PreviewError::InvalidSize(0))));
+        assert!(matches!(
+            size(Some(MAX_LONG_EDGE + 1)),
+            Err(PreviewError::InvalidSize(_))
+        ));
+        // A rejected request takes no sequence number.
+        assert_eq!(size(None).unwrap(), (640, 427, 3));
+        assert_eq!(size(Some(320)).unwrap(), (small.0, small.1, 4));
     }
 
     /// Stage timings at the default preview size. Run with:
@@ -1000,6 +1269,7 @@ mod tests {
                     session: info.session,
                     settings,
                     format: FrameFormat::Rgba8,
+                    long_edge: None,
                 })
                 .unwrap();
         }

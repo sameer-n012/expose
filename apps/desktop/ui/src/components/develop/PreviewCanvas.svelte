@@ -1,14 +1,24 @@
 <!--
   The develop preview: a canvas that shows the frame of the newest develop
-  settings. A `PreviewClient` requests the frames (latest wins) and this
-  component draws them. The canvas has the preview size in pixels; CSS
-  scales it to fit the box and keeps the aspect ratio.
+  settings. A `PreviewClient` requests the frames (latest wins, up to two
+  requests in flight) and a `FramePresenter` draws them in order, at most
+  once per display frame. The component sends the device-pixel size of
+  its box as the target long edge, so the shell renders no more pixels
+  than the screen shows. CSS scales the canvas to fit the box and keeps
+  the aspect ratio.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import { isCommandError } from '../../lib/catalog';
-  import { DEFAULT_DRAW_MODE, drawFrame, frameContext, type DrawMode } from '../../lib/develop/draw';
-  import { PreviewClient, type FrameEvent } from '../../lib/develop/previewClient';
+  import { frameContext, type DrawMode } from '../../lib/develop/draw';
+  import {
+    DEFAULT_PRESENT_MODE,
+    FramePresenter,
+    type PresentedEvent,
+    type PresenterStats,
+  } from '../../lib/develop/presenter';
+  import { PreviewClient, type PreviewClientStats } from '../../lib/develop/previewClient';
+  import { targetLongEdge } from '../../lib/develop/size';
   import {
     selectTransport,
     type DevelopSettingsJson,
@@ -25,11 +35,14 @@
     settings: DevelopSettingsJson;
     /** The frame transport. Read once, at creation. Default: `selectTransport()`. */
     transport?: FrameTransport;
-    /** The display color space of the session. */
+    /** The display color space of the session. Read once, at creation. */
     displaySpace?: DisplaySpace;
+    /** The draw mode. Read once, at creation. Default: `bitmap` (falls back to `put`). */
     drawMode?: DrawMode;
+    /** The maximum number of frame requests in flight. Read once, at creation. Default 2. */
+    maxInFlight?: number;
     /** Called after each drawn frame. */
-    onframe?: (event: FrameEvent) => void;
+    onframe?: (event: PresentedEvent) => void;
     /** Called for each failed frame. The component also shows the message. */
     onerror?: (error: unknown) => void;
   }
@@ -39,34 +52,23 @@
     settings,
     transport,
     displaySpace = 'srgb',
-    drawMode = DEFAULT_DRAW_MODE,
+    drawMode = DEFAULT_PRESENT_MODE,
+    maxInFlight,
     onframe,
     onerror,
   }: Props = $props();
 
+  let box: HTMLDivElement | undefined = $state();
   let canvas: HTMLCanvasElement | undefined = $state();
   let message: string | null = $state(null);
   let context: CanvasRenderingContext2D | null = null;
-  /** Draws run one after the other, so that a slow draw cannot overwrite a newer frame. */
-  let drawing: Promise<void> = Promise.resolve();
 
-  function draw(event: FrameEvent): void {
+  function getContext(): CanvasRenderingContext2D | null {
     if (canvas === undefined) {
-      return;
+      return null;
     }
-    context ??= frameContext(canvas, displaySpace);
-    const ctx = context;
-    if (ctx === null) {
-      message = 'The web view has no 2D canvas.';
-      return;
-    }
-    drawing = drawing
-      .then(() => drawFrame(ctx, event.frame, drawMode, displaySpace))
-      .then(() => {
-        message = null;
-        onframe?.(event);
-      })
-      .catch(report);
+    context ??= frameContext(canvas, untrack(() => displaySpace));
+    return context;
   }
 
   function report(error: unknown): void {
@@ -74,14 +76,58 @@
     onerror?.(error);
   }
 
-  const client = new PreviewClient({
-    transport: untrack(() => transport) ?? selectTransport(),
-    onFrame: draw,
+  const presenter = new FramePresenter({
+    context: getContext,
+    mode: untrack(() => drawMode),
+    space: untrack(() => displaySpace),
+    onPresented: (event) => {
+      message = null;
+      onframe?.(event);
+    },
     onError: report,
   });
 
+  const client = new PreviewClient({
+    transport: untrack(() => transport) ?? selectTransport(),
+    onFrame: (event) => presenter.present(event),
+    onError: report,
+    ...untrack(() => (maxInFlight === undefined ? {} : { maxInFlight })),
+  });
+
+  /** The counters of the client and the presenter (for diagnostics). */
+  export function getStats(): { client: PreviewClientStats; presenter: PresenterStats } {
+    return { client: { ...client.stats }, presenter: { ...presenter.stats } };
+  }
+
+  /** Sends the device-pixel size of the box as the target long edge. */
+  function updateTarget(): void {
+    const current = untrack(() => session);
+    if (box === undefined || current === null) {
+      return;
+    }
+    const rect = box.getBoundingClientRect();
+    const ratio = typeof devicePixelRatio === 'number' ? devicePixelRatio : 1;
+    client.setTargetLongEdge(targetLongEdge(rect, ratio, current));
+  }
+
   $effect(() => {
-    client.setSession(session?.session ?? null);
+    const id = session?.session ?? null;
+    if (id !== client.session) {
+      client.setSession(id);
+      presenter.reset();
+    }
+    // Measure before the first request of the session, so that its
+    // first frame already has the right size.
+    updateTarget();
+  });
+
+  $effect(() => {
+    if (box === undefined || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+    const observer = new ResizeObserver(() => updateTarget());
+    observer.observe(box);
+    return () => observer.disconnect();
   });
 
   $effect(() => {
@@ -93,10 +139,13 @@
     }
   });
 
-  onDestroy(() => client.dispose());
+  onDestroy(() => {
+    client.dispose();
+    presenter.dispose();
+  });
 </script>
 
-<div class="preview">
+<div class="preview" bind:this={box}>
   <canvas
     bind:this={canvas}
     width={session?.width ?? 0}
@@ -119,9 +168,11 @@
     overflow: hidden;
   }
 
+  /* The canvas fills the box; `object-fit` scales the frame to fit and
+     keeps the aspect ratio, for frames smaller or larger than the box. */
   canvas {
-    max-width: 100%;
-    max-height: 100%;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
   }
 

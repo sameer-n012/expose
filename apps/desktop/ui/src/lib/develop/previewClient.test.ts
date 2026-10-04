@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { makeFrameBody } from '../../test/frames';
-import { isSuperseded, PreviewClient, type FrameEvent } from './previewClient';
-import type { DevelopSettingsJson, FrameTransport } from './transport';
+import { DEFAULT_MAX_IN_FLIGHT, isSuperseded, PreviewClient, type FrameEvent } from './previewClient';
+import type { DevelopSettingsJson, FrameTransport, RenderOptions } from './transport';
 
 interface Call {
   readonly session: number;
   readonly settings: DevelopSettingsJson;
+  readonly longEdge: number | null;
   resolve(body: ArrayBuffer): void;
   reject(error: unknown): void;
 }
@@ -15,9 +16,9 @@ class ManualTransport implements FrameTransport {
   readonly name = 'ipc' as const;
   readonly calls: Call[] = [];
 
-  render(session: number, settings: DevelopSettingsJson): Promise<ArrayBuffer> {
+  render(session: number, settings: DevelopSettingsJson, options: RenderOptions = {}): Promise<ArrayBuffer> {
     return new Promise((resolve, reject) => {
-      this.calls.push({ session, settings, resolve, reject });
+      this.calls.push({ session, settings, longEdge: options.longEdge ?? null, resolve, reject });
     });
   }
 
@@ -61,8 +62,8 @@ describe('PreviewClient', () => {
     await expect(client.idle()).resolves.toBeUndefined();
   });
 
-  it('keeps one request in flight and sends only the newest waiting settings', async () => {
-    const { transport, client, frames } = setup();
+  it('with one slot, keeps one request in flight and sends only the newest waiting settings', async () => {
+    const { transport, client, frames } = setup(1);
     client.setSession(5);
     client.request(ev(1));
     client.request(ev(2));
@@ -130,7 +131,7 @@ describe('PreviewClient', () => {
   });
 
   it('drops results of an old session and waiting settings at a session change', async () => {
-    const { transport, client, frames, errors } = setup();
+    const { transport, client, frames, errors } = setup(1);
     client.setSession(1);
     client.request(ev(1));
     client.request(ev(2));
@@ -187,6 +188,94 @@ describe('PreviewClient', () => {
     await client.idle();
     expect(frames.map((f) => f.frame.seq)).toEqual([1]);
     expect(client.stats.dropped).toBe(1);
+  });
+
+  it('keeps two requests in flight by default and never more', async () => {
+    expect(DEFAULT_MAX_IN_FLIGHT).toBe(2);
+    const { transport, client, frames } = setup();
+    client.setSession(1);
+    for (let i = 1; i <= 5; i += 1) {
+      client.request(ev(i));
+    }
+    expect(transport.calls.map((c) => c.settings)).toEqual([ev(1), ev(2)]);
+    expect(client.inFlight).toBe(2);
+
+    // The first frame frees one slot: the newest waiting settings go out.
+    transport.call(0).resolve(makeFrameBody(1, 1, 0));
+    await flush();
+    expect(transport.calls.map((c) => c.settings)).toEqual([ev(1), ev(2), ev(5)]);
+    expect(client.inFlight).toBe(2);
+
+    transport.call(1).resolve(makeFrameBody(1, 1, 1));
+    transport.call(2).resolve(makeFrameBody(1, 1, 2));
+    await client.idle();
+    expect(frames.map((f) => f.frame.seq)).toEqual([0, 1, 2]);
+    expect(client.stats).toMatchObject({ requested: 5, sent: 3, delivered: 3, peakInFlight: 2 });
+  });
+
+  it('frees the slot before the frame handler runs', async () => {
+    const transport = new ManualTransport();
+    const callsAtFrame: number[] = [];
+    const client = new PreviewClient({
+      transport,
+      onFrame: () => callsAtFrame.push(transport.calls.length),
+      onError: (error) => {
+        throw error;
+      },
+      maxInFlight: 1,
+    });
+    client.setSession(1);
+    client.request(ev(1));
+    client.request(ev(2));
+    transport.call(0).resolve(makeFrameBody(1, 1, 0));
+    await flush();
+    // The second request was sent before the first frame was handled.
+    expect(callsAtFrame).toEqual([2]);
+  });
+
+  it('with two slots, never delivers a stale frame after a superseded one', async () => {
+    const { transport, client, frames } = setup(2);
+    client.setSession(1);
+    client.request(ev(1));
+    client.request(ev(2));
+    client.request(ev(3));
+    // Request 2 is superseded in the shell. Request 3 renders as frame 1
+    // and arrives before frame 0 (request 1).
+    transport.call(1).reject({ kind: 'superseded', message: 'replaced' });
+    await flush();
+    expect(transport.call(2).settings).toEqual(ev(3));
+    transport.call(2).resolve(makeFrameBody(1, 1, 1));
+    await flush();
+    transport.call(0).resolve(makeFrameBody(1, 1, 0));
+    await client.idle();
+    expect(frames.map((f) => f.frame.seq)).toEqual([1]);
+    expect(client.stats).toMatchObject({ superseded: 1, dropped: 1, delivered: 1 });
+  });
+
+  it('sends the target long edge and requests a new frame when it changes', async () => {
+    const { transport, client } = setup(1);
+    client.setSession(1);
+    // No settings yet: a size change sends nothing.
+    client.setTargetLongEdge(1280);
+    expect(transport.calls).toHaveLength(0);
+    expect(client.targetLongEdge).toBe(1280);
+
+    client.request(ev(1));
+    expect(transport.call(0).longEdge).toBe(1280);
+    transport.call(0).resolve(makeFrameBody(1, 1, 0));
+    await client.idle();
+
+    client.setTargetLongEdge(1280);
+    expect(transport.calls).toHaveLength(1);
+    client.setTargetLongEdge(640);
+    expect(transport.call(1)).toMatchObject({ settings: ev(1), longEdge: 640 });
+    transport.call(1).resolve(makeFrameBody(1, 1, 1));
+    await client.idle();
+
+    // Invalid values mean "no target".
+    client.setTargetLongEdge(Number.NaN);
+    expect(client.targetLongEdge).toBeNull();
+    expect(transport.call(2).longEdge).toBeNull();
   });
 
   it('a throwing frame handler is reported as an error', async () => {
