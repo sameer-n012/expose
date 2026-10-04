@@ -1,7 +1,53 @@
 import { describe, expect, it, vi } from 'vitest';
-import { benchSettings, encodedNote, formatResults, shellMsFromHeader, summarize } from './bench';
+import {
+  benchSettings,
+  DEFAULT_SETTLE_MS,
+  encodedNote,
+  formatResults,
+  parseBenchQuery,
+  selectCandidates,
+  shellMsFromHeader,
+  summarize,
+} from './bench';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), Channel: vi.fn() }));
+
+describe('bench selection', () => {
+  const candidates = [
+    ['a', 1],
+    ['b', 2],
+    ['c', 3],
+  ] as const;
+
+  it('reads no options as all candidates, in order, with the default pause', () => {
+    expect(parseBenchQuery('?bench=transport')).toEqual({ only: null, reverse: false, settleMs: DEFAULT_SETTLE_MS });
+  });
+
+  it('reads only, reverse, and settle', () => {
+    expect(parseBenchQuery('?bench=transport&only=slider-ipc, ipc-rgba8-bitmap,&reverse=1&settle=0')).toEqual({
+      only: ['slider-ipc', 'ipc-rgba8-bitmap'],
+      reverse: true,
+      settleMs: 0,
+    });
+    expect(parseBenchQuery('?reverse=0&settle=-5&only=').reverse).toBe(false);
+    expect(parseBenchQuery('?settle=abc').settleMs).toBe(DEFAULT_SETTLE_MS);
+    expect(parseBenchQuery('?only=').only).toBeNull();
+  });
+
+  it('keeps the list order for a subset and can reverse it', () => {
+    const names = (list: ReadonlyArray<readonly [string, number]>): string[] => list.map(([name]) => name);
+    expect(names(selectCandidates(candidates, { only: null, reverse: false }))).toEqual(['a', 'b', 'c']);
+    expect(names(selectCandidates(candidates, { only: ['c', 'a'], reverse: false }))).toEqual(['a', 'c']);
+    expect(names(selectCandidates(candidates, { only: ['c', 'a'], reverse: true }))).toEqual(['c', 'a']);
+    expect(names(selectCandidates(candidates, { only: null, reverse: true }))).toEqual(['c', 'b', 'a']);
+  });
+
+  it('rejects an unknown candidate name and lists the valid names', () => {
+    expect(() => selectCandidates(candidates, { only: ['a', 'x'], reverse: false })).toThrow(
+      'Unknown bench candidate(s): x. Valid names: a, b, c.',
+    );
+  });
+});
 
 describe('bench helpers', () => {
   it('summarizes means and frames per second', () => {
