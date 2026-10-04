@@ -6,7 +6,7 @@ No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature i
 
 ## In progress
 
-- (none — all agent branches are merged)
+- **preview-pipelining** (agent, `feat/preview-pipelining`)
 
 ## Next (suggested order)
 
@@ -14,9 +14,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 1. [ ] **preview-pipelining** (O) — overlap render and transfer (measured: channel push 97 fps vs. request/response 46–50 fps; slider simulation 33.8 fps). Options: client keeps 2 requests in flight, or settings by command + frames pushed through a `Channel` with an acknowledge per frame (backpressure, latest wins). Also render at the canvas device-pixel size when it is smaller than 2560 px, and keep the main thread free during frame receive. Measure again with `?bench=transport`, also in a release build (`tauri dev` builds Rust without optimization). ADR 0008, "Webview measurement".
 2. [ ] **develop-ui** (S) — Develop module panel with sliders bound to `DevelopSettings`, live preview through `PreviewCanvas` / `PreviewClient` (`ui/src/lib/develop/`, commands `preview_open`/`preview_render`/`preview_close`), settings saved to the catalog (`develop_settings` JSON, version from `DEVELOP_SETTINGS_VERSION`).
-3. [ ] **import-batch-info** (S) — see follow-ups. Same paths as develop-ui (`src-tauri`), so run it before or after.
-4. [ ] **export-v1** (S/O) — encode API is done (PR #11). Remaining: export dialog in the UI (format, quality, color space, size, destination, file naming), Tauri command that runs decode → develop → resize → `encode_path` on a worker, progress + errors. FEATURES 5.1 P1.
-5. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
+3. [ ] **export-v1** (S/O) — encode API is done (PR #11). Remaining: export dialog in the UI (format, quality, color space, size, destination, file naming), Tauri command that runs decode → develop → resize → `encode_path` on a worker, progress + errors. FEATURES 5.1 P1.
+4. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 
 ### Follow-ups from merged work
 
@@ -28,7 +27,6 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - [ ] **editor-storage** — sparse tiled layer storage; history memory budget; clipping masks; layer effects.
 - [ ] **ui-polish** (S) — save panel layout between sessions; Tab shortcut conflicts with keyboard focus navigation; refresh shortcut tooltips after a remap.
 - [ ] **ui-catalog-followups** (S) — search box is a placeholder; per-request version for optimistic rollback (two quick changes can restore an old value); folder count is direct-only, so it differs from the grid total with "include subfolders".
-- [ ] **import-batch-info** (S, `src-tauri`) — call `CatalogStore::set_image_infos` (PR #14) from import in `src-tauri` instead of one `set_image_info` per photo; in-memory import tests in `src-tauri` get metadata errors for fake files.
 - [ ] **thumbnail-followups** — RAW with non-default white balance: give the pipeline the as-shot `SourceInfo` (from `DecodeInfo.raw.multipliers`), not `SourceInfo::RENDERED`; apply crop/straighten when a geometry stage exists; reduce memory (scaled JPEG decode, or decode to 8-bit, instead of a full-size f32 image); cache size limit and removal of thumbnails of deleted photos; check the `thumb` scheme, CSP, and 304 handling in a real webview.
 - [ ] **encode-followups** — copy EXIF/XMP/IPTC into exported files; gamut mapping instead of clipping; JPEG optimized Huffman tables, progressive mode, gray output; TIFF ICC tag type UNDEFINED instead of BYTE.
 - [ ] **catalog-paths** (S) — case-insensitive path comparison on macOS; Windows paths in tests.
@@ -41,6 +39,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **import-batch-info** (PR #17) — import stores image info with one `set_image_infos` call (one transaction, one lock). Items with a zero width or height are filtered out before the batch and reported as import issues. Unknown ids and a failed batch give one issue per photo. The fake-file import test asserts its metadata errors.
 
 - [x] **frame-transport** (PR #16) — GPU display encode to 8-bit sRGB/Display P3 (`expose_develop::display`), `Rgba8Unorm` in `expose-gpu`, preview engine (one render thread, ≤ 2 sessions, latest wins), commands `preview_open`/`preview_render`/`preview_close` (raw `ipc::Response`), `preview://` scheme, `PreviewClient` + `PreviewCanvas`, benchmark at `?bench=transport`. Rust side about 4.3 ms per 2560 px frame. ADR 0008.
 
