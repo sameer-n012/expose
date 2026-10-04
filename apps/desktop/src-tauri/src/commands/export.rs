@@ -52,6 +52,10 @@ pub async fn export_start<R: Runtime>(
             Some(state) => export::load_photo(state.inner(), photo_id),
             None => Err("the catalog state is not registered".to_owned()),
         };
+        let originals = |folder: &std::path::Path| match app.try_state::<CatalogState>() {
+            Some(state) => export::original_names_in(state.inner(), folder),
+            None => Err("the catalog state is not registered".to_owned()),
+        };
         let mut emit = |event: ExportEvent| {
             if let Err(error) = on_event.send(event) {
                 // The window can close while a job runs. The job continues,
@@ -59,7 +63,7 @@ pub async fn export_start<R: Runtime>(
                 tracing::warn!(job = control.id(), %error, "cannot send an export event");
             }
         };
-        export::run_job(&plan, control, &load, &mut emit);
+        export::run_job(&plan, control, &load, &originals, &mut emit);
     }))
 }
 

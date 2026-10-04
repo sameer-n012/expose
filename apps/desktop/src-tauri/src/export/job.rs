@@ -1,5 +1,6 @@
 //! The export of the photos of one job, and the events of the job.
 
+use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
@@ -103,6 +104,12 @@ pub struct PhotoSource {
 /// while it reads.
 pub type PhotoLoader<'a> = dyn Fn(i64) -> Result<PhotoSource, String> + 'a;
 
+/// Returns the file names of the original files of all catalog photos in
+/// a folder. Export never writes to these names.
+///
+/// Returns `Err` with a message for the user if the catalog fails.
+pub type OriginalsLoader<'a> = dyn Fn(&Path) -> Result<HashSet<String>, String> + 'a;
+
 /// The result of the export of one photo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
@@ -119,10 +126,16 @@ enum Outcome {
 ///
 /// A panic in the export of one photo (for example, in a decoder) gives a
 /// `photoFailed` event, and the job continues.
+///
+/// Before the first photo, the function reads the names of the catalog
+/// originals in the destination with `originals`, one time. If this read
+/// fails, each photo gives a `photoFailed` event: without the list, an
+/// export could replace an original file.
 pub fn run_job(
     plan: &ExportPlan,
     control: &JobControl,
     load: &PhotoLoader<'_>,
+    originals: &OriginalsLoader<'_>,
     emit: &mut dyn FnMut(ExportEvent),
 ) {
     let job_id = control.id();
@@ -136,7 +149,11 @@ pub fn run_job(
         .destination
         .canonicalize()
         .unwrap_or_else(|_| plan.destination.clone());
-    let mut names = JobNames::new();
+    let mut names = originals(&plan.destination)
+        .map(JobNames::with_reserved)
+        .map_err(|error| {
+            format!("cannot read the catalog photos of the destination folder: {error}")
+        });
     let (mut written, mut skipped, mut failed) = (0_u32, 0_u32, 0_u32);
     let mut cancelled = false;
 
@@ -145,8 +162,9 @@ pub fn run_job(
             cancelled = true;
             break;
         }
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            export_photo(plan, &destination, &mut names, photo_id, load)
+        let result = catch_unwind(AssertUnwindSafe(|| match &mut names {
+            Ok(names) => export_photo(plan, &destination, names, photo_id, load),
+            Err(message) => Err(message.clone()),
         }))
         .unwrap_or_else(|_| Err("an internal error occurred (a panic); see the log".to_owned()));
         match result {

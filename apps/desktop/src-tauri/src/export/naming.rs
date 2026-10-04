@@ -59,9 +59,14 @@ pub fn base_name(source: &Path, naming: &Naming, fallback_id: i64) -> String {
 /// policies. Names are compared without case, because the default file
 /// systems of macOS and Windows do not make a difference between
 /// `A.jpg` and `a.jpg`.
+///
+/// The set can also hold reserved names: the original files of catalog
+/// photos in the destination folder. Export never selects a reserved
+/// name, because original files are read-only.
 #[derive(Debug, Default)]
 pub struct JobNames {
     used: HashSet<String>,
+    reserved: HashSet<String>,
 }
 
 impl JobNames {
@@ -70,12 +75,21 @@ impl JobNames {
         Self::default()
     }
 
+    /// Makes a set with these reserved names (compared without case).
+    pub fn with_reserved(names: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            used: HashSet::new(),
+            reserved: names.into_iter().map(|name| name.to_lowercase()).collect(),
+        }
+    }
+
     /// Selects the output name for `base` + `.` + `extension`.
     ///
     /// The candidates are `base.ext`, `base-2.ext`, `base-3.ext`, and so
     /// on. A candidate is not available if an earlier photo of this job
-    /// uses it, or if it is equal to `protected` (the original file of the
-    /// photo, when the destination is the source folder). The policy then
+    /// uses it, if it is a reserved name, or if it is equal to `protected`
+    /// (the original file of the photo, when the destination is the source
+    /// folder). The policy then
     /// applies to the first available candidate:
     ///
     /// - [`ConflictPolicy::UniqueName`]: the first candidate that also
@@ -106,7 +120,10 @@ impl JobNames {
                 format!("{base}-{attempt}.{extension}")
             };
             let key = name.to_lowercase();
-            if self.used.contains(&key) || protected.as_deref() == Some(key.as_str()) {
+            if self.used.contains(&key)
+                || self.reserved.contains(&key)
+                || protected.as_deref() == Some(key.as_str())
+            {
                 continue;
             }
             let resolution = match (policy, exists(&name)) {
@@ -195,6 +212,24 @@ mod tests {
             assert_eq!(
                 result,
                 Ok(Resolution::Write("a-2.jpg".into())),
+                "{policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_originals_are_never_selected() {
+        let exists = on_disk(&["a.jpg", "a-2.jpg"]);
+        for policy in [
+            ConflictPolicy::UniqueName,
+            ConflictPolicy::Overwrite,
+            ConflictPolicy::Skip,
+        ] {
+            let mut names = JobNames::with_reserved(["A.JPG".to_owned(), "a-2.JPG".to_owned()]);
+            let result = names.resolve("a", "jpg", policy, None, &exists);
+            assert_eq!(
+                result,
+                Ok(Resolution::Write("a-3.jpg".into())),
                 "{policy:?}"
             );
         }

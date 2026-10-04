@@ -22,17 +22,21 @@
 //!   render thread, and an export must not make the preview slow.
 //! - The catalog lock is held only to read the path and the settings of a
 //!   photo, never during decode or encode.
+//! - Original files are read-only. Export never writes to the path of a
+//!   catalog photo, with all conflict policies: such a name is reserved,
+//!   and the output gets the next free `-N` name ([`original_names_in`]).
 
 pub mod job;
 pub mod manager;
 pub mod naming;
 pub mod request;
 
+use std::collections::HashSet;
 use std::path::Path;
 
-use expose_catalog::{CatalogStore, PhotoId};
+use expose_catalog::{CatalogStore, FolderId, PhotoId};
 
-pub use job::{ExportEvent, PhotoSource, run_job};
+pub use job::{ExportEvent, OriginalsLoader, PhotoLoader, PhotoSource, run_job};
 pub use manager::{ExportManager, JobControl, JobId};
 pub use request::{ExportPlan, ExportRequest};
 
@@ -85,6 +89,59 @@ pub fn load_photo(state: &CatalogState, photo_id: i64) -> Result<PhotoSource, St
     Ok(PhotoSource { path, settings })
 }
 
+/// Returns the file names of the original files of all catalog photos in
+/// the folder `destination`.
+///
+/// A catalog folder matches if its path is equal to `destination`, with
+/// both paths in canonical form (if possible) and compared without case.
+/// The comparison without case can match more folders than necessary on a
+/// case-sensitive file system; this only reserves more names, so it is
+/// safe.
+///
+/// The function locks the catalog two times for a short time: to list the
+/// folders, and to read the names. The canonical form of each folder path
+/// is made between the two locks, because it needs file system access.
+///
+/// # Errors
+///
+/// Returns a message for the user if the catalog is not available or a
+/// read fails.
+pub fn original_names_in(
+    state: &CatalogState,
+    destination: &Path,
+) -> Result<HashSet<String>, String> {
+    let key = |path: &Path| {
+        path.canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .to_lowercase()
+    };
+    let target = key(destination);
+    let folders = state
+        .lock()
+        .map_err(|error| error.message)?
+        .list_folders()
+        .map_err(|error| error.to_string())?;
+    let matching: Vec<FolderId> = folders
+        .into_iter()
+        .filter(|folder| key(&folder.path) == target)
+        .map(|folder| folder.id)
+        .collect();
+    if matching.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let store = state.lock().map_err(|error| error.message)?;
+    let mut names = HashSet::new();
+    for id in matching {
+        names.extend(
+            store
+                .known_file_names(id)
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -122,7 +179,10 @@ mod tests {
         manager
             .submit(Box::new(move |control| {
                 let load = |id| load_photo(&state, id);
-                run_job(&plan, control, &load, &mut |event| tx.send(event).unwrap());
+                let originals = |folder: &Path| original_names_in(&state, folder);
+                run_job(&plan, control, &load, &originals, &mut |event| {
+                    tx.send(event).unwrap();
+                });
             }))
             .unwrap();
         let mut events = Vec::new();
@@ -294,6 +354,75 @@ mod tests {
     }
 
     #[test]
+    fn export_never_writes_to_any_catalog_original() {
+        let source = tempfile::tempdir().unwrap();
+        let png = capture::tiny_png();
+        // `a_out.png` is a catalog photo, and also the output name of `a`.
+        // `a_out-2.png` is a catalog photo with another case.
+        std::fs::write(source.path().join("a.png"), &png).unwrap();
+        std::fs::write(source.path().join("a_out.png"), &png).unwrap();
+        std::fs::write(source.path().join("A_OUT-2.png"), &png).unwrap();
+        let state = std::sync::Arc::new(CatalogState::from_store(
+            None,
+            SqliteStore::open_in_memory().unwrap(),
+        ));
+        let report = service::import_folder(
+            &state,
+            &expose_catalog::StdFileSystem,
+            source.path().to_str().unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.added, 3);
+        let a = report
+            .added_ids
+            .iter()
+            .find(|id| {
+                state
+                    .lock()
+                    .unwrap()
+                    .photo_path(**id)
+                    .unwrap()
+                    .unwrap()
+                    .ends_with("a.png")
+            })
+            .unwrap()
+            .0;
+
+        let names = original_names_in(&state, source.path()).unwrap();
+        assert_eq!(names.len(), 3, "{names:?}");
+
+        let manager = ExportManager::start().unwrap();
+        for policy in ["uniqueName", "overwrite", "skip"] {
+            // A destination path that is not in canonical form must match.
+            let dest = source.path().join(".");
+            let mut value = request(
+                &dest,
+                &[a],
+                &serde_json::json!({ "kind": "png", "bitDepth": 8 }),
+            );
+            value["size"] = serde_json::json!({ "mode": "original" });
+            value["onConflict"] = serde_json::json!(policy);
+            let events = run(&manager, &state, value);
+            let ExportEvent::PhotoDone { output_path, .. } = &events[1] else {
+                panic!("{policy}: {events:?}");
+            };
+            assert!(
+                output_path.ends_with("a_out-3.png"),
+                "{policy}: {output_path}"
+            );
+            std::fs::remove_file(output_path).unwrap();
+        }
+        for name in ["a.png", "a_out.png", "A_OUT-2.png"] {
+            assert_eq!(
+                std::fs::read(source.path().join(name)).unwrap(),
+                png,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn cancelled_job_finishes_with_cancelled() {
         let out = tempfile::tempdir().unwrap();
         let state = std::sync::Arc::new(CatalogState::from_store(
@@ -321,7 +450,10 @@ mod tests {
         let job = manager
             .submit(Box::new(move |control| {
                 let load = |id| load_photo(&state, id);
-                run_job(&plan, control, &load, &mut |event| tx.send(event).unwrap());
+                let originals = |folder: &Path| original_names_in(&state, folder);
+                run_job(&plan, control, &load, &originals, &mut |event| {
+                    tx.send(event).unwrap();
+                });
             }))
             .unwrap();
         manager.cancel(job).unwrap();
