@@ -20,6 +20,8 @@
 //!   binary frame format.
 //! - [`preview_protocol`]: the `preview` URI scheme, the alternative frame
 //!   transport (used by the transport benchmark).
+//! - [`export`]: photo export (the job queue, the worker thread, and the
+//!   events).
 //! - [`commands`]: the `#[tauri::command]` wrappers.
 //! - [`error`]: the error type that the UI receives.
 //!
@@ -32,6 +34,7 @@
 pub mod capture;
 pub mod commands;
 pub mod error;
+pub mod export;
 pub mod preview;
 pub mod preview_protocol;
 pub mod scan;
@@ -42,6 +45,7 @@ pub mod thumbnails;
 
 use tauri::Manager;
 
+use crate::export::ExportManager;
 use crate::preview::PreviewEngine;
 use crate::state::CatalogState;
 use crate::thumbnails::{THUMB_DIR_NAME, ThumbnailService, default_workers};
@@ -98,6 +102,16 @@ pub fn run() -> tauri::Result<()> {
                     tracing::error!(%error, "cannot start the preview render thread");
                 }
             }
+            // Without the export worker, the export commands return an
+            // internal error.
+            match ExportManager::start() {
+                Ok(manager) => {
+                    app.manage(manager);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "cannot start the export worker thread");
+                }
+            }
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol(
@@ -121,6 +135,8 @@ pub fn run() -> tauri::Result<()> {
             commands::catalog::get_develop_settings,
             commands::catalog::set_develop_settings,
             commands::dialog::pick_folder,
+            commands::export::export_start,
+            commands::export::export_cancel,
             commands::preview::preview_open,
             commands::preview::preview_open_test_pattern,
             commands::preview::preview_render,
