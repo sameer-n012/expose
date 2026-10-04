@@ -10,9 +10,11 @@
     library: LibraryStore;
     /** Text of the view mode, for example "Grid". */
     mode: string;
+    /** Opens the export dialog. Without it, the Export button is not shown. */
+    onexport?: (() => void) | undefined;
   }
 
-  let { library, mode }: Props = $props();
+  let { library, mode, onexport }: Props = $props();
 
   let search = $state('');
 
@@ -90,6 +92,9 @@
   >
     {library.importing ? 'Importing…' : 'Import folder…'}
   </button>
+  {#if onexport !== undefined}
+    <button type="button" class="import" onclick={onexport}>Export…</button>
+  {/if}
 
   <input
     type="search"

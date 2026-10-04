@@ -12,8 +12,11 @@
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { APP_ACTION } from '../../lib/appActions';
+  import { APP_ACTION, exportAction } from '../../lib/appActions';
   import { DevelopStore } from '../../lib/stores/develop.svelte';
+  import { ExportStore } from '../../lib/stores/export.svelte';
+  import ExportDialog from '../export/ExportDialog.svelte';
+  import ExportProgress from '../export/ExportProgress.svelte';
   import BasicPanel from '../develop/BasicPanel.svelte';
   import DevelopView from '../modules/DevelopView.svelte';
   import { MODULE_LABELS, type ModuleId } from '../../lib/modules';
@@ -47,6 +50,21 @@
   // The shell owns the develop store. The props do not change for the
   // life of the shell, so the store reads them once.
   const develop = untrack(() => new DevelopStore({ library, modules, toasts }));
+
+  // The shell owns the export store, too.
+  const exporter = untrack(() => new ExportStore({ toasts }));
+
+  /**
+   * Opens the export dialog. In Develop it exports the active photo; else it
+   * exports the selected photos.
+   */
+  function exportPhotos(): void {
+    const active = modules.active === 'develop' ? develop.target : null;
+    exporter.openDialog(active === null ? library.selectedIds : [active]);
+  }
+
+  // The shortcut needs the shell, because the shell knows the active photo.
+  $effect(() => registry.register(exportAction(exportPhotos)));
 
   /** Shortcut text per module. Null if the action is not registered or has no key. */
   function shortcutFor(actionId: string): string | null {
@@ -144,7 +162,7 @@
           data-testid="module-{id}"
         >
           {#if id === 'library'}
-            <LibraryView {modules} {library} />
+            <LibraryView {modules} {library} onexport={exportPhotos} />
           {:else if id === 'develop'}
             <DevelopView {develop} />
           {:else}
@@ -162,6 +180,10 @@
   {@render edge('filmstrip')}
 </div>
 
+{#if exporter.isOpen}
+  <ExportDialog store={exporter} />
+{/if}
+<ExportProgress store={exporter} />
 <ToastHost store={toasts} />
 
 <style>

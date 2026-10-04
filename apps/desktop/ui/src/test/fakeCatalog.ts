@@ -60,6 +60,16 @@ export class FakeCatalog {
     return this.calls.filter((call) => call.command === command);
   }
 
+  /** The job id that `export_start` returns. */
+  exportJobId = 1;
+  /** The channel of the last `export_start` call. */
+  exportChannel: { onmessage?: (event: unknown) => void } | undefined;
+
+  /** Sends an export event through the channel of the last `export_start`. */
+  emitExport(event: unknown): void {
+    this.exportChannel?.onmessage?.(event);
+  }
+
   /** The stored develop settings per photo id. */
   readonly developSettings = new Map<number, unknown>();
 
@@ -106,6 +116,12 @@ export class FakeCatalog {
       case 'preview_open':
         return { session: 1, width: 4, height: 3 };
       case 'preview_close':
+        return undefined;
+      case 'export_start':
+        // The channel is a plain object in tests. `exportEvents` pushes to it.
+        this.exportChannel = args['onEvent'] as { onmessage?: (event: unknown) => void } | undefined;
+        return this.exportJobId;
+      case 'export_cancel':
         return undefined;
       case 'pick_folder':
         return this.pickedPath;

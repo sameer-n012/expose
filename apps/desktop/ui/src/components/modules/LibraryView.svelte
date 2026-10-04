@@ -16,9 +16,11 @@
   interface Props {
     modules: ModuleStore;
     library: LibraryStore;
+    /** Opens the export dialog for the selected photos. */
+    onexport?: () => void;
   }
 
-  let { modules, library }: Props = $props();
+  let { modules, library, onexport }: Props = $props();
 
   let loupeIndex = $state(0);
   const loupePhoto = $derived(library.photoAt(loupeIndex));
@@ -42,7 +44,7 @@
       <span>{library.view.message}</span>
     </div>
   {:else}
-    <LibraryToolbar {library} mode={modules.libraryView === 'grid' ? 'Grid' : 'Loupe'} />
+    <LibraryToolbar {library} {onexport} mode={modules.libraryView === 'grid' ? 'Grid' : 'Loupe'} />
     {#if modules.libraryView === 'grid'}
       <LibraryGrid {library} onopen={openLoupe} />
     {:else}
