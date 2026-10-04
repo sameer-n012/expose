@@ -6,20 +6,19 @@ No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature i
 
 ## In progress
 
-- **preview-pipelining** (agent, `feat/preview-pipelining`)
+- **develop-ui** (agent, `feat/develop-ui`)
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **preview-pipelining** (O) — overlap render and transfer (measured: channel push 97 fps vs. request/response 46–50 fps; slider simulation 33.8 fps). Options: client keeps 2 requests in flight, or settings by command + frames pushed through a `Channel` with an acknowledge per frame (backpressure, latest wins). Also render at the canvas device-pixel size when it is smaller than 2560 px, and keep the main thread free during frame receive. Measure again with `?bench=transport`, also in a release build (`tauri dev` builds Rust without optimization). ADR 0008, "Webview measurement".
-2. [ ] **develop-ui** (S) — Develop module panel with sliders bound to `DevelopSettings`, live preview through `PreviewCanvas` / `PreviewClient` (`ui/src/lib/develop/`, commands `preview_open`/`preview_render`/`preview_close`), settings saved to the catalog (`develop_settings` JSON, version from `DEVELOP_SETTINGS_VERSION`).
-3. [ ] **export-v1** (S/O) — encode API is done (PR #11). Remaining: export dialog in the UI (format, quality, color space, size, destination, file naming), Tauri command that runs decode → develop → resize → `encode_path` on a worker, progress + errors. FEATURES 5.1 P1.
-4. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
+1. [ ] **develop-ui** (S) — Develop module panel with sliders bound to `DevelopSettings`, live preview through `PreviewCanvas` / `PreviewClient` (`ui/src/lib/develop/`, commands `preview_open`/`preview_render`/`preview_close`), settings saved to the catalog (`develop_settings` JSON, version from `DEVELOP_SETTINGS_VERSION`).
+2. [ ] **export-v1** (S/O) — encode API is done (PR #11). Remaining: export dialog in the UI (format, quality, color space, size, destination, file naming), Tauri command that runs decode → develop → resize → `encode_path` on a worker, progress + errors. FEATURES 5.1 P1.
+3. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 
 ### Follow-ups from merged work
 
-- [ ] **preview-followups** — benchmark note for PNG says "lossy at q85" (copy error in `bench.ts`); move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
+- [ ] **preview-followups** — operator: run `?bench=transport` in `tauri dev` and record the `pipelined-*`, `slider-ipc-pipelined`, and `@half` rows in ADR 0008 (if `bitmap` draw is not faster than `put`, set `DEFAULT_PRESENT_MODE` to `put`); one waiting slot per session in the engine if a prefetch supersedes a visible request; update the target size when the display pixel density changes; move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
 - [ ] **core-followups** (S) — `Rect::translated` is not used yet (editor `add_offset` works on tuples); the Planckian locus also has a piece boundary at 2222 K (y fit) with a small kink.
 - [ ] **gpu-api** (O) — kernels with different input/output size (GPU downsample), multiple inputs / storage buffers, parameter buffer reuse, double-buffered read-back, `WorkingImage` at the API boundary, render graph.
 - [ ] **raw-real-samples** (operator + S) — run `EXPOSE_RAW_SAMPLES=/path cargo test -p expose-raw -- --ignored real_samples --nocapture` on real camera files and fix what fails. Then: forward matrices, BaselineExposure, DNG black level origin check, multi-threaded/tiled demosaic.
@@ -39,6 +38,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **preview-pipelining** (PR #18) — `PreviewClient` keeps 2 requests in flight; `FramePresenter` draws with `createImageBitmap` once per display frame and never draws a stale frame; optional target long edge (`longEdge`, 64..=session size, 128 px steps); new pipelined benchmark modes; PNG note fixed. ADR 0008, "Preview pipelining". Webview measurement of the new modes: see preview-followups.
 
 - [x] **import-batch-info** (PR #17) — import stores image info with one `set_image_infos` call (one transaction, one lock). Items with a zero width or height are filtered out before the batch and reported as import issues. Unknown ids and a failed batch give one issue per photo. The fake-file import test asserts its metadata errors.
 

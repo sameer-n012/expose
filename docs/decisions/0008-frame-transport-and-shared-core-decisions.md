@@ -98,3 +98,22 @@ Findings:
 - Slider simulation: 33.8 fps, lower than the sequential 46–50 fps. The 4 ms timer fired only 73 times in 2 s, so the main thread was busy for most of each frame (response handling, `putImageData`). Then the client often had no waiting request when a frame finished. Slider input events can be delayed by the same cause.
 
 Decision: keep the raw `ipc::Response` transport as the default for now (it meets the target). The next step is to overlap render and transfer (pipelining) and to send fewer bytes, see `TODO.md` → preview-followups.
+
+## Preview pipelining (PR #18)
+
+Context: request/response waits for each frame before it sends the next request. The `Channel` push is faster because render and transfer overlap.
+
+Decisions:
+
+- **Two requests in flight, not channel push with acknowledge.** `PreviewClient` keeps up to 2 render requests open (`DEFAULT_MAX_IN_FLIGHT = 2`). The engine already has one running frame and one waiting slot (latest wins), so it gives the backpressure. A channel design needs a fetch and an acknowledge command per frame. Two in flight needs one call, and it works with the `ipc` and `scheme` transports.
+- **Slot release at frame arrival.** A request slot becomes free when the frame body arrives, not after the draw.
+- **No stale draw.** The client drops a frame whose sequence number is not above the last delivered one. `FramePresenter` (`ui/src/lib/develop/presenter.ts`) accepts only higher sequence numbers and draws at most once per display frame (`requestAnimationFrame`). It closes bitmaps that it does not draw. A rejected request does not use a sequence number.
+- **Off-main-thread conversion.** The default draw mode is `bitmap` (`createImageBitmap`). The presenter uses `putImageData` when `createImageBitmap` does not exist.
+- **Target size.** `preview_render` takes an optional `long_edge` (scheme: `long=<n>`). The shell rejects 0 and values above 8192, and clamps others to 64..=session size (`effective_long_edge`). The client computes the size from the canvas box and the device pixel ratio (`size.ts`), rounds it up to a multiple of 128, and caps it at the session size. When the size changes, the engine frees the old GPU source view before it makes the new one.
+- **Canvas CSS.** The canvas fills its box with `object-fit: contain`, so a smaller frame scales up.
+
+Consequences and open items:
+
+- The engine has one waiting slot for all sessions. A request of one session can supersede a waiting request of another session (for example a prefetch). A slot per session is possible if this becomes a problem.
+- A move to a display with a different pixel density does not change the target size until the box resizes.
+- The webview measurement of the new benchmark modes (`pipelined-*`, `slider-ipc-pipelined`, `@half`) is not done yet. If `bitmap` does not draw faster than `put`, change `DEFAULT_PRESENT_MODE` to `put`.
