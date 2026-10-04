@@ -8,7 +8,9 @@
 //! - macOS and Linux: `POST preview://localhost/<session>?format=<f>`
 //! - Windows: `POST http://preview.localhost/<session>?format=<f>`
 //!
-//! `<f>` is `rgba8` (default), `jpeg`, or `png`. The body is the develop
+//! `<f>` is `rgba8` (default), `jpeg`, or `png`. An optional `long=<n>`
+//! sets the target long edge of the frame (see
+//! [`crate::preview::effective_long_edge`]). The body is the develop
 //! settings as JSON. Send it with `Content-Type: text/plain`, so that the
 //! request is a CORS "simple request" with no preflight. A `GET` with no
 //! body renders the default settings (for `<img src>`).
@@ -48,6 +50,8 @@ pub struct FrameQuery {
     pub session: SessionId,
     /// The body form.
     pub format: FrameFormat,
+    /// The target long edge (`long=<n>`), or `None`.
+    pub long_edge: Option<u32>,
 }
 
 /// Handles one request. The render runs on the preview thread; the
@@ -91,6 +95,7 @@ pub fn handle<R: Runtime>(
             session: query.session,
             settings,
             format: query.format,
+            long_edge: query.long_edge,
         },
         Box::new(move |result| {
             let response = match result {
@@ -102,8 +107,9 @@ pub fn handle<R: Runtime>(
     );
 }
 
-/// Parses the session id from the path (`/<id>`) and the format from the
-/// query (`format=<f>`; other keys are ignored).
+/// Parses the session id from the path (`/<id>`), and the format and the
+/// target long edge from the query (`format=<f>`, `long=<n>`; other keys
+/// are ignored).
 ///
 /// # Errors
 ///
@@ -118,13 +124,23 @@ pub fn parse_request(path: &str, query: Option<&str>) -> Result<FrameQuery, Stri
         .parse::<SessionId>()
         .map_err(|_| "the session id is too large".to_owned())?;
     let mut format = FrameFormat::Rgba8;
+    let mut long_edge = None;
     for pair in query.unwrap_or_default().split('&') {
         if let Some(value) = pair.strip_prefix("format=") {
             format = FrameFormat::parse(value)
                 .ok_or_else(|| format!("unknown frame format `{value}`"))?;
+        } else if let Some(value) = pair.strip_prefix("long=") {
+            let edge = value
+                .parse::<u32>()
+                .map_err(|_| format!("the long edge `{value}` is not a number"))?;
+            long_edge = Some(edge);
         }
     }
-    Ok(FrameQuery { session, format })
+    Ok(FrameQuery {
+        session,
+        format,
+        long_edge,
+    })
 }
 
 /// Parses the develop settings from the request body. An empty body gives
@@ -231,11 +247,18 @@ mod tests {
             ok("/7", None),
             FrameQuery {
                 session: 7,
-                format: FrameFormat::Rgba8
+                format: FrameFormat::Rgba8,
+                long_edge: None,
             }
         );
         assert_eq!(ok("/7/", Some("format=jpeg")).format, FrameFormat::Jpeg);
         assert_eq!(ok("/7", Some("t=5&format=png")).format, FrameFormat::Png);
+        assert_eq!(ok("/7", Some("long=1200")).long_edge, Some(1200));
+        // The engine validates the range; the parser accepts any u32.
+        assert_eq!(ok("/7", Some("long=0")).long_edge, Some(0));
+        assert!(parse_request("/7", Some("long=")).is_err());
+        assert!(parse_request("/7", Some("long=-5")).is_err());
+        assert!(parse_request("/7", Some("long=12px")).is_err());
         assert!(parse_request("/", None).is_err());
         assert!(parse_request("/x1", None).is_err());
         assert!(parse_request("/99999999999999999999999", None).is_err());

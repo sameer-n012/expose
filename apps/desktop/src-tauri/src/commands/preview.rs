@@ -125,19 +125,29 @@ pub async fn preview_open_test_pattern(
 /// Renders one frame of a session with `settings` and returns the frame
 /// body (header and RGBA8 pixels) as raw binary data.
 ///
+/// `long_edge` is the target long edge of the frame in pixels (for
+/// example, the device-pixel size of the canvas). The engine clamps it to
+/// the session size and to a minimum; `null` gives the session size. The
+/// frame header has the real size.
+///
 /// If a newer `preview_render` call arrives before this one starts, this
 /// call fails with the kind `superseded` (latest wins). The UI drops it.
+///
+/// Errors: `invalidInput` (settings, or `long_edge` 0 or above 8192),
+/// `notFound` (session), `superseded`, `internal`.
 #[tauri::command]
 pub async fn preview_render(
     engine: State<'_, PreviewEngine>,
     session: SessionId,
     settings: DevelopSettings,
+    long_edge: Option<u32>,
 ) -> Result<Response, CommandError> {
     let frame = engine
         .render_async(RenderRequest {
             session,
             settings,
             format: FrameFormat::Rgba8,
+            long_edge,
         })
         .await?;
     Ok(Response::new(frame.body))
@@ -197,6 +207,7 @@ pub async fn preview_bench_channel<R: Runtime>(
                 session,
                 settings,
                 format: FrameFormat::Rgba8,
+                long_edge: None,
             });
             let frame = match frame {
                 Ok(frame) => frame,
