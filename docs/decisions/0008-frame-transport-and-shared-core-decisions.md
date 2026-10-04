@@ -116,4 +116,29 @@ Consequences and open items:
 
 - The engine has one waiting slot for all sessions. A request of one session can supersede a waiting request of another session (for example a prefetch). A slot per session is possible if this becomes a problem.
 - A move to a display with a different pixel density does not change the target size until the box resizes.
-- The webview measurement of the new benchmark modes (`pipelined-*`, `slider-ipc-pipelined`, `@half`) is not done yet. If `bitmap` does not draw faster than `put`, change `DEFAULT_PRESENT_MODE` to `put`.
+### Webview measurement after pipelining
+
+The operator ran the benchmark on 2026-10-04 (macOS webview, `tauri dev`). The pipelined candidates run first now. 2560×1707 frames (17.48 MB), `@1280` = 4.37 MB.
+
+| Candidate | fps | transfer | draw | shell | note |
+|---|---|---|---|---|---|
+| pipelined-ipc-rgba8-bitmap | 85.3 | 23.86 | 0.04 | 8.17 | drawn 23 |
+| pipelined-ipc-rgba8-put | 97.7 | 20.42 | 2.20 | 7.39 | drawn 20 |
+| pipelined-scheme-rgba8-bitmap | 75.5 | 24.37 | 0.12 | 7.41 | drawn 26 |
+| pipelined-ipc-rgba8-bitmap@1280 | 231.7 | 7.85 | 0.20 | 3.34 | drawn 10 |
+| slider-ipc-pipelined | 33.8 | 20.01 | 0.07 | 7.81 | ticks 69, sent 69, drawn 61 |
+| slider-ipc-pipelined@1280 | 26.6 | 24.54 | 0.06 | 12.21 | ticks 68, sent 54, drawn 48 |
+| ipc-rgba8-put | 48.3 | 18.75 | 1.95 | 7.04 | |
+| ipc-rgba8-bitmap | 18.1 | 42.13 | 12.98 | 7.31 | 49.1 on 2026-10-03 |
+| scheme-rgba8-put | 18.3 | 48.17 | 6.30 | 6.88 | 49.8 on 2026-10-03 |
+| scheme-rgba8-bitmap | 18.8 | 45.35 | 7.77 | 7.08 | 49.8 on 2026-10-03 |
+| channel-rgba8-put | 97.6 | 7.93 | 2.27 | 8.46 | |
+| slider-ipc | 2.2 | 71.83 | 6.50 | 10.33 | ticks 7; 33.8 on 2026-10-03 |
+| slider-scheme | 2.6 | 47.00 | 5.63 | 7.92 | ticks 9; 33.8 on 2026-10-03 |
+
+Findings:
+
+- Pipelining doubles the stream rate: 97.7 fps (`put`) against 48.3 fps for one request at a time. This is equal to the channel push. A target size of 1280 px gives 232 fps.
+- `bitmap` takes almost no main-thread draw time (0.04 ms against 2.2 ms for `put`), but its stream rate is lower (85 against 98 fps). Both are above the display rate. `DEFAULT_PRESENT_MODE` stays `bitmap`, because main-thread time is the limit for slider input.
+- The slider simulation stays at 33.8 fps. Each of the 69 timer ticks gave a sent request, and 61 frames were drawn. The limit is the timer rate on a busy main thread (about 29 ms per tick), not the transport. The operator reports that the sliders feel good in the Develop module.
+- Not explained yet: the candidates that run after the pipelined ones are much slower than on 2026-10-03 (`ipc-rgba8-bitmap`, `scheme-*`, `slider-ipc`, `slider-scheme`, and also `slider-ipc-pipelined@1280` with 12 ms shell time). `channel-rgba8-put` in the middle of them is normal. Possible causes: resources that earlier candidates do not release (image bitmaps, buffers, requests), or memory pressure in the web process. See `TODO.md` → preview-followups ("bench-regression").

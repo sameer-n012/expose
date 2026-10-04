@@ -6,7 +6,7 @@ No `FEATURES.md` item is marked `[x]` yet: the libraries exist, but no feature i
 
 ## In progress
 
-- **export-v1** (agent, `feat/export-v1`)
+- **export-v1**, split in two agents that share one command contract (`export_start` / `export_cancel`, `ExportEvent` channel): export-backend (`feat/export-backend`, `src-tauri`) and export-ui (`feat/export-ui`, `ui`).
 
 ## Next (suggested order)
 
@@ -18,9 +18,10 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 ### Follow-ups from merged work
 
-- [ ] **develop-ui-followups** (S) — operator: check the Develop module in the real webview (slider feel, preview, thumbnail refresh); the TS slider ranges in `ui/src/lib/develop/settings.ts` are copies of the Rust constants (add a test or generate them); the shell drops unknown settings fields (ADR 0009).
+- [ ] **develop-ui-followups** (S) — the TS slider ranges in `ui/src/lib/develop/settings.ts` are copies of the Rust constants (add a test or generate them); the shell drops unknown settings fields (ADR 0009).
 
-- [ ] **preview-followups** — operator: run `?bench=transport` in `tauri dev` and record the `pipelined-*`, `slider-ipc-pipelined`, and `@half` rows in ADR 0008 (if `bitmap` draw is not faster than `put`, set `DEFAULT_PRESENT_MODE` to `put`); one waiting slot per session in the engine if a prefetch supersedes a visible request; update the target size when the display pixel density changes; move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
+- [ ] **bench-regression** (O, agent `feat/bench-regression`) — benchmark candidates that run after the pipelined ones are 3–15× slower than on 2026-10-03 (ADR 0008, "Webview measurement after pipelining"). Find out if earlier candidates leave resources (image bitmaps, buffers, open requests) or if it is memory pressure; a leak in `FramePresenter`/`PreviewClient` would also slow down long develop sessions.
+- [ ] **preview-followups** — the slider simulation is limited by main-thread time (timer ticks), not the transport; one waiting slot per session in the engine if a prefetch supersedes a visible request; update the target size when the display pixel density changes; move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
 - [ ] **core-followups** (S) — `Rect::translated` is not used yet (editor `add_offset` works on tuples); the Planckian locus also has a piece boundary at 2222 K (y fit) with a small kink.
 - [ ] **gpu-api** (O) — kernels with different input/output size (GPU downsample), multiple inputs / storage buffers, parameter buffer reuse, double-buffered read-back, `WorkingImage` at the API boundary, render graph.
 - [ ] **raw-real-samples** (operator + S) — run `EXPOSE_RAW_SAMPLES=/path cargo test -p expose-raw -- --ignored real_samples --nocapture` on real camera files and fix what fails. Then: forward matrices, BaselineExposure, DNG black level origin check, multi-threaded/tiled demosaic.
@@ -43,7 +44,7 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 - [x] **develop-ui** (PR #19) — commands `get_develop_settings`/`set_develop_settings`; `DevelopStore` (debounced save, flush on photo/module change); Develop view with `PreviewCanvas` and the Basic panel (white balance, exposure, contrast, highlights, shadows, whites, blacks; per-slider reset, Reset all); thumbnails refresh after a save. ADR 0009.
 
-- [x] **preview-pipelining** (PR #18) — `PreviewClient` keeps 2 requests in flight; `FramePresenter` draws with `createImageBitmap` once per display frame and never draws a stale frame; optional target long edge (`longEdge`, 64..=session size, 128 px steps); new pipelined benchmark modes; PNG note fixed. ADR 0008, "Preview pipelining". Webview measurement of the new modes: see preview-followups.
+- [x] **preview-pipelining** (PR #18) — `PreviewClient` keeps 2 requests in flight; `FramePresenter` draws with `createImageBitmap` once per display frame and never draws a stale frame; optional target long edge (`longEdge`, 64..=session size, 128 px steps); new pipelined benchmark modes; PNG note fixed. ADR 0008, "Preview pipelining". Webview measurement (2026-10-04): 97.7 fps stream (was 48.3), 232 fps at 1280 px; operator: sliders feel good, thumbnails update after an edit.
 
 - [x] **import-batch-info** (PR #17) — import stores image info with one `set_image_infos` call (one transaction, one lock). Items with a zero width or height are filtered out before the batch and reported as import issues. Unknown ids and a failed batch give one issue per photo. The fake-file import test asserts its metadata errors.
 
