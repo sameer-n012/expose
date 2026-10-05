@@ -99,7 +99,7 @@ This file is the master list of features for Expose.
 - [ ] **P2** Black-and-white conversion with per-color mix
 
 ### 2.3 Tone and color
-- [ ] **P1** Tone curve: point curve (RGB and per channel)
+- [x] **P1** Tone curve: point curve (RGB and per channel)
 - [ ] **P2** Tone curve: parametric (highlights, lights, darks, shadows with split points)
 - [ ] **P2** HSL / color mixer (hue, saturation, luminance per color band)
 - [ ] **P2** Color grading (shadows, midtones, highlights wheels; blending and balance)
