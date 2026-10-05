@@ -7,6 +7,7 @@ interface Call {
   readonly session: number;
   readonly settings: DevelopSettingsJson;
   readonly longEdge: number | null;
+  readonly applyGeometry: boolean | undefined;
   resolve(body: ArrayBuffer): void;
   reject(error: unknown): void;
 }
@@ -18,7 +19,14 @@ class ManualTransport implements FrameTransport {
 
   render(session: number, settings: DevelopSettingsJson, options: RenderOptions = {}): Promise<ArrayBuffer> {
     return new Promise((resolve, reject) => {
-      this.calls.push({ session, settings, longEdge: options.longEdge ?? null, resolve, reject });
+      this.calls.push({
+        session,
+        settings,
+        longEdge: options.longEdge ?? null,
+        applyGeometry: options.applyGeometry,
+        resolve,
+        reject,
+      });
     });
   }
 
@@ -295,6 +303,30 @@ describe('PreviewClient', () => {
     client.setTargetLongEdge(Number.NaN);
     expect(client.targetLongEdge).toBeNull();
     expect(transport.call(2).longEdge).toBeNull();
+  });
+
+  it('sends the geometry flag and drops frames of the old flag', async () => {
+    const { transport, client, frames } = setup(2);
+    client.setSession(1);
+    expect(client.applyGeometry).toBe(true);
+    client.setApplyGeometry(false);
+    // No settings yet: the change sends nothing.
+    expect(transport.calls).toHaveLength(0);
+    client.setApplyGeometry(true);
+
+    client.request(ev(1));
+    expect(transport.call(0).applyGeometry).toBe(true);
+    client.setApplyGeometry(false);
+    expect(transport.call(1)).toMatchObject({ settings: ev(1), applyGeometry: false });
+    client.setApplyGeometry(false);
+    expect(transport.calls).toHaveLength(2);
+
+    // The old frame (with geometry) arrives late: it is dropped.
+    transport.call(0).resolve(makeFrameBody(1, 1, 0));
+    transport.call(1).resolve(makeFrameBody(1, 1, 1));
+    await client.idle();
+    expect(frames.map((f) => f.frame.seq)).toEqual([1]);
+    expect(client.stats.dropped).toBe(1);
   });
 
   it('a throwing frame handler is reported as an error', async () => {

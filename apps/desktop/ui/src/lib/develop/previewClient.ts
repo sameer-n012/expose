@@ -104,6 +104,7 @@ export class PreviewClient {
   /** The settings of the last `request()` (for a new frame at a size change). */
   #latest: DevelopSettingsJson | null = null;
   #longEdge: number | null = null;
+  #applyGeometry = true;
   #inFlight = 0;
   #disposed = false;
   /** Increases at each session change, so that old results are dropped. */
@@ -173,6 +174,28 @@ export class PreviewClient {
     }
   }
 
+  /** True when the frames include the geometry stage (flip, straighten, crop). */
+  get applyGeometry(): boolean {
+    return this.#applyGeometry;
+  }
+
+  /**
+   * Turns the geometry stage of the frames on or off (the crop tool shows
+   * the full image). A change requests a new frame for the last settings.
+   * Results of requests sent with the old value are not delivered, because
+   * they show a different frame.
+   */
+  setApplyGeometry(applyGeometry: boolean): void {
+    if (applyGeometry === this.#applyGeometry) {
+      return;
+    }
+    this.#applyGeometry = applyGeometry;
+    if (!this.#disposed && this.#waiting === null && this.#latest !== null) {
+      this.#waiting = this.#latest;
+      this.#pump();
+    }
+  }
+
   /** Requests a frame for `settings`. Replaces settings that wait to be sent. */
   request(settings: DevelopSettingsJson): void {
     if (this.#disposed) {
@@ -225,13 +248,14 @@ export class PreviewClient {
 
   async #send(session: number, settings: DevelopSettingsJson): Promise<void> {
     const generation = this.#generation;
+    const applyGeometry = this.#applyGeometry;
     const started = this.#now();
     this.#inFlight += 1;
     this.stats.sent += 1;
     this.stats.peakInFlight = Math.max(this.stats.peakInFlight, this.#inFlight);
     let body: ArrayBuffer;
     try {
-      body = await this.#transport.render(session, settings, { longEdge: this.#longEdge });
+      body = await this.#transport.render(session, settings, { longEdge: this.#longEdge, applyGeometry });
     } catch (error: unknown) {
       this.#release();
       if (isSuperseded(error)) {
@@ -247,7 +271,7 @@ export class PreviewClient {
     // Free the slot before the frame is handled, so that the next request
     // goes out while this frame is parsed and drawn.
     this.#release();
-    if (this.#disposed || generation !== this.#generation) {
+    if (this.#disposed || generation !== this.#generation || applyGeometry !== this.#applyGeometry) {
       this.stats.dropped += 1;
       return;
     }
