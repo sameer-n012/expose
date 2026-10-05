@@ -18,6 +18,7 @@
   import ExportDialog from '../export/ExportDialog.svelte';
   import ExportProgress from '../export/ExportProgress.svelte';
   import BasicPanel from '../develop/BasicPanel.svelte';
+  import ToneCurvePanel from '../develop/ToneCurvePanel.svelte';
   import DevelopView from '../modules/DevelopView.svelte';
   import { MODULE_LABELS, type ModuleId } from '../../lib/modules';
   import type { ShortcutRegistry } from '../../lib/shortcuts/registry';
@@ -127,7 +128,8 @@
           {@const basicAt = sections.indexOf('Basic')}
           <PanelSections sections={sections.slice(0, basicAt)} />
           <BasicPanel {develop} />
-          <PanelSections sections={sections.slice(basicAt + 1)} />
+          <ToneCurvePanel {develop} />
+          <PanelSections sections={sections.slice(basicAt + 1).filter((name) => name !== 'Tone curve')} />
         {:else}
           <PanelSections sections={PANEL_SECTIONS[id][side]} />
         {/if}

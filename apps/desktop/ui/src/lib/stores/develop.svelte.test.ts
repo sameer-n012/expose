@@ -8,7 +8,7 @@ function doc(extra: Record<string, unknown> = {}): DevelopDocument {
     version: 1,
     white_balance: { mode: 'as_shot', temperature: 5500, tint: 0 },
     tone: { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 },
-    tone_curve: { points: [] },
+    tone_curve: { master: [{ x: 0, y: 0 }, { x: 1, y: 1 }] },
     ...extra,
   };
 }
@@ -82,7 +82,7 @@ describe('DevelopStore', () => {
     expect(saved?.future).toEqual({ a: 1 });
     expect(saved?.tone.vibrance).toBe(9);
     expect(saved?.tone.contrast).toBe(20);
-    expect(saved?.tone_curve).toEqual({ points: [] });
+    expect(saved?.tone_curve).toEqual({ master: [{ x: 0, y: 0 }, { x: 1, y: 1 }] });
   });
 
   it('switches the white balance to custom when a white balance slider moves', async () => {

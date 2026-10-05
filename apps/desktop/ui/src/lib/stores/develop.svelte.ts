@@ -14,8 +14,10 @@
  */
 import type { PhotoId } from '../catalog';
 import { getDevelopSettings, isCommandError, setDevelopSettings } from '../catalog';
+import { identityCurve, type CurveChannel, type CurvePoint } from '../develop/curve';
 import {
   RANGES,
+  withCurve,
   resetBasic,
   resetSlider,
   sameDocument,
@@ -179,6 +181,18 @@ export class DevelopStore {
     if (this.settings !== null) {
       this.#edit(resetSlider(this.settings, key));
     }
+  }
+
+  /** Sets the points of one tone curve channel. */
+  setCurve(channel: CurveChannel, points: readonly CurvePoint[]): void {
+    if (this.settings !== null) {
+      this.#edit(withCurve(this.settings, channel, points));
+    }
+  }
+
+  /** Sets one tone curve channel to the identity curve. */
+  resetCurve(channel: CurveChannel): void {
+    this.setCurve(channel, identityCurve());
   }
 
   /** Sets all Basic panel values to identity. */
