@@ -185,3 +185,64 @@ describe('DevelopStore', () => {
     expect(api.closePreview).toHaveBeenCalledWith(30);
   });
 });
+
+describe('DevelopStore crop tool', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('does not start without a settings document or a session', () => {
+    const { store } = setup();
+    expect(store.enterCrop()).toBe(false);
+    expect(store.cropActive).toBe(false);
+  });
+
+  it('cancel restores a document without a crop field exactly', async () => {
+    const { store, api } = setup();
+    await store.activate(3);
+    expect(store.enterCrop()).toBe(true);
+    store.setCropAngle(10);
+    expect(store.crop?.angle).toBe(10);
+    store.cancelCrop();
+    expect(store.cropActive).toBe(false);
+    expect('crop' in (store.settings ?? {})).toBe(false);
+    await vi.advanceTimersByTimeAsync(SAVE_DELAY_MS + 1);
+    // The edit and the restore came in one quiet time: the saved document is the old one.
+    expect(api.setSettings.mock.calls.at(-1)?.[1]).toEqual(doc());
+  });
+
+  it('cancel restores an old crop and commit keeps the new one', async () => {
+    const old = { rect: { left: 0.1, top: 0.1, width: 0.5, height: 0.5 }, angle: 0, flip_horizontal: false, flip_vertical: false, aspect: 'free' };
+    const { store } = setup(doc({ crop: old }));
+    await store.activate(3);
+    store.enterCrop();
+    store.flipCrop('vertical');
+    store.cancelCrop();
+    expect(store.settings?.['crop']).toEqual(old);
+    store.toggleCrop();
+    expect(store.cropActive).toBe(true);
+    store.setCropAngle(-3);
+    store.toggleCrop();
+    expect(store.cropActive).toBe(false);
+    expect(store.crop?.angle).toBe(-3);
+  });
+
+  it('a photo change ends the crop tool and keeps the crop', async () => {
+    const { store, api } = setup();
+    await store.activate(3);
+    store.enterCrop();
+    store.setCropAngle(5);
+    store.straightening = true;
+    await store.activate(4);
+    expect(store.cropActive).toBe(false);
+    expect(store.straightening).toBe(false);
+    expect(api.setSettings).toHaveBeenCalledWith(3, expect.objectContaining({ crop: expect.objectContaining({ angle: 5 }) }));
+  });
+
+  it('cycles the overlay', () => {
+    const { store } = setup();
+    expect(store.cropOverlay).toBe('thirds');
+    store.cycleCropOverlay();
+    store.cycleCropOverlay();
+    expect(store.cropOverlay).toBe('golden');
+  });
+});

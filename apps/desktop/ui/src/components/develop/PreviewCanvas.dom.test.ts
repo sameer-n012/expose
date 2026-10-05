@@ -57,14 +57,14 @@ describe('PreviewCanvas', () => {
 
     await waitFor(() => expect(putImageData).toHaveBeenCalledOnce());
     // happy-dom has no layout: the box size is 0, so no target is sent.
-    expect(renderFrame).toHaveBeenCalledWith(1, { tone: { exposure: 0 } }, { longEdge: null });
+    expect(renderFrame).toHaveBeenCalledWith(1, { tone: { exposure: 0 } }, { longEdge: null, applyGeometry: true });
     const canvas = screen.getByLabelText('Develop preview') as HTMLCanvasElement;
     expect([canvas.width, canvas.height]).toEqual([4, 3]);
     expect(onframe).toHaveBeenCalledOnce();
 
     await view.rerender({ session, settings: { tone: { exposure: 1 } }, transport, onframe });
     await waitFor(() => expect(putImageData).toHaveBeenCalledTimes(2));
-    expect(renderFrame).toHaveBeenLastCalledWith(1, { tone: { exposure: 1 } }, { longEdge: null });
+    expect(renderFrame).toHaveBeenLastCalledWith(1, { tone: { exposure: 1 } }, { longEdge: null, applyGeometry: true });
   });
 
   it('sends the device-pixel size of the box as the target long edge', async () => {
@@ -78,7 +78,7 @@ describe('PreviewCanvas', () => {
     render(PreviewCanvas, { session: big, settings: {}, transport });
     await waitFor(() => expect(renderFrame).toHaveBeenCalled());
     // 400 CSS px * 2 = 800 device px wide (the width limits) -> 896.
-    expect(renderFrame).toHaveBeenCalledWith(2, {}, { longEdge: 896 });
+    expect(renderFrame).toHaveBeenCalledWith(2, {}, { longEdge: 896, applyGeometry: true });
   });
 
   it('draws through createImageBitmap when it exists', async () => {
@@ -92,6 +92,23 @@ describe('PreviewCanvas', () => {
     expect(close).toHaveBeenCalledOnce();
     expect(putImageData).not.toHaveBeenCalled();
     expect(onframe).toHaveBeenCalledOnce();
+  });
+
+  it('sends the geometry flag and skips a request with equal settings', async () => {
+    let seq = 0;
+    const { transport, render: renderFrame } = fakeTransport(() => Promise.resolve(makeFrameBody(4, 3, seq++)));
+    const view = render(PreviewCanvas, { session, settings: { tone: { exposure: 0 } }, transport });
+    await waitFor(() => expect(putImageData).toHaveBeenCalledOnce());
+    // A new object with the same values: no new request.
+    await view.rerender({ session, settings: { tone: { exposure: 0 } }, transport });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(renderFrame).toHaveBeenCalledOnce();
+
+    await view.rerender({ session, settings: { tone: { exposure: 0 } }, transport, applyGeometry: false, transform: 'matrix(-1, 0, 0, 1, 0, 0)' });
+    await waitFor(() => expect(renderFrame).toHaveBeenCalledTimes(2));
+    expect(renderFrame).toHaveBeenLastCalledWith(1, { tone: { exposure: 0 } }, { longEdge: null, applyGeometry: false });
+    const canvas = screen.getByLabelText('Develop preview') as HTMLCanvasElement;
+    expect(canvas.style.transform).toBe('matrix(-1, 0, 0, 1, 0, 0)');
   });
 
   it('requests nothing without a session', async () => {
