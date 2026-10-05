@@ -40,11 +40,17 @@ export const TRANSPORT_STORAGE_KEY = 'expose.previewTransport';
 /** Options of one frame request. */
 export interface RenderOptions {
   /**
-   * The target long edge of the frame in pixels. The shell clamps it to
-   * the session size and to a minimum; the frame header has the real
-   * size. `null` or absent: the session size.
+   * The target long edge of the develop input in pixels. The shell clamps
+   * it to the session size and to a minimum. A crop makes the frame
+   * smaller than this value; the frame header has the real size. `null`
+   * or absent: the session size.
    */
   readonly longEdge?: number | null;
+  /**
+   * `false` skips the geometry stage (flip, straighten, crop), so the frame
+   * shows the full image. Absent: `true`. Only the `ipc` transport sends it.
+   */
+  readonly applyGeometry?: boolean;
 }
 
 /** Gets frame bodies for a session. */
@@ -79,7 +85,12 @@ export function closePreview(session: number): Promise<void> {
 export const ipcTransport: FrameTransport = {
   name: 'ipc',
   render(session, settings, options = {}) {
-    return invoke<ArrayBuffer>('preview_render', { session, settings, longEdge: options.longEdge ?? null });
+    return invoke<ArrayBuffer>('preview_render', {
+      session,
+      settings,
+      longEdge: options.longEdge ?? null,
+      applyGeometry: options.applyGeometry ?? true,
+    });
   },
 };
 

@@ -45,6 +45,11 @@
 //! [`effective_long_edge`]). When the clamped size is not the size of the
 //! GPU view, the engine makes a new view from the base. It frees the old
 //! view first, so the GPU memory does not increase.
+//!
+//! The develop pipeline runs all stages (geometry, tone, sharpening). The
+//! long edge applies to the develop input, so a crop gives a frame that is
+//! smaller than the view, with the aspect ratio of the crop. The frame
+//! header always has the real frame size.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -231,7 +236,15 @@ pub struct RenderRequest {
     pub format: FrameFormat,
     /// The requested long edge of the frame in pixels. `None` gives the
     /// base size of the session. See [`effective_long_edge`].
+    ///
+    /// The long edge applies to the develop input. Geometry (crop,
+    /// straighten) runs after it, so a crop gives a smaller frame. The
+    /// frame header has the real size.
     pub long_edge: Option<u32>,
+    /// `false` skips the geometry stage (flip, straighten, crop), so the
+    /// frame shows the full image (for example, while the user drags a
+    /// crop frame). Sharpening and the tone stages still apply.
+    pub apply_geometry: bool,
 }
 
 /// Returns the long edge of a frame for a session with a base long edge
@@ -493,20 +506,65 @@ struct View {
 }
 
 impl View {
-    /// Downsamples `base` to `long_edge` and uploads it.
+    /// Downsamples `base` to `long_edge` and uploads it. `original` is the
+    /// size of the full-resolution source (before the downsample to the
+    /// base). It sets the pixel scale of the sharpening radius.
     fn new(
         ctx: &GpuContext,
         base: &WorkingImage,
+        original: (u32, u32),
         long_edge: u32,
         space: DisplaySpace,
     ) -> Result<Self, PreviewError> {
         pollster::block_on(async {
-            let renderer = PreviewRenderer::new(ctx, base, long_edge).await?;
+            let mut renderer = PreviewRenderer::new(ctx, base, long_edge).await?;
+            renderer.set_original_size(original.0, original.1)?;
             let (width, height) = renderer.size();
             let encoder = DisplayEncoder::new(ctx, width, height, space).await?;
             Ok::<_, DevelopError>(Self { renderer, encoder })
         })
         .map_err(PreviewError::from)
+    }
+
+    /// Runs all stages of `pipeline` and returns the RGBA8 frame body
+    /// (space for the header, then the pixels) and the frame size.
+    ///
+    /// A crop makes the frame smaller than the view. The display encoder
+    /// is made again only when the frame size changes, so a slider drag at
+    /// a constant crop does not allocate GPU memory for each frame.
+    async fn render_rgba8(
+        &mut self,
+        ctx: &GpuContext,
+        pipeline: &Pipeline,
+    ) -> Result<(Vec<u8>, u32, u32), DevelopError> {
+        let Self { renderer, encoder } = self;
+        let developed = renderer.develop_full(ctx, pipeline).await?;
+        let (width, height) = (developed.width(), developed.height());
+        if encoder.size() != (width, height) {
+            *encoder = DisplayEncoder::new(ctx, width, height, encoder.space()).await?;
+        }
+        encoder.encode(ctx, developed).await?;
+        let mut body = vec![0_u8; rgba8_body_len(width, height)];
+        encoder
+            .read_into(ctx, &mut body[super::frame::FRAME_HEADER_BYTES..])
+            .await?;
+        Ok((body, width, height))
+    }
+
+    /// Runs all stages of `pipeline` and reads the result back as a
+    /// working image (for the file-encoded benchmark formats).
+    async fn render_image(
+        &mut self,
+        ctx: &GpuContext,
+        pipeline: &Pipeline,
+    ) -> Result<WorkingImage, DevelopError> {
+        let developed = self.renderer.develop_full(ctx, pipeline).await?;
+        let data = developed.read_rgba_f32(ctx).await?;
+        Ok(WorkingImage::from_interleaved(
+            developed.width(),
+            developed.height(),
+            &data,
+        )?)
     }
 }
 
@@ -515,6 +573,8 @@ struct Session {
     /// The source, downsampled to the long edge of the open. Views of
     /// other sizes are made from it.
     base: WorkingImage,
+    /// The size of the full-resolution source (display orientation).
+    original: (u32, u32),
     /// The GPU view. `None` only after a failed resize; the next frame
     /// tries again.
     view: Option<View>,
@@ -530,7 +590,7 @@ impl Session {
 
     /// Returns a view of the size for `long_edge`. Makes a new view if the
     /// current view has another size; frees the old view first.
-    fn view_for(&mut self, ctx: &GpuContext, long_edge: u32) -> Result<&View, PreviewError> {
+    fn view_for(&mut self, ctx: &GpuContext, long_edge: u32) -> Result<&mut View, PreviewError> {
         let wanted = preview_size(self.base.width(), self.base.height(), long_edge)?;
         let fits = self
             .view
@@ -539,7 +599,7 @@ impl Session {
         if !fits {
             // Free the GPU memory of the old view before the new upload.
             self.view = None;
-            let view = View::new(ctx, &self.base, long_edge, self.space)?;
+            let view = View::new(ctx, &self.base, self.original, long_edge, self.space)?;
             tracing::debug!(
                 session = self.id,
                 width = wanted.0,
@@ -549,7 +609,7 @@ impl Session {
             self.view = Some(view);
         }
         self.view
-            .as_ref()
+            .as_mut()
             .ok_or(PreviewError::Internal("the session view is missing"))
     }
 }
@@ -586,9 +646,10 @@ impl Renderer {
             return Err(PreviewError::InvalidSize(request.max_long_edge));
         }
         let ctx = self.gpu()?;
+        let original = (request.image.width(), request.image.height());
         let base = downsample_area(&request.image, request.max_long_edge)?;
         let base_long_edge = base.width().max(base.height());
-        let view = View::new(ctx, &base, base_long_edge, request.space)?;
+        let view = View::new(ctx, &base, original, base_long_edge, request.space)?;
         if self.sessions.len() >= MAX_SESSIONS {
             let closed = self.sessions.remove(0);
             tracing::debug!(
@@ -602,6 +663,7 @@ impl Renderer {
         self.sessions.push(Session {
             id,
             base,
+            original,
             view: Some(view),
             space: request.space,
             source: request.source,
@@ -638,36 +700,30 @@ impl Renderer {
             .last_mut()
             .ok_or(PreviewError::Internal("the session list is empty"))?;
         let long_edge = effective_long_edge(session.base_long_edge(), job.request.long_edge)?;
-        let pipeline = Pipeline::new(&job.request.settings, &session.source)?;
+        let mut pipeline = Pipeline::new(&job.request.settings, &session.source)?;
+        pipeline.set_apply_geometry(job.request.apply_geometry);
         let seq = session.next_seq;
         session.next_seq = seq.wrapping_add(1);
         let view = session.view_for(ctx, long_edge)?;
-        let (width, height) = view.renderer.size();
-        let mut header = FrameHeader {
-            width,
-            height,
-            seq,
-            timings: FrameTimings::default(),
-        };
-        let mut body = match job.request.format {
-            FrameFormat::Rgba8 => pollster::block_on(async {
-                view.renderer.develop(ctx, &pipeline).await?;
-                view.encoder.encode(ctx, view.renderer.output()).await?;
-                let mut body = vec![0_u8; rgba8_body_len(width, height)];
-                view.encoder
-                    .read_into(ctx, &mut body[super::frame::FRAME_HEADER_BYTES..])
-                    .await?;
-                Ok::<_, DevelopError>(body)
-            })?,
+        // The frame size is the size of the develop output. A crop makes it
+        // smaller than the view.
+        let (mut body, width, height) = match job.request.format {
+            FrameFormat::Rgba8 => pollster::block_on(view.render_rgba8(ctx, &pipeline))?,
             format @ (FrameFormat::Jpeg | FrameFormat::Png) => {
-                let image = pollster::block_on(view.renderer.render(ctx, &pipeline))?;
+                let image = pollster::block_on(view.render_image(ctx, &pipeline))?;
                 let options = if format == FrameFormat::Jpeg {
                     EncodeOptions::jpeg(FRAME_JPEG_QUALITY)
                 } else {
                     EncodeOptions::png(BitDepth::Eight, false)
                 };
-                encode(&image, &options)?
+                (encode(&image, &options)?, image.width(), image.height())
             }
+        };
+        let mut header = FrameHeader {
+            width,
+            height,
+            seq,
+            timings: FrameTimings::default(),
         };
         header.timings = FrameTimings {
             queue: started.duration_since(job.queued_at),
@@ -849,6 +905,7 @@ mod tests {
                     settings: exposure(0.5),
                     format: FrameFormat::Rgba8,
                     long_edge: None,
+                    apply_geometry: true,
                 })
                 .unwrap();
             assert_eq!(frame.body.len(), rgba8_body_len(640, 427));
@@ -880,6 +937,7 @@ mod tests {
                     settings: DevelopSettings::default(),
                     format,
                     long_edge: None,
+                    apply_geometry: true,
                 })
                 .unwrap();
             assert!(frame.body.starts_with(magic), "{format:?}");
@@ -897,6 +955,7 @@ mod tests {
                 settings: DevelopSettings::default(),
                 format: FrameFormat::Rgba8,
                 long_edge: None,
+                apply_geometry: true,
             })
             .unwrap_err();
         assert!(matches!(error, PreviewError::SessionNotFound(_)), "{error}");
@@ -907,6 +966,7 @@ mod tests {
                 settings: exposure(f32::NAN),
                 format: FrameFormat::Rgba8,
                 long_edge: None,
+                apply_geometry: true,
             })
             .unwrap_err();
         assert_eq!(CommandError::from(error).kind, ErrorKind::InvalidInput);
@@ -918,6 +978,7 @@ mod tests {
                 settings: DevelopSettings::default(),
                 format: FrameFormat::Rgba8,
                 long_edge: None,
+                apply_geometry: true,
             })
             .unwrap_err();
         assert!(matches!(error, PreviewError::SessionNotFound(_)), "{error}");
@@ -948,6 +1009,7 @@ mod tests {
                 settings: DevelopSettings::default(),
                 format: FrameFormat::Rgba8,
                 long_edge: None,
+                apply_geometry: true,
             })
             .unwrap_err();
         assert!(matches!(error, PreviewError::SessionNotFound(_)), "{error}");
@@ -972,6 +1034,7 @@ mod tests {
                     settings,
                     format: FrameFormat::Rgba8,
                     long_edge: None,
+                    apply_geometry: true,
                 },
                 Box::new(move |result| drop(sender.send((i, result)))),
             );
@@ -1010,6 +1073,7 @@ mod tests {
                 settings: DevelopSettings::default(),
                 format: FrameFormat::Rgba8,
                 long_edge: None,
+                apply_geometry: true,
             })
             .unwrap_err();
         assert!(matches!(error, PreviewError::Stopped(_)), "{error}");
@@ -1033,6 +1097,7 @@ mod tests {
             settings: DevelopSettings::default(),
             format: FrameFormat::Rgba8,
             long_edge,
+            apply_geometry: true,
         }
     }
 
@@ -1165,6 +1230,78 @@ mod tests {
         assert_eq!(size(Some(320)).unwrap(), (small.0, small.1, 4));
     }
 
+    /// Settings with a crop to the left half and the top three quarters.
+    fn cropped() -> DevelopSettings {
+        let mut settings = DevelopSettings::default();
+        settings.crop.rect = expose_core::develop::NormalizedRect {
+            left: 0.0,
+            top: 0.0,
+            width: 0.5,
+            height: 0.75,
+        };
+        settings
+    }
+
+    #[test]
+    fn crop_gives_a_frame_of_the_cropped_size() {
+        let Some((engine, info)) = engine_with_session(640, 400) else {
+            return;
+        };
+        let frame_size = |settings: DevelopSettings, long_edge, apply_geometry| {
+            let frame = engine
+                .render_blocking(RenderRequest {
+                    session: info.session,
+                    settings,
+                    format: FrameFormat::Rgba8,
+                    long_edge,
+                    apply_geometry,
+                })
+                .unwrap();
+            assert_eq!(
+                frame.body.len(),
+                rgba8_body_len(frame.header.width, frame.header.height)
+            );
+            let header = FrameHeader::read(&frame.body).unwrap();
+            assert_eq!(
+                (header.width, header.height),
+                (frame.header.width, frame.header.height)
+            );
+            (header.width, header.height)
+        };
+        let expected = Pipeline::new(&cropped(), &SourceInfo::RENDERED)
+            .unwrap()
+            .output_size(640, 400)
+            .unwrap();
+        assert!(expected.0 < 640 && expected.1 < 400, "{expected:?}");
+        assert_eq!(frame_size(cropped(), None, true), expected);
+        // The same crop again: the same size (the encoder is kept).
+        assert_eq!(frame_size(cropped(), None, true), expected);
+        // No geometry: the full view size.
+        assert_eq!(frame_size(cropped(), None, false), (640, 400));
+        // The long edge applies to the develop input.
+        let half = Pipeline::new(&cropped(), &SourceInfo::RENDERED)
+            .unwrap()
+            .output_size(320, 200)
+            .unwrap();
+        assert_eq!(frame_size(cropped(), Some(320), true), half);
+        // Back to no crop.
+        assert_eq!(
+            frame_size(DevelopSettings::default(), None, true),
+            (640, 400)
+        );
+        // The file-encoded formats follow the crop too.
+        let frame = engine
+            .render_blocking(RenderRequest {
+                session: info.session,
+                settings: cropped(),
+                format: FrameFormat::Png,
+                long_edge: None,
+                apply_geometry: true,
+            })
+            .unwrap();
+        assert_eq!((frame.header.width, frame.header.height), expected);
+    }
+
     /// Stage timings at the default preview size. Run with:
     /// `cargo test -p expose-desktop --release -- --ignored --nocapture preview_stage_timings`
     #[test]
@@ -1270,6 +1407,7 @@ mod tests {
                     settings,
                     format: FrameFormat::Rgba8,
                     long_edge: None,
+                    apply_geometry: true,
                 })
                 .unwrap();
         }
