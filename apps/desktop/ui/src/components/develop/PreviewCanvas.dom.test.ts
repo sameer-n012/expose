@@ -81,6 +81,30 @@ describe('PreviewCanvas', () => {
     expect(renderFrame).toHaveBeenCalledWith(2, {}, { longEdge: 896, applyGeometry: true });
   });
 
+  it('computes the target from the aspect ratio of a cropped frame', async () => {
+    vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      width: 400,
+      height: 800,
+    } as DOMRect);
+    vi.stubGlobal('devicePixelRatio', 2);
+    // The shell returns a portrait crop frame (1:2) of a landscape session.
+    const { transport, render: renderFrame } = fakeTransport(() => Promise.resolve(makeFrameBody(4, 8)));
+    const big = { session: 3, width: 2560, height: 1707 };
+    const view = render(PreviewCanvas, { session: big, settings: {}, transport });
+    // First frame: the session aspect. 400 * 2 = 800 px wide -> 896.
+    await waitFor(() => expect(renderFrame).toHaveBeenCalledWith(3, {}, { longEdge: 896, applyGeometry: true }));
+    // The crop frame fills the box height: 800 * 2 = 1600 -> 1664.
+    await waitFor(() => expect(renderFrame).toHaveBeenLastCalledWith(3, {}, { longEdge: 1664, applyGeometry: true }));
+    const calls = renderFrame.mock.calls.length;
+    // More frames of the same aspect ratio do not change the target.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(renderFrame.mock.calls.length).toBe(calls);
+
+    // Geometry off: the session aspect again.
+    await view.rerender({ session: big, settings: {}, transport, applyGeometry: false });
+    await waitFor(() => expect(renderFrame).toHaveBeenLastCalledWith(3, {}, { longEdge: 896, applyGeometry: false }));
+  });
+
   it('draws through createImageBitmap when it exists', async () => {
     const close = vi.fn();
     const bitmap = { width: 4, height: 3, close };

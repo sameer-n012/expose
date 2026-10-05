@@ -44,8 +44,11 @@ impl From<DisplaySpaceArg> for DisplaySpace {
     }
 }
 
-/// Opens a preview session for a photo: decodes the file, downsamples it to
-/// `max_long_edge` (default 2560), and uploads it to the GPU once.
+/// Opens a preview session for a photo: decodes the file, downsamples it,
+/// and uploads it to the GPU. `max_long_edge` (default 2560) is the frame
+/// limit: the largest frame long edge, and the size that the call returns.
+/// The session keeps a source of at least 4096 px long edge (if the photo
+/// is that large), so that a cropped frame can still reach the limit.
 ///
 /// Errors: `notFound` (photo or file), `io`/`internal` (decode),
 /// `unavailable` (no GPU), `invalidInput` (size).
@@ -125,11 +128,13 @@ pub async fn preview_open_test_pattern(
 /// Renders one frame of a session with `settings` and returns the frame
 /// body (header and RGBA8 pixels) as raw binary data.
 ///
-/// `longEdge` is the target long edge of the develop input in pixels (for
-/// example, the device-pixel size of the canvas). The engine clamps it to
-/// the session size and to a minimum; `null` gives the session size.
-/// Geometry runs after this resize, so a crop gives a frame that is
-/// smaller than `longEdge`, with the aspect ratio of the crop. The frame
+/// `longEdge` is the target long edge of the frame (the develop output) in
+/// pixels (for example, the device-pixel size of the canvas). The engine
+/// clamps it to the session size and to a minimum; `null` gives the
+/// session size. With a crop, the engine enlarges the develop input by the
+/// crop factor (in 128 px steps), so the frame long edge is about
+/// `longEdge`. If the session source is too small for the crop, the frame
+/// is smaller. The frame has the aspect ratio of the crop, and the frame
 /// header has the real size.
 ///
 /// `applyGeometry` (optional, default `true`): `false` skips the geometry

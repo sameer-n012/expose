@@ -136,7 +136,7 @@ export class PreviewClient {
     return this.#maxInFlight;
   }
 
-  /** The target long edge sent with each request, or null (the session size). */
+  /** The target frame long edge sent with each request, or null (the session size). */
   get targetLongEdge(): number | null {
     return this.#longEdge;
   }
@@ -158,7 +158,8 @@ export class PreviewClient {
   }
 
   /**
-   * Sets the target long edge of the frames (see `targetLongEdge` in
+   * Sets the target long edge of the frames (the develop output, also
+   * with a crop; see `targetLongEdge` in
    * `size.ts`). A change requests a new frame for the last settings, so
    * that the canvas gets the new size.
    */

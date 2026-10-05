@@ -29,8 +29,10 @@
 //!   downsample to [`WORK_LONG_EDGE`], the full develop pipeline on the
 //!   CPU (geometry, tone, sharpening), and a Lanczos-3 resize to the
 //!   thumbnail size. A crop gives the thumbnail the aspect ratio of the
-//!   crop, and a smaller thumbnail when the cropped image is smaller than
-//!   [`THUMB_LONG_EDGE`] (no enlargement).
+//!   crop. With a crop, the downsample keeps more pixels (up to
+//!   [`MAX_WORK_LONG_EDGE`]), so that the cropped image still reaches the
+//!   thumbnail size. The thumbnail is smaller only when the cropped
+//!   original is smaller than [`THUMB_LONG_EDGE`] (no enlargement).
 //!
 //! # Threads
 //!
@@ -71,7 +73,9 @@ pub const THUMB_JPEG_QUALITY: u8 = 85;
 /// again.
 ///
 /// Version 2: thumbnails apply geometry (crop) and sharpening.
-pub const THUMB_FORMAT_VERSION: u32 = 2;
+/// Version 3: a crop enlarges the develop input, so cropped thumbnails
+/// keep the full thumbnail size.
+pub const THUMB_FORMAT_VERSION: u32 = 3;
 
 /// The name of the thumbnail folder in the application cache folder.
 pub const THUMB_DIR_NAME: &str = "thumbnails";
@@ -80,6 +84,12 @@ pub const THUMB_DIR_NAME: &str = "thumbnails";
 /// downsample to this size is fast; the Lanczos-3 filter then makes the
 /// final size from it.
 pub const WORK_LONG_EDGE: u32 = 2 * THUMB_LONG_EDGE;
+
+/// The largest long edge of the develop input of a cropped full render
+/// (see [`work_long_edge`]). A 4096 px input uses about 180 MB (`f32`
+/// RGBA) for a 3:2 photo, and lets a crop to 25 % still reach
+/// [`WORK_LONG_EDGE`].
+pub const MAX_WORK_LONG_EDGE: u32 = 4 * WORK_LONG_EDGE;
 
 /// An error of a thumbnail request.
 #[derive(Debug, thiserror::Error)]
@@ -324,11 +334,12 @@ pub fn render_thumbnail(
     // orientation (the embedded preview is used only for default settings,
     // above). Thus its size is the original size for the pixel scale.
     let original = (decoded.image.width(), decoded.image.height());
-    let small = downsample_area(&decoded.image, WORK_LONG_EDGE)?;
-    drop(decoded);
     // The decoders apply the as-shot white balance of RAW files, so the
     // decoded image is a rendered source.
     let pipeline = Pipeline::new(settings, &SourceInfo::RENDERED)?;
+    let work = work_long_edge(&pipeline, original)?;
+    let small = downsample_area(&decoded.image, work)?;
+    drop(decoded);
     let developed = if pipeline.is_identity() {
         small
     } else {
@@ -338,6 +349,34 @@ pub fn render_thumbnail(
         pipeline.develop_cpu_owned(small, scale)?
     };
     fit_thumbnail(&developed)
+}
+
+/// Returns the long edge of the develop input of a full render.
+///
+/// Without geometry it is [`WORK_LONG_EDGE`] (the fast path). With
+/// geometry, a crop makes the develop output smaller than the input. Thus
+/// the input long edge is [`WORK_LONG_EDGE`] multiplied by the crop factor
+/// (original long edge / output long edge), so that the cropped image
+/// still has a long edge of about [`WORK_LONG_EDGE`]. The value is limited
+/// to [`MAX_WORK_LONG_EDGE`]. The downsample does not enlarge, so a value
+/// above the original size gives the original size.
+///
+/// # Errors
+///
+/// [`ThumbnailError::Develop`] when the original size is zero.
+fn work_long_edge(pipeline: &Pipeline, original: (u32, u32)) -> Result<u32, ThumbnailError> {
+    if !pipeline.has_geometry() {
+        return Ok(WORK_LONG_EDGE);
+    }
+    let output = pipeline.output_size(original.0, original.1)?;
+    let original_long = u64::from(original.0.max(original.1));
+    let output_long = u64::from(output.0.max(output.1)).max(1);
+    let work = (u64::from(WORK_LONG_EDGE) * original_long)
+        .div_ceil(output_long)
+        .clamp(u64::from(WORK_LONG_EDGE), u64::from(MAX_WORK_LONG_EDGE));
+    // The clamp limits the value to a `u32` constant; the fallback cannot
+    // apply.
+    Ok(u32::try_from(work).unwrap_or(MAX_WORK_LONG_EDGE))
 }
 
 /// Returns the output pixels for each original pixel: `long edge of
@@ -786,6 +825,48 @@ mod tests {
         // No geometry: the aspect ratio of the source.
         let image = render_thumbnail(&src, &DevelopSettings::default()).unwrap();
         assert_eq!((image.width(), image.height()), (THUMB_LONG_EDGE, 256));
+    }
+
+    #[test]
+    fn strong_crop_keeps_the_thumbnail_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("large.png");
+        write_png(&src, 2400, 1200);
+        let mut settings = DevelopSettings::default();
+        // A centered crop to 25 % of each side: 600 x 300 original pixels.
+        settings.crop.rect = expose_core::develop::NormalizedRect {
+            left: 0.375,
+            top: 0.375,
+            width: 0.25,
+            height: 0.25,
+        };
+        let image = render_thumbnail(&src, &settings).unwrap();
+        assert_eq!((image.width(), image.height()), (THUMB_LONG_EDGE, 256));
+    }
+
+    #[test]
+    fn work_long_edge_follows_the_crop() {
+        let plain = Pipeline::new(&DevelopSettings::default(), &SourceInfo::RENDERED).unwrap();
+        assert_eq!(
+            work_long_edge(&plain, (6000, 4000)).unwrap(),
+            WORK_LONG_EDGE
+        );
+        let mut settings = DevelopSettings::default();
+        // A crop to the left half keeps the full height (4000 px), so the
+        // factor is 6000 / 4000.
+        settings.crop.rect.width = 0.5;
+        let left = Pipeline::new(&settings, &SourceInfo::RENDERED).unwrap();
+        assert_eq!(work_long_edge(&left, (6000, 4000)).unwrap(), 1536);
+        settings.crop.rect.height = 0.5;
+        let half = Pipeline::new(&settings, &SourceInfo::RENDERED).unwrap();
+        assert_eq!(work_long_edge(&half, (6000, 4000)).unwrap(), 2048);
+        settings.crop.rect.width = 0.1;
+        settings.crop.rect.height = 0.1;
+        let tiny = Pipeline::new(&settings, &SourceInfo::RENDERED).unwrap();
+        assert_eq!(
+            work_long_edge(&tiny, (6000, 4000)).unwrap(),
+            MAX_WORK_LONG_EDGE
+        );
     }
 
     #[test]
