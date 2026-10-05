@@ -96,6 +96,9 @@ pub fn handle<R: Runtime>(
             settings,
             format: query.format,
             long_edge: query.long_edge,
+            // The scheme has no option for this; frames always show the
+            // geometry stage.
+            apply_geometry: true,
         },
         Box::new(move |result| {
             let response = match result {

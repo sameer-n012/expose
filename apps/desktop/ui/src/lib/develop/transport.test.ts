@@ -43,9 +43,22 @@ describe('commands', () => {
       session: 3,
       settings: { tone: { exposure: 1 } },
       longEdge: null,
+      applyGeometry: true,
     });
     await ipcTransport.render(3, {}, { longEdge: 1280 });
-    expect(invoke).toHaveBeenLastCalledWith('preview_render', { session: 3, settings: {}, longEdge: 1280 });
+    expect(invoke).toHaveBeenLastCalledWith('preview_render', {
+      session: 3,
+      settings: {},
+      longEdge: 1280,
+      applyGeometry: true,
+    });
+    await ipcTransport.render(3, {}, { applyGeometry: false });
+    expect(invoke).toHaveBeenLastCalledWith('preview_render', {
+      session: 3,
+      settings: {},
+      longEdge: null,
+      applyGeometry: false,
+    });
   });
 
   it('open and close send the arguments in camelCase', async () => {

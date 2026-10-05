@@ -125,15 +125,20 @@ pub async fn preview_open_test_pattern(
 /// Renders one frame of a session with `settings` and returns the frame
 /// body (header and RGBA8 pixels) as raw binary data.
 ///
-/// `long_edge` is the target long edge of the frame in pixels (for
+/// `longEdge` is the target long edge of the develop input in pixels (for
 /// example, the device-pixel size of the canvas). The engine clamps it to
-/// the session size and to a minimum; `null` gives the session size. The
-/// frame header has the real size.
+/// the session size and to a minimum; `null` gives the session size.
+/// Geometry runs after this resize, so a crop gives a frame that is
+/// smaller than `longEdge`, with the aspect ratio of the crop. The frame
+/// header has the real size.
+///
+/// `applyGeometry` (optional, default `true`): `false` skips the geometry
+/// stage (flip, straighten, crop), so the frame shows the full image.
 ///
 /// If a newer `preview_render` call arrives before this one starts, this
 /// call fails with the kind `superseded` (latest wins). The UI drops it.
 ///
-/// Errors: `invalidInput` (settings, or `long_edge` 0 or above 8192),
+/// Errors: `invalidInput` (settings, or `longEdge` 0 or above 8192),
 /// `notFound` (session), `superseded`, `internal`.
 #[tauri::command]
 pub async fn preview_render(
@@ -141,6 +146,7 @@ pub async fn preview_render(
     session: SessionId,
     settings: DevelopSettings,
     long_edge: Option<u32>,
+    apply_geometry: Option<bool>,
 ) -> Result<Response, CommandError> {
     let frame = engine
         .render_async(RenderRequest {
@@ -148,6 +154,7 @@ pub async fn preview_render(
             settings,
             format: FrameFormat::Rgba8,
             long_edge,
+            apply_geometry: apply_geometry.unwrap_or(true),
         })
         .await?;
     Ok(Response::new(frame.body))
@@ -208,6 +215,7 @@ pub async fn preview_bench_channel<R: Runtime>(
                 settings,
                 format: FrameFormat::Rgba8,
                 long_edge: None,
+                apply_geometry: true,
             });
             let frame = match frame {
                 Ok(frame) => frame,

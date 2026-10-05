@@ -77,6 +77,23 @@ describe('FramePresenter', () => {
     expect(presenter.idle).toBe(true);
   });
 
+  it('re-fits the canvas when the frame size changes (for example, a crop)', () => {
+    const { presenter, canvas, putImageData, tick } = setup();
+    presenter.present(event(0, 6, 4));
+    tick();
+    expect([canvas.width, canvas.height]).toEqual([6, 4]);
+    // A crop gives a smaller frame with another aspect ratio.
+    presenter.present(event(1, 3, 4));
+    tick();
+    expect([canvas.width, canvas.height]).toEqual([3, 4]);
+    expect(putImageData.mock.calls[1]?.[0]).toMatchObject({ width: 3, height: 4 });
+    // No crop again: the full size.
+    presenter.present(event(2, 6, 4));
+    tick();
+    expect([canvas.width, canvas.height]).toEqual([6, 4]);
+    expect(putImageData).toHaveBeenCalledTimes(3);
+  });
+
   it('never draws a stale frame after a newer one', () => {
     const { presenter, putImageData, presented, tick } = setup();
     presenter.present(event(2));

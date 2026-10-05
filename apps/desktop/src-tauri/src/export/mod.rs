@@ -20,6 +20,9 @@
 //!   could need more than 1.5 GB.
 //! - Export uses the CPU develop pipeline. The GPU belongs to the preview
 //!   render thread, and an export must not make the preview slow.
+//! - The develop runs all stages at source resolution (geometry first,
+//!   sharpening last) before the resize. Thus the output size and the
+//!   pixel limit apply to the cropped image.
 //! - The catalog lock is held only to read the path and the settings of a
 //!   photo, never during decode or encode.
 //! - Original files are read-only. Export never writes to the path of a
@@ -316,6 +319,61 @@ mod tests {
             events[2],
             ExportEvent::Finished { skipped: 1, .. }
         ));
+    }
+
+    #[test]
+    fn cropped_photo_exports_at_the_cropped_size() {
+        let source = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let mut image = expose_core::buffer::WorkingImage::new(40, 20).unwrap();
+        for y in 0..20 {
+            for x in 0..40 {
+                #[allow(clippy::cast_precision_loss, reason = "small test values")]
+                let v = x as f32 / 40.0;
+                *image.pixel_mut(x, y).unwrap() = [v, 0.5, 1.0 - v, 1.0];
+            }
+        }
+        let png = expose_raw::EncodeOptions::png(expose_raw::BitDepth::Eight, false);
+        expose_raw::encode_path(&image, &png, source.path().join("wide.png")).unwrap();
+        let state = std::sync::Arc::new(CatalogState::from_store(
+            None,
+            SqliteStore::open_in_memory().unwrap(),
+        ));
+        let report = service::import_folder(
+            &state,
+            &expose_catalog::StdFileSystem,
+            source.path().to_str().unwrap(),
+            false,
+        )
+        .unwrap();
+        let id = report.added_ids[0];
+        // The left half (20 x 20), with sharpening.
+        state
+            .lock()
+            .unwrap()
+            .set_develop_settings(
+                id,
+                1,
+                &serde_json::json!({
+                    "crop": { "rect": { "left": 0.0, "top": 0.0, "width": 0.5, "height": 1.0 } },
+                    "sharpening": { "amount": 40.0 }
+                }),
+            )
+            .unwrap();
+        let mut value = request(
+            out.path(),
+            &[id.0],
+            &serde_json::json!({ "kind": "png", "bitDepth": 8 }),
+        );
+        // 50 % of the cropped size, not of the source size.
+        value["size"] = serde_json::json!({ "mode": "percent", "percent": 50 });
+        let manager = ExportManager::start().unwrap();
+        let events = run(&manager, &state, value);
+        let ExportEvent::PhotoDone { output_path, .. } = &events[1] else {
+            panic!("{events:?}");
+        };
+        let decoded = expose_raw::decode_path(Path::new(output_path)).unwrap();
+        assert_eq!((decoded.image.width(), decoded.image.height()), (10, 10));
     }
 
     #[test]
