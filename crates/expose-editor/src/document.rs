@@ -133,7 +133,7 @@ pub struct DocumentSpec {
 
 impl DocumentSpec {
     /// Returns a spec with this size and the defaults: 300 PPI, RGB,
-    /// 16 bits, white background, linear blending.
+    /// 16 bits, white background, perceptual blending.
     pub const fn new(width: u32, height: u32) -> Self {
         Self {
             width,
@@ -142,7 +142,7 @@ impl DocumentSpec {
             color_mode: ColorMode::Rgb,
             bit_depth: BitDepth::Sixteen,
             background: Background::White,
-            blend_space: BlendSpace::Linear,
+            blend_space: BlendSpace::Perceptual,
         }
     }
 }

@@ -45,13 +45,14 @@
 //!
 //! # Blending space
 //!
-//! [`BlendSpace::Linear`] blends the linear working values (physically
-//! correct for light; this is the default). [`BlendSpace::Perceptual`]
-//! encodes colors with the sRGB transfer curve before the blend and decodes
-//! after it. Perceptual blending gives results that look like those of
-//! display-referred editors (for example, 50 % opacity looks like a
-//! perceptual mid-point). The transfer function of `expose-core` continues
-//! above 1.0 and is odd for negative values, so no data is clipped.
+//! [`BlendSpace::Perceptual`] (the default) encodes colors with the sRGB
+//! transfer curve before the blend and decodes after it. Perceptual
+//! blending gives results that look like those of display-referred editors
+//! (for example, 50 % opacity looks like a perceptual mid-point). The
+//! transfer function of `expose-core` continues above 1.0 and is odd for
+//! negative values, so no data is clipped. [`BlendSpace::Linear`] blends the
+//! linear working values (physically correct for light). ADR 0005 records
+//! the choice of the default.
 
 use expose_core::buffer::Rgba;
 use expose_core::color::{TransferFunction, luminance};
@@ -63,9 +64,9 @@ pub const DIVIDE_MIN_SOURCE: f32 = 1.0e-4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BlendSpace {
     /// Blend the linear working values.
-    #[default]
     Linear,
-    /// Encode with the sRGB transfer curve, blend, then decode.
+    /// Encode with the sRGB transfer curve, blend, then decode. Default.
+    #[default]
     Perceptual,
 }
 

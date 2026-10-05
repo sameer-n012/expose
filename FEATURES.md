@@ -108,15 +108,15 @@ This file is the master list of features for Expose.
 - [ ] **P3** Camera calibration (shadow tint, primary hue/saturation)
 
 ### 2.4 Detail
-- [ ] **P1** Sharpening (amount, radius, detail, masking)
+- [x] **P1** Sharpening (amount, radius, detail, masking)
 - [ ] **P2** Luminance noise reduction
 - [ ] **P2** Color noise reduction
 - [ ] **P3** AI noise reduction (writes a new DNG)
 - [ ] **P3** Raw detail enhancement / super-resolution (2× upscale)
 
 ### 2.5 Optics and geometry
-- [ ] **P1** Crop with aspect-ratio presets and overlays (rule of thirds, golden ratio, grid)
-- [ ] **P1** Straighten and rotate; flip
+- [x] **P1** Crop with aspect-ratio presets and overlays (rule of thirds, golden ratio, grid)
+- [x] **P1** Straighten and rotate; flip
 - [ ] **P2** Lens profile corrections (distortion, vignetting) from a lens database
 - [ ] **P2** Remove chromatic aberration and color fringing
 - [ ] **P2** Manual distortion and vignetting correction
@@ -157,7 +157,7 @@ This file is the master list of features for Expose.
 - [ ] **P2** Copy/paste settings with a choice of which settings
 - [ ] **P2** Synchronize settings across many selected photos
 - [ ] **P2** Develop presets (create, import, export, organize, amount slider)
-- [ ] **P2** Histogram with shadow/highlight clipping warnings
+- [x] **P2** Histogram with shadow/highlight clipping warnings
 - [ ] **P2** Show clipping overlay on the photo
 - [ ] **P3** Auto sync (edits apply to all selected photos while you edit)
 - [ ] **P3** Match exposure across photos
