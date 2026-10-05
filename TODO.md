@@ -11,7 +11,6 @@ develop-geometry-detail is split into these tasks (2026-10-04). The first three 
 - [ ] **develop-geometry** (O, `expose-develop/src/geometry.rs`) — CPU reference: flip, straighten, crop; output size; inscribed-crop helper.
 - [ ] **develop-sharpen** (O, `expose-develop/src/sharpen.rs`) — CPU reference: luminance unsharp mask with radius, detail, masking.
 - [ ] **gpu-multi-input** (O, `expose-gpu`) — kernels with 1..=4 inputs and an output of a different size.
-- [ ] **library-navigation** (S, `ui`) — see "Follow-ups" below.
 - Then: **develop-geometry-gpu** (O) — GPU kernels for geometry and sharpening, wired into `Pipeline` (needs the three tasks above); then **geometry-integration** — preview, thumbnails, and export use the new stages.
 
 ## Next (suggested order)
@@ -26,7 +25,6 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 - [ ] **develop-ui-followups** (S) — the TS slider ranges in `ui/src/lib/develop/settings.ts` are copies of the Rust constants (add a test or generate them); the shell drops unknown settings fields (ADR 0009).
 
-- [ ] **library-navigation** (S, `ui`) — the toolbar view label ("Grid"/"Loupe") is plain text; make it a Grid/Loupe toggle. `Esc` in the loupe and a click on the Library tab while the loupe shows return to the grid (today only the `G` shortcut does). Arrow keys in the loupe go to the previous/next photo.
 - [ ] **loupe-view** (S, `ui`, later) — the Library loupe (double-click on a grid cell) is still a gray placeholder with the file name and date (`ui/src/components/modules/LibraryView.svelte`). Show the photo with its develop settings through `PreviewCanvas` / `PreviewClient` (as in Develop).
 - [ ] **export-followups** — apply crop and sharpening (after develop-geometry-detail); copy metadata (see encode-followups); output sharpening, naming templates, presets (P2); the UI `Mod+Shift+E` does nothing while the dialog is open (by design, the dialog stops key events).
 - [ ] **bench-recheck** (operator, optional) — on a quiet machine: `?bench=transport&only=slider-ipc` and `&only=ipc-rgba8-bitmap` against the 2026-10-03 rows. PR #22 found no leak; the slow rows were most likely background load.
@@ -51,6 +49,7 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 ## Done
 
+- [x] **library-navigation** (PR #23) — Grid/Loupe toggle in the library toolbar; `L` opens the loupe on the selected photo (`E` is the Editor module); `G` and `Esc` return to the grid; a click on the Library tab in the loupe returns to the grid; ArrowLeft/ArrowRight step in the loupe (no wrap). The selection follows the loupe photo, so rating/flag/label keys act on it. Not checked in the real webview yet.
 - [x] **bench-regression** (PR #22) — no leak in the preview path; release tests added (bitmaps closed, late responses dropped before parse). Benchmark options `only=`, `reverse=1`, `settle=<ms>`. The 12 ms shell time at `@1280` was one GPU view rebuild in the mean; slider candidates now render a warm-up frame.
 - [x] **export-v1** (PRs #20, #21) — `export_start`/`export_cancel` with an event channel; one worker, one photo at a time, CPU develop (about 0.73 s per 24 MP photo); conflict policies; never writes to a catalog original. Export dialog, `Mod+Shift+E`, progress with cancel. ADR 0010.
 
