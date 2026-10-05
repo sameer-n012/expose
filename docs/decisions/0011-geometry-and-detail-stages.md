@@ -48,8 +48,15 @@ Full develop: **geometry → white balance and exposure → tone zones and contr
 - GPU intermediates are `rgba32float` images (only the red channel is used for the luminance passes, because `expose-gpu` has no single-channel format). `DevelopTargets` makes them again only when a size changes.
 - Export sharpens at source resolution, before the resize (the radius is in source pixels).
 
+### Shell connection (PR #31)
+
+- `preview_render` has an optional `applyGeometry` (default `true`). The frame header carries the real output size, which is smaller than the session size when a crop is set. `longEdge` still sets the size of the pipeline input.
+- Each preview session keeps the full-resolution size, so the sharpening pixel scale is correct. The display encoder is made again only when the frame size changes.
+- The thumbnail format version is 2. Old cached thumbnails of cropped or sharpened photos had the same settings key, so they must be made again.
+- Export develops at source resolution, then resizes. The output size and the 200 MP limit use the cropped size.
+
 ## Consequences
 
-- The preview, thumbnail, and export paths must change to the full develop API to show crop and sharpening (task `geometry-integration`).
-- The preview frame size changes when the crop changes. The UI must accept frames of a new size.
+- The preview frame size changes when the crop changes. The UI presenter fits each frame again, so it accepts frames of a new size.
+- After a strong crop the preview frame is small and shown enlarged. A later fix can ask for a larger `longEdge`.
 - Each GPU pass still makes a new parameter buffer and bind group. Buffer reuse is in the `gpu-api` backlog.

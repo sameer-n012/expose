@@ -2,38 +2,37 @@
 
 Work tracker for Expose. `FEATURES.md` is the master feature list. This file tracks the work in progress and partial work.
 
-`FEATURES.md` items marked `[x]` (2026-10-04, after the operator check in the real webview): 2.2 exposure, contrast, highlights/shadows/whites/blacks; 5.1 the four P1 export items. White balance stays open (presets in the UI and the eyedropper are missing); automatic tone stays open (no UI yet).
+`FEATURES.md` items marked `[x]` (2026-10-04, after the operator check in the real webview): 2.2 exposure, contrast, highlights/shadows/whites/blacks; 2.2 point tone curve; 5.1 the four P1 export items. White balance stays open (presets in the UI and the eyedropper are missing); automatic tone stays open (no UI yet). Loupe view stays open (no 1:1 zoom).
+
+Operator checks in the real webview (2026-10-04): loupe view, Grid/Loupe keys, and the Tone curve panel work.
 
 ## In progress
 
-develop-geometry-detail is split into tasks (2026-10-04, ADR 0011). Done: develop-geometry (#24), develop-sharpen (#25), gpu-multi-input (#26).
-
-- [ ] **geometry-integration** (O, `src-tauri`, agent running) — preview engine, thumbnails, and export use the full develop API (preview frames change size with the crop); `preview_render` gets optional `applyGeometry`.
-- Then: **develop-panels** remainder (S) — Detail (sharpening) panel, crop/straighten tool (uses `applyGeometry: false` while dragging, `max_inscribed_rect` needs a shell command), histogram.
+- (none — all agent branches are merged)
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **develop-geometry-detail** (O) — crop/straighten and sharpening stages in `expose-develop` (CPU reference + GPU), used by preview, thumbnails, and export. Needs neighborhood and size-changing kernels (see gpu-api).
-2. [ ] **develop-panels** (S) — Tone curve done (PR #28). Open: Detail (sharpening), crop/straighten UI, histogram (needs a shell command). The crop and Detail UI need item 1.
-3. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
+1. [ ] **develop-panels** (S) — Tone curve done (PR #28). Open: Detail (sharpening) panel; crop/straighten tool (aspect presets, overlays; `applyGeometry: false` while dragging; `max_inscribed_rect` needs a shell command); histogram (needs a shell command). The pipeline side is done (PRs #24–#26, #29, #31).
+2. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 
 ### Follow-ups from merged work
 
 - [ ] **develop-ui-followups** (S) — the TS slider ranges in `ui/src/lib/develop/settings.ts` are copies of the Rust constants (add a test or generate them); the shell drops unknown settings fields (ADR 0009).
 
-- [ ] **export-followups** — apply crop and sharpening (after develop-geometry-detail); copy metadata (see encode-followups); output sharpening, naming templates, presets (P2); the UI `Mod+Shift+E` does nothing while the dialog is open (by design, the dialog stops key events).
+- [ ] **geometry-followups** — after a strong crop the preview asks for a `longEdge` of the uncropped size, so the frame is enlarged and soft (ask for `longEdge / crop fraction`, may need a larger session); thumbnails crop after the 1024 px reduction (reduce less when a crop is set); `PreviewRenderer` still allocates its unused tone-only output image (change in `expose-develop`); `DevelopTargets` intermediates are full `rgba32float` (single-channel formats in `expose-gpu` would save memory).
+- [ ] **export-followups** — copy metadata (see encode-followups); output sharpening, naming templates, presets (P2); the UI `Mod+Shift+E` does nothing while the dialog is open (by design, the dialog stops key events).
 - [ ] **bench-recheck** (operator, optional) — on a quiet machine: `?bench=transport&only=slider-ipc` and `&only=ipc-rgba8-bitmap` against the 2026-10-03 rows. PR #22 found no leak; the slow rows were most likely background load.
 - [ ] **preview-followups** — the slider simulation is limited by main-thread time (timer ticks), not the transport; one waiting slot per session in the engine if a prefetch supersedes a visible request; update the target size when the display pixel density changes; move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
 - [ ] **core-followups** (S) — `Rect::translated` is not used yet (editor `add_offset` works on tuples); the Planckian locus also has a piece boundary at 2222 K (y fit) with a small kink.
-- [ ] **gpu-api** (O) — kernels with different input/output size (GPU downsample), multiple inputs / storage buffers, parameter buffer reuse, double-buffered read-back, `WorkingImage` at the API boundary, render graph.
+- [ ] **gpu-api** (O) — GPU downsample in the preview (multi-input and any-size kernels exist since PR #26), storage buffers, single-channel formats, parameter buffer reuse, double-buffered read-back, `WorkingImage` at the API boundary, render graph.
 - [ ] **raw-real-samples** (operator + S) — run `EXPOSE_RAW_SAMPLES=/path cargo test -p expose-raw -- --ignored real_samples --nocapture` on real camera files and fix what fails. Then: forward matrices, BaselineExposure, DNG black level origin check, multi-threaded/tiled demosaic.
 - [ ] **develop-tuning** — tune slider strengths and zone centers on real photos; local (edge-aware) tone zones; RAW white balance as camera-space gains.
 - [ ] **editor-storage** — sparse tiled layer storage; history memory budget; clipping masks; layer effects.
 - [ ] **ui-polish** (S) — save panel layout between sessions; Tab shortcut conflicts with keyboard focus navigation; refresh shortcut tooltips after a remap.
 - [ ] **ui-catalog-followups** (S) — search box is a placeholder; per-request version for optimistic rollback (two quick changes can restore an old value); folder count is direct-only, so it differs from the grid total with "include subfolders".
-- [ ] **thumbnail-followups** — RAW with non-default white balance: give the pipeline the as-shot `SourceInfo` (from `DecodeInfo.raw.multipliers`), not `SourceInfo::RENDERED`; apply crop/straighten when a geometry stage exists; reduce memory (scaled JPEG decode, or decode to 8-bit, instead of a full-size f32 image); cache size limit and removal of thumbnails of deleted photos; check the `thumb` scheme, CSP, and 304 handling in a real webview.
+- [ ] **thumbnail-followups** — RAW with non-default white balance: give the pipeline the as-shot `SourceInfo` (from `DecodeInfo.raw.multipliers`), not `SourceInfo::RENDERED`; reduce memory (scaled JPEG decode, or decode to 8-bit, instead of a full-size f32 image); cache size limit and removal of thumbnails of deleted photos; check the `thumb` scheme, CSP, and 304 handling in a real webview.
 - [ ] **encode-followups** — copy EXIF/XMP/IPTC into exported files; gamut mapping instead of clipping; JPEG optimized Huffman tables, progressive mode, gray output; TIFF ICC tag type UNDEFINED instead of BYTE.
 - [ ] **catalog-paths** (S) — case-insensitive path comparison on macOS; Windows paths in tests.
 - [ ] **wasm-check** — `expose-core` must compile for `wasm32-unknown-unknown`. The target is not installed (operator). `expose-raw` must build for WASM with `--no-default-features` (no `rawler`).
@@ -45,6 +44,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **geometry-integration** (PR #31) — preview, thumbnails, and export run the full develop (crop, straighten, flip, sharpening). `preview_render` optional `applyGeometry` (default true); frame header size = real output size; display encoder rebuilt only on a size change. Thumbnail format version 2. Export develops at source resolution before the resize. ADR 0011.
 
 - [x] **develop-geometry-gpu** (PR #29) — geometry (first) and sharpening (last) in `Pipeline`: `develop_cpu`/`develop_cpu_owned`, `develop_gpu` + `DevelopTargets`, `PreviewRenderer::develop_full`/`set_original_size`, `set_apply_geometry`; 5 new GPU kernels (GPU vs CPU ≤ 2.3e-6 relative). `is_identity` now covers all stages; `tone_is_identity` is the old meaning. ADR 0011.
 - [x] **tone-curve-panel** (PR #28) — Tone curve panel in Develop (Master/R/G/B, add/drag/remove points, keyboard, per-channel reset); `lib/develop/curve.ts`. "Reset all" still resets only the Basic values. Not checked in the real webview yet.
