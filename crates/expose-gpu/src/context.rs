@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use crate::error::GpuError;
 use crate::image::ImageFormat;
-use crate::kernel::{FormatLayout, PipelineKey};
+use crate::kernel::{KernelLayout, MAX_KERNEL_INPUTS, PipelineKey};
 
 /// The power preference for the adapter choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -95,8 +95,9 @@ pub struct GpuContext {
     pub(crate) queue: wgpu::Queue,
     adapter_summary: AdapterSummary,
     limits: GpuLimits,
-    /// Bind group and pipeline layouts, one for each output format.
-    pub(crate) layouts: [FormatLayout; ImageFormat::ALL.len()],
+    /// Bind group and pipeline layouts, one for each output format and input
+    /// count. Index: `[format.index()][input_count - 1]`.
+    pub(crate) layouts: [[KernelLayout; MAX_KERNEL_INPUTS]; ImageFormat::ALL.len()],
     /// Compiled pipelines. The lock is never held across an `.await`.
     pub(crate) pipelines: Mutex<HashMap<PipelineKey, wgpu::ComputePipeline>>,
 }
@@ -171,7 +172,11 @@ impl GpuContext {
         };
         tracing::info!(adapter = ?adapter_summary, ?limits, "GPU context created");
 
-        let layouts = ImageFormat::ALL.map(|format| FormatLayout::new(&device, format));
+        // All 3 x 4 layouts are made now. They are small, and an eager table
+        // needs no lock on the kernel run path.
+        let layouts = ImageFormat::ALL.map(|format| {
+            std::array::from_fn(|index| KernelLayout::new(&device, format, index + 1))
+        });
         Ok(Self {
             device,
             queue,
