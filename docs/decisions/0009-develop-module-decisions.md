@@ -27,7 +27,7 @@ PR #19 added the first usable Develop module: the Basic panel, the live preview,
 ### Basic panel
 
 - White balance: "As shot" or "Custom". Temperature and tint are disabled in "As shot". A temperature or tint edit sets the mode to "Custom". A preset mode shows as a disabled "Preset" option.
-- Double-click on a slider resets it. "Reset all" resets only the Basic panel values (white balance to "As shot", tone to 0). It does not change the tone curve, crop, or sharpening.
+- Double-click on a slider resets it. "Reset all" resets only the Basic panel values (white balance to "As shot", tone to 0). It does not change the tone curve, crop, or sharpening. **Update (PR #37, 2026-10-05):** "Reset all" moved to a footer at the end of the panel column (`Mod+Shift+R`) and resets all sections (white balance, tone, tone curve, sharpening, crop) in one edit. Each panel has its own "Reset".
 - The slider ranges (`RANGES`) and identity values (`DEFAULTS`) in `ui/src/lib/develop/settings.ts` are copies of the Rust constants.
 
 ### Thumbnail refresh
