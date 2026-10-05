@@ -16,6 +16,7 @@ import {
   setCropRect,
   swapCropOrientation,
   withCrop,
+  withoutCrop,
   type CropSettings,
 } from './crop';
 import { maxInscribedRect, pixelAspect, rectIsInside } from './cropGeometry';
@@ -54,6 +55,12 @@ describe('crop document', () => {
       aspect: { ratio: { width: 3, height: 2 } },
     });
     expect(doc.tone).toBe(DOC.tone);
+  });
+
+  it('removes the crop for the crop mode preview', () => {
+    expect(withoutCrop(DOC)).toBe(DOC);
+    const doc = withCrop(DOC, { ...CROP_DEFAULTS, angle: 4 });
+    expect(withoutCrop(doc)).toEqual(DOC);
   });
 
   it('knows the identity crop', () => {

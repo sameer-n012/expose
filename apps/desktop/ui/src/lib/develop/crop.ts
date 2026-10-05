@@ -114,6 +114,19 @@ export function withCrop(doc: DevelopDocument, crop: CropSettings): DevelopDocum
   return { ...doc, crop: { ...crop, rect: { ...crop.rect } } };
 }
 
+/**
+ * The settings for the preview in crop mode. The geometry stage is off
+ * then, so the crop has no effect on the frame. Without the field, crop
+ * edits do not request new frames.
+ */
+export function withoutCrop(doc: DevelopDocument): DevelopDocument {
+  if (!('crop' in doc)) {
+    return doc;
+  }
+  const { crop: _crop, ...rest } = doc;
+  return rest as DevelopDocument;
+}
+
 /** True when the crop changes nothing (the aspect is only a tool setting). */
 export function isIdentityCrop(crop: CropSettings): boolean {
   return (

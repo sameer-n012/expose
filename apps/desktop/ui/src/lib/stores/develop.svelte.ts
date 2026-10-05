@@ -14,6 +14,22 @@
  */
 import type { PhotoId } from '../catalog';
 import { getDevelopSettings, isCommandError, setDevelopSettings } from '../catalog';
+import {
+  cropOf,
+  flipCrop,
+  resetCrop,
+  setCropAngle,
+  setCropAspect,
+  setCropLock,
+  setCropRect,
+  swapCropOrientation,
+  withCrop,
+  type CropAspect,
+  type CropSettings,
+  type FrameSize,
+} from '../develop/crop';
+import type { NormalizedRect } from '../develop/cropGeometry';
+import { nextOverlay, type CropOverlayKind } from '../develop/cropView';
 import { identityCurve, type CurveChannel, type CurvePoint } from '../develop/curve';
 import type { Histogram } from '../develop/histogram';
 import {
@@ -79,6 +95,15 @@ export class DevelopStore {
   status = $state<DevelopStatus>('empty');
   /** The reason of the `error` status. */
   loadError = $state<string | null>(null);
+  /**
+   * True while the crop tool is active. The preview then shows the full
+   * image without geometry, and CSS shows the flip and the rotation.
+   */
+  cropActive = $state(false);
+  /** The guide overlay of the crop tool. */
+  cropOverlay = $state<CropOverlayKind>('thirds');
+  /** True while the user drags the angle slider (the overlay shows a fine grid). */
+  straightening = $state(false);
 
   readonly #library: DevelopStoreOptions['library'];
   readonly #modules: DevelopStoreOptions['modules'];
@@ -92,6 +117,11 @@ export class DevelopStore {
   #dirty: { photoId: PhotoId; settings: DevelopDocument } | null = null;
   /** The last save; the next save waits for it. */
   #saving: Promise<void> = Promise.resolve();
+  /**
+   * The `crop` field when the crop tool started (for Cancel). `present` is
+   * false when the document had no `crop` field.
+   */
+  #cropOnEnter: { readonly present: boolean; readonly value: unknown } | null = null;
 
   constructor(options: DevelopStoreOptions) {
     this.#library = options.library;
@@ -124,6 +154,8 @@ export class DevelopStore {
       return;
     }
     const generation = ++this.#generation;
+    // A photo change (or leaving the module) keeps the crop of the old photo.
+    this.commitCrop();
     const flushed = this.flush();
     this.#closeSession();
     this.photoId = photoId;
@@ -233,6 +265,119 @@ export class DevelopStore {
     }
   }
 
+  /** The crop of the settings, or null while they load. */
+  get crop(): CropSettings | null {
+    return this.settings === null ? null : cropOf(this.settings);
+  }
+
+  /** The session size (display-oriented original), or null without a session. */
+  get frameSize(): FrameSize | null {
+    const session = this.session;
+    return session === null || session.width <= 0 || session.height <= 0
+      ? null
+      : { width: session.width, height: session.height };
+  }
+
+  /**
+   * Starts the crop tool. It needs the settings and a preview session (the
+   * session size gives the aspect). Returns false when it cannot start.
+   */
+  enterCrop(): boolean {
+    if (this.cropActive) {
+      return true;
+    }
+    if (this.settings === null || this.frameSize === null) {
+      return false;
+    }
+    const present = 'crop' in this.settings;
+    this.#cropOnEnter = { present, value: this.settings['crop'] };
+    this.cropActive = true;
+    return true;
+  }
+
+  /** Ends the crop tool and keeps the crop (Done, Enter). The edits save as usual. */
+  commitCrop(): void {
+    this.cropActive = false;
+    this.straightening = false;
+    this.#cropOnEnter = null;
+  }
+
+  /** Ends the crop tool and restores the crop of the start (Cancel, Escape). */
+  cancelCrop(): void {
+    const saved = this.#cropOnEnter;
+    const current = this.settings;
+    this.commitCrop();
+    if (saved === null || current === null) {
+      return;
+    }
+    if (saved.present) {
+      this.#edit({ ...current, crop: saved.value });
+    } else {
+      // The document had no `crop` field: remove it again, so the saved
+      // document is equal to the old one.
+      const { crop: _removed, ...rest } = current;
+      this.#edit(rest as DevelopDocument);
+    }
+  }
+
+  /** Starts the crop tool, or ends it and keeps the crop (the `R` key). */
+  toggleCrop(): void {
+    if (this.cropActive) {
+      this.commitCrop();
+    } else {
+      this.enterCrop();
+    }
+  }
+
+  /** Sets the straighten angle. The crop rect follows (see `setCropAngle` in `crop.ts`). */
+  setCropAngle(angle: number): void {
+    this.#editCrop((crop, size) => setCropAngle(crop, size, angle));
+  }
+
+  /** Sets the aspect constraint. */
+  setCropAspect(aspect: CropAspect): void {
+    this.#editCrop((crop, size) => setCropAspect(crop, size, aspect));
+  }
+
+  /** Locks the aspect to the current shape, or unlocks it. */
+  setCropLock(locked: boolean): void {
+    this.#editCrop((crop, size) => setCropLock(crop, size, locked));
+  }
+
+  /** Mirrors the image. */
+  flipCrop(axis: 'horizontal' | 'vertical'): void {
+    this.#editCrop((crop) => flipCrop(crop, axis));
+  }
+
+  /** Swaps portrait and landscape (the `X` key). */
+  swapCropOrientation(): void {
+    this.#editCrop((crop, size) => swapCropOrientation(crop, size));
+  }
+
+  /** Sets the crop rect. It is fitted into the rotated image. */
+  setCropRect(rect: NormalizedRect): void {
+    this.#editCrop((crop, size) => setCropRect(crop, size, rect));
+  }
+
+  /** Sets the crop to its defaults. */
+  resetCrop(): void {
+    this.#editCrop(() => resetCrop());
+  }
+
+  /** Shows the next guide overlay (the `O` key). */
+  cycleCropOverlay(): void {
+    this.cropOverlay = nextOverlay(this.cropOverlay);
+  }
+
+  #editCrop(change: (crop: CropSettings, size: FrameSize) => CropSettings): void {
+    const settings = this.settings;
+    const size = this.frameSize;
+    if (settings === null || size === null) {
+      return;
+    }
+    this.#edit(withCrop(settings, change(cropOf(settings), size)));
+  }
+
   /** Saves the waiting edits now. Resolves when all saves are done. */
   flush(): Promise<void> {
     if (this.#timer !== null) {
@@ -250,6 +395,7 @@ export class DevelopStore {
   /** Saves the edits and frees the session. Call when the view is destroyed. */
   async dispose(): Promise<void> {
     this.#generation++;
+    this.commitCrop();
     const flushed = this.flush();
     this.#closeSession();
     this.photoId = null;
