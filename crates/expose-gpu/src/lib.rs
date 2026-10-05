@@ -14,7 +14,28 @@
 //!   also have byte upload and read-back ([`GpuImage::write_rgba8`],
 //!   [`GpuImage::read_rgba8`]), for display-encoded frames.
 //! - [`Kernel`] and [`GpuContext::run_kernel`]: run a WGSL compute shader
-//!   from one input image to one output image, with a parameter block.
+//!   from one input image to one output image of the same size, with a
+//!   parameter block.
+//! - [`GpuContext::run_kernel_multi`]: run a kernel with 1 to
+//!   [`MAX_KERNEL_INPUTS`] input images and an output of any size (for
+//!   example a crop, a downsample, or a combine of two images).
+//!
+//! # Kernel contract
+//!
+//! Bind group 0 of each kernel (entry point `main`, workgroup 8 x 8 x 1):
+//!
+//! | Binding | WGSL type                                  | Content       |
+//! | ------- | ------------------------------------------ | ------------- |
+//! | 0       | `texture_2d<f32>`                          | input image 0 |
+//! | 1       | `texture_storage_2d<OUTPUT_FORMAT, write>` | output image  |
+//! | 2       | `var<uniform>` struct (optional)           | parameters    |
+//! | 3, 4, 5 | `texture_2d<f32>`                          | inputs 1 to 3 |
+//!
+//! The dispatch covers the output image. [`GpuContext::run_kernel`] requires
+//! one input of the output size. [`GpuContext::run_kernel_multi`] accepts any
+//! sizes; the shader must keep its reads inside each input. Each call is one
+//! queue submit, and the queue keeps the order, so a kernel can read the
+//! output of the previous call with no extra synchronization.
 //! - [`kernels`]: the built-in kernels.
 //!
 //! # Example
@@ -56,7 +77,10 @@ mod oneshot;
 pub use context::{AdapterSummary, GpuContext, GpuContextOptions, GpuLimits, PowerPreference};
 pub use error::GpuError;
 pub use image::{CHANNELS, GpuImage, ImageFormat};
-pub use kernel::{Kernel, OUTPUT_FORMAT_TOKEN, WORKGROUP_SIZE, kernels, workgroup_count};
+pub use kernel::{
+    Kernel, MAX_KERNEL_INPUTS, OUTPUT_FORMAT_TOKEN, WORKGROUP_SIZE, input_binding, kernels,
+    workgroup_count,
+};
 
 /// The name of this crate.
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");

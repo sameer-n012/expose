@@ -87,6 +87,16 @@ pub enum GpuError {
     #[error("a kernel cannot use the same image as input and output")]
     SameImage,
 
+    /// A kernel run received too few or too many input images.
+    #[error("a kernel needs 1 to {max} input images, but received {count}")]
+    InputCount {
+        /// The number of input images that the caller supplied.
+        count: usize,
+        /// The maximum number of input images
+        /// ([`crate::MAX_KERNEL_INPUTS`]).
+        max: usize,
+    },
+
     /// The kernel source does not obey the kernel contract.
     #[error("kernel `{kernel}` is not valid: {reason}")]
     InvalidKernel {
