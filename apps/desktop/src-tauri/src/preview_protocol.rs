@@ -10,7 +10,10 @@
 //!
 //! `<f>` is `rgba8` (default), `jpeg`, or `png`. An optional `long=<n>`
 //! sets the target long edge of the frame (see
-//! [`crate::preview::effective_long_edge`]). The body is the develop
+//! [`crate::preview::effective_long_edge`]). An optional `geometry=0`
+//! skips the geometry stage (flip, straighten, crop), as `applyGeometry:
+//! false` of the `preview_render` command; `geometry=1` is the default.
+//! The body is the develop
 //! settings as JSON. Send it with `Content-Type: text/plain`, so that the
 //! request is a CORS "simple request" with no preflight. A `GET` with no
 //! body renders the default settings (for `<img src>`).
@@ -52,6 +55,8 @@ pub struct FrameQuery {
     pub format: FrameFormat,
     /// The target long edge (`long=<n>`), or `None`.
     pub long_edge: Option<u32>,
+    /// `false` for `geometry=0`: skip the geometry stage.
+    pub apply_geometry: bool,
 }
 
 /// Handles one request. The render runs on the preview thread; the
@@ -96,9 +101,7 @@ pub fn handle<R: Runtime>(
             settings,
             format: query.format,
             long_edge: query.long_edge,
-            // The scheme has no option for this; frames always show the
-            // geometry stage.
-            apply_geometry: true,
+            apply_geometry: query.apply_geometry,
         },
         Box::new(move |result| {
             let response = match result {
@@ -110,9 +113,9 @@ pub fn handle<R: Runtime>(
     );
 }
 
-/// Parses the session id from the path (`/<id>`), and the format and the
-/// target long edge from the query (`format=<f>`, `long=<n>`; other keys
-/// are ignored).
+/// Parses the session id from the path (`/<id>`), and the format, the
+/// target long edge, and the geometry switch from the query (`format=<f>`,
+/// `long=<n>`, `geometry=0|1`; other keys are ignored).
 ///
 /// # Errors
 ///
@@ -128,6 +131,7 @@ pub fn parse_request(path: &str, query: Option<&str>) -> Result<FrameQuery, Stri
         .map_err(|_| "the session id is too large".to_owned())?;
     let mut format = FrameFormat::Rgba8;
     let mut long_edge = None;
+    let mut apply_geometry = true;
     for pair in query.unwrap_or_default().split('&') {
         if let Some(value) = pair.strip_prefix("format=") {
             format = FrameFormat::parse(value)
@@ -137,12 +141,19 @@ pub fn parse_request(path: &str, query: Option<&str>) -> Result<FrameQuery, Stri
                 .parse::<u32>()
                 .map_err(|_| format!("the long edge `{value}` is not a number"))?;
             long_edge = Some(edge);
+        } else if let Some(value) = pair.strip_prefix("geometry=") {
+            apply_geometry = match value {
+                "0" => false,
+                "1" => true,
+                _ => return Err(format!("the geometry switch `{value}` is not 0 or 1")),
+            };
         }
     }
     Ok(FrameQuery {
         session,
         format,
         long_edge,
+        apply_geometry,
     })
 }
 
@@ -252,8 +263,13 @@ mod tests {
                 session: 7,
                 format: FrameFormat::Rgba8,
                 long_edge: None,
+                apply_geometry: true,
             }
         );
+        assert!(!ok("/7", Some("long=640&geometry=0")).apply_geometry);
+        assert!(ok("/7", Some("geometry=1")).apply_geometry);
+        assert!(parse_request("/7", Some("geometry=false")).is_err());
+        assert!(parse_request("/7", Some("geometry=")).is_err());
         assert_eq!(ok("/7/", Some("format=jpeg")).format, FrameFormat::Jpeg);
         assert_eq!(ok("/7", Some("t=5&format=png")).format, FrameFormat::Png);
         assert_eq!(ok("/7", Some("long=1200")).long_edge, Some(1200));

@@ -30,29 +30,43 @@
 //! # Sessions
 //!
 //! A session is one photo: the downsampled source in CPU memory (the
-//! "base", at the long edge of the open), and one GPU view of it (source,
-//! develop output, and display encoder). The engine keeps at most
-//! [`MAX_SESSIONS`] sessions; an open beyond this closes the session that
-//! was used least recently. One 2560 px session uses about 160 MB of GPU
-//! memory (two `rgba32float` images and one `rgba8unorm` image) and 70 MB
-//! of CPU memory (the base).
+//! "base"), and one GPU view of it (develop input, develop output, and
+//! display encoder). The engine keeps at most [`MAX_SESSIONS`] sessions;
+//! an open beyond this closes the session that was used least recently.
+//!
+//! The base long edge is the larger of the open long edge and
+//! [`CROP_BASE_LONG_EDGE`] (never larger than the original). The open long
+//! edge is the "frame limit": the largest frame long edge, and the size
+//! that the open returns. The base is larger than the frame limit so that
+//! a cropped frame can still reach the frame limit (see "Frame size").
+//!
+//! Memory for a 3:2 photo with the default sizes: the 4096 px base uses
+//! about 180 MB of CPU memory (`f32` RGBA). The GPU view at 2560 px uses
+//! about 160 MB (two `rgba32float` images and one `rgba8unorm` image); a
+//! view for a strong crop can grow to the base size (about 400 MB).
 //!
 //! # Frame size
 //!
-//! A frame request can ask for a smaller long edge than the base (for
-//! example, the device-pixel size of the canvas). The engine clamps the
-//! value to [`MIN_LONG_EDGE`]..=base long edge (see
-//! [`effective_long_edge`]). When the clamped size is not the size of the
-//! GPU view, the engine makes a new view from the base. It frees the old
-//! view first, so the GPU memory does not increase.
+//! The requested long edge is the long edge of the frame, that is, of the
+//! develop output (for example, the device-pixel size of the canvas). The
+//! engine clamps the value to [`MIN_LONG_EDGE`]..=frame limit (see
+//! [`effective_long_edge`]).
 //!
-//! The develop pipeline runs all stages (geometry, tone, sharpening). The
-//! long edge applies to the develop input, so a crop gives a frame that is
-//! smaller than the view, with the aspect ratio of the crop. The frame
-//! header always has the real frame size.
+//! When the geometry stage applies, a crop makes the output smaller than
+//! the develop input. Thus the engine enlarges the develop input by the
+//! crop factor, in steps of [`INPUT_STEP`] pixels, up to the base size
+//! (see [`input_long_edge`]). Without geometry, the input long edge is the
+//! frame long edge.
+//!
+//! When the input size is not the size of the GPU view, the engine makes a
+//! new view from the base. It frees the old view first, so the GPU memory
+//! does not increase. A slider drag at a constant crop and frame size uses
+//! the same view for each frame. The frame header always has the real
+//! frame size.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -81,6 +95,16 @@ pub const MAX_LONG_EDGE: u32 = 8192;
 /// preview, and a resize of the window to near zero must not make a 1 px
 /// GPU view.
 pub const MIN_LONG_EDGE: u32 = 64;
+
+/// The smallest long edge of the session base. A base larger than the
+/// frame limit lets a cropped frame reach the frame limit: a crop to 60 %
+/// of a 4096 px base still gives a 2458 px frame.
+pub const CROP_BASE_LONG_EDGE: u32 = 4096;
+
+/// The step of the develop input long edge for cropped frames. The input
+/// changes only in these steps, so small changes of the crop do not make a
+/// new GPU view.
+pub const INPUT_STEP: u32 = 128;
 
 /// The maximum number of open sessions.
 pub const MAX_SESSIONS: usize = 2;
@@ -208,7 +232,9 @@ pub struct OpenRequest {
     pub image: WorkingImage,
     /// The source information for white balance.
     pub source: SourceInfo,
-    /// The preview long edge. Smaller images are not enlarged.
+    /// The frame limit: the largest frame long edge. Smaller images are
+    /// not enlarged. The base that the session keeps can be larger (see
+    /// [`CROP_BASE_LONG_EDGE`]).
     pub max_long_edge: u32,
     /// The display color space of the frames.
     pub space: DisplaySpace,
@@ -234,12 +260,13 @@ pub struct RenderRequest {
     pub settings: DevelopSettings,
     /// The body form.
     pub format: FrameFormat,
-    /// The requested long edge of the frame in pixels. `None` gives the
-    /// base size of the session. See [`effective_long_edge`].
+    /// The requested long edge of the frame (the develop output) in
+    /// pixels. `None` gives the frame limit of the session. See
+    /// [`effective_long_edge`].
     ///
-    /// The long edge applies to the develop input. Geometry (crop,
-    /// straighten) runs after it, so a crop gives a smaller frame. The
-    /// frame header has the real size.
+    /// With a crop, the engine enlarges the develop input so that the
+    /// frame reaches this size, if the base is large enough (see
+    /// [`input_long_edge`]). The frame header has the real size.
     pub long_edge: Option<u32>,
     /// `false` skips the geometry stage (flip, straighten, crop), so the
     /// frame shows the full image (for example, while the user drags a
@@ -247,13 +274,13 @@ pub struct RenderRequest {
     pub apply_geometry: bool,
 }
 
-/// Returns the long edge of a frame for a session with a base long edge
-/// of `base_long_edge`, when the caller requests `requested`.
+/// Returns the long edge of a frame for a session with a frame limit of
+/// `base_long_edge`, when the caller requests `requested`.
 ///
 /// - `None` gives `base_long_edge`.
 /// - The value is clamped to `MIN_LONG_EDGE..=base_long_edge`. Frames are
-///   never larger than the base (no upscale). If the base is smaller than
-///   [`MIN_LONG_EDGE`], the base size applies.
+///   never larger than the frame limit (no upscale). If the limit is
+///   smaller than [`MIN_LONG_EDGE`], the limit applies.
 ///
 /// # Errors
 ///
@@ -271,6 +298,35 @@ pub fn effective_long_edge(
         return Err(PreviewError::InvalidSize(requested));
     }
     Ok(requested.max(MIN_LONG_EDGE).min(base_long_edge))
+}
+
+/// Returns the long edge of the develop input that gives a frame long edge
+/// of about `frame_long_edge`.
+///
+/// `base` is the size of the session base, and `output` is the develop
+/// output size for an input of the base size (see
+/// [`Pipeline::output_size`]). When the output is smaller than the base (a
+/// crop), the result is `frame_long_edge` multiplied by the crop factor
+/// (base long edge / output long edge), rounded up to a multiple of
+/// [`INPUT_STEP`]. The result is always in
+/// `frame_long_edge..=base long edge` (or the base long edge when the
+/// frame is larger). Thus the frame long edge is at most one step (times
+/// the crop fraction) larger than `frame_long_edge`, or smaller when the
+/// base is too small for the crop.
+pub fn input_long_edge(base: (u32, u32), output: (u32, u32), frame_long_edge: u32) -> u32 {
+    let base_long = base.0.max(base.1);
+    let output_long = output.0.max(output.1);
+    if output_long == 0 || output_long >= base_long || frame_long_edge >= base_long {
+        return frame_long_edge.min(base_long);
+    }
+    let exact =
+        (u64::from(frame_long_edge) * u64::from(base_long)).div_ceil(u64::from(output_long));
+    let step = u64::from(INPUT_STEP);
+    let stepped = exact.div_ceil(step) * step;
+    // `min` with a `u32` value makes the conversion exact; the fallback
+    // cannot apply.
+    let input = u32::try_from(stepped.min(u64::from(base_long))).unwrap_or(base_long);
+    input.max(frame_long_edge)
 }
 
 enum Job {
@@ -294,6 +350,9 @@ struct Queue {
 struct Shared {
     queue: Mutex<Queue>,
     wake: Condvar,
+    /// The number of GPU views that the render thread made (see
+    /// [`PreviewEngine::view_builds`]).
+    view_builds: Arc<AtomicU64>,
 }
 
 impl Shared {
@@ -331,6 +390,7 @@ impl PreviewEngine {
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
+            view_builds: Arc::default(),
         });
         let worker = Arc::clone(&shared);
         let thread = thread::Builder::new()
@@ -340,6 +400,14 @@ impl PreviewEngine {
             shared,
             thread: Some(thread),
         })
+    }
+
+    /// Returns the number of GPU views that the engine made since the
+    /// start (one at each open, and one at each change of the develop
+    /// input size). Tests and diagnostics use it to make sure that frames
+    /// of the same size use the same view.
+    pub fn view_builds(&self) -> u64 {
+        self.shared.view_builds.load(Ordering::Relaxed)
     }
 
     /// Queues a session open. `reply` gets the session size.
@@ -570,9 +638,11 @@ impl View {
 
 struct Session {
     id: SessionId,
-    /// The source, downsampled to the long edge of the open. Views of
-    /// other sizes are made from it.
+    /// The source, downsampled to the larger of the frame limit and
+    /// [`CROP_BASE_LONG_EDGE`]. All views are made from it.
     base: WorkingImage,
+    /// The largest frame long edge (the long edge of the open size).
+    frame_limit: u32,
     /// The size of the full-resolution source (display orientation).
     original: (u32, u32),
     /// The GPU view. `None` only after a failed resize; the next frame
@@ -584,13 +654,15 @@ struct Session {
 }
 
 impl Session {
-    fn base_long_edge(&self) -> u32 {
-        self.base.width().max(self.base.height())
-    }
-
-    /// Returns a view of the size for `long_edge`. Makes a new view if the
-    /// current view has another size; frees the old view first.
-    fn view_for(&mut self, ctx: &GpuContext, long_edge: u32) -> Result<&mut View, PreviewError> {
+    /// Returns a view with a develop input of the size for `long_edge`.
+    /// Makes a new view if the current view has another size (and adds
+    /// one to `builds`); frees the old view first.
+    fn view_for(
+        &mut self,
+        ctx: &GpuContext,
+        long_edge: u32,
+        builds: &AtomicU64,
+    ) -> Result<&mut View, PreviewError> {
         let wanted = preview_size(self.base.width(), self.base.height(), long_edge)?;
         let fits = self
             .view
@@ -600,6 +672,7 @@ impl Session {
             // Free the GPU memory of the old view before the new upload.
             self.view = None;
             let view = View::new(ctx, &self.base, self.original, long_edge, self.space)?;
+            builds.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(
                 session = self.id,
                 width = wanted.0,
@@ -621,6 +694,8 @@ struct Renderer {
     /// Open sessions, the most recently used last.
     sessions: Vec<Session>,
     next_id: SessionId,
+    /// Shared with [`Shared::view_builds`].
+    view_builds: Arc<AtomicU64>,
 }
 
 impl Renderer {
@@ -647,9 +722,14 @@ impl Renderer {
         }
         let ctx = self.gpu()?;
         let original = (request.image.width(), request.image.height());
-        let base = downsample_area(&request.image, request.max_long_edge)?;
-        let base_long_edge = base.width().max(base.height());
-        let view = View::new(ctx, &base, original, base_long_edge, request.space)?;
+        let base = downsample_area(
+            &request.image,
+            request.max_long_edge.max(CROP_BASE_LONG_EDGE),
+        )?;
+        let limit = preview_size(base.width(), base.height(), request.max_long_edge)?;
+        let frame_limit = limit.0.max(limit.1);
+        let view = View::new(ctx, &base, original, frame_limit, request.space)?;
+        self.view_builds.fetch_add(1, Ordering::Relaxed);
         if self.sessions.len() >= MAX_SESSIONS {
             let closed = self.sessions.remove(0);
             tracing::debug!(
@@ -663,6 +743,7 @@ impl Renderer {
         self.sessions.push(Session {
             id,
             base,
+            frame_limit,
             original,
             view: Some(view),
             space: request.space,
@@ -699,12 +780,17 @@ impl Renderer {
             .sessions
             .last_mut()
             .ok_or(PreviewError::Internal("the session list is empty"))?;
-        let long_edge = effective_long_edge(session.base_long_edge(), job.request.long_edge)?;
+        let frame_long_edge = effective_long_edge(session.frame_limit, job.request.long_edge)?;
         let mut pipeline = Pipeline::new(&job.request.settings, &session.source)?;
         pipeline.set_apply_geometry(job.request.apply_geometry);
+        // Enlarge the develop input by the crop factor, so that the frame
+        // (the develop output) reaches the requested long edge.
+        let base = (session.base.width(), session.base.height());
+        let output = pipeline.output_size(base.0, base.1)?;
+        let input = input_long_edge(base, output, frame_long_edge);
         let seq = session.next_seq;
         session.next_seq = seq.wrapping_add(1);
-        let view = session.view_for(ctx, long_edge)?;
+        let view = session.view_for(ctx, input, &self.view_builds)?;
         // The frame size is the size of the develop output. A crop makes it
         // smaller than the view.
         let (mut body, width, height) = match job.request.format {
@@ -743,7 +829,10 @@ impl Renderer {
 }
 
 fn render_loop(shared: &Shared) {
-    let mut renderer = Renderer::default();
+    let mut renderer = Renderer {
+        view_builds: Arc::clone(&shared.view_builds),
+        ..Renderer::default()
+    };
     loop {
         match next_work(shared) {
             Work::Stop(jobs, render) => {
@@ -789,6 +878,7 @@ fn guarded<T>(
             tracing::error!(%message, "the preview render thread panicked; GPU state reset");
             *renderer = Renderer {
                 next_id: renderer.next_id,
+                view_builds: Arc::clone(&renderer.view_builds),
                 ..Renderer::default()
             };
             Err(PreviewError::Stopped(format!(
@@ -851,11 +941,20 @@ mod tests {
     /// Starts an engine and opens a test pattern session. Returns `None`
     /// when the machine has no GPU.
     fn engine_with_session(width: u32, height: u32) -> Option<(PreviewEngine, SessionInfo)> {
+        engine_with_limit(width, height, DEFAULT_LONG_EDGE)
+    }
+
+    /// As [`engine_with_session`], with a frame limit of `max_long_edge`.
+    fn engine_with_limit(
+        width: u32,
+        height: u32,
+        max_long_edge: u32,
+    ) -> Option<(PreviewEngine, SessionInfo)> {
         let engine = PreviewEngine::start().unwrap();
         let request = OpenRequest {
             image: test_pattern(width, height).unwrap(),
             source: SourceInfo::RENDERED,
-            max_long_edge: DEFAULT_LONG_EDGE,
+            max_long_edge,
             space: DisplaySpace::Srgb,
         };
         match pollster::block_on(engine.open_async(request)) {
@@ -1086,6 +1185,7 @@ mod tests {
             shared: Arc::new(Shared {
                 queue: Mutex::new(Queue::default()),
                 wake: Condvar::new(),
+                view_builds: Arc::default(),
             }),
             thread: None,
         }
@@ -1278,12 +1378,13 @@ mod tests {
         assert_eq!(frame_size(cropped(), None, true), expected);
         // No geometry: the full view size.
         assert_eq!(frame_size(cropped(), None, false), (640, 400));
-        // The long edge applies to the develop input.
-        let half = Pipeline::new(&cropped(), &SourceInfo::RENDERED)
-            .unwrap()
-            .output_size(320, 200)
-            .unwrap();
-        assert_eq!(frame_size(cropped(), Some(320), true), half);
+        // The long edge applies to the frame: the develop input is larger
+        // by the crop factor (here 2, so the input is the full base).
+        let small = frame_size(cropped(), Some(320), true);
+        assert_eq!(small, expected);
+        let quarter = frame_size(cropped(), Some(160), true);
+        assert!(quarter.0.max(quarter.1) >= 160, "{quarter:?}");
+        assert!(quarter.0.max(quarter.1) < 160 + INPUT_STEP, "{quarter:?}");
         // Back to no crop.
         assert_eq!(
             frame_size(DevelopSettings::default(), None, true),
@@ -1300,6 +1401,88 @@ mod tests {
             })
             .unwrap();
         assert_eq!((frame.header.width, frame.header.height), expected);
+    }
+
+    #[test]
+    fn input_long_edge_follows_the_crop_factor() {
+        // No crop: the frame long edge.
+        assert_eq!(input_long_edge((4096, 2731), (4096, 2731), 1280), 1280);
+        // A 25 % crop: four times the frame, in steps of 128.
+        assert_eq!(input_long_edge((4096, 2731), (1024, 683), 896), 3584);
+        assert_eq!(input_long_edge((4096, 2731), (1024, 683), 900), 3712);
+        // The base limits the input.
+        assert_eq!(input_long_edge((4096, 2731), (1024, 683), 2560), 4096);
+        // The frame is larger than the base: the base.
+        assert_eq!(input_long_edge((640, 400), (320, 200), 1000), 640);
+        // The input is never smaller than the frame.
+        assert_eq!(input_long_edge((4096, 2731), (4000, 2600), 100), 128);
+        // A degenerate output does not divide by zero.
+        assert_eq!(input_long_edge((4096, 2731), (0, 0), 512), 512);
+    }
+
+    /// Settings with a centered crop to 25 % of each side.
+    fn quarter_crop() -> DevelopSettings {
+        let mut settings = DevelopSettings::default();
+        settings.crop.rect = expose_core::develop::NormalizedRect {
+            left: 0.375,
+            top: 0.375,
+            width: 0.25,
+            height: 0.25,
+        };
+        settings
+    }
+
+    #[test]
+    fn cropped_frames_reach_the_requested_long_edge() {
+        // Base 2048 px (the source; smaller than CROP_BASE_LONG_EDGE), frame
+        // limit 512 px.
+        let Some((engine, info)) = engine_with_limit(2048, 1366, 512) else {
+            return;
+        };
+        assert_eq!(
+            (info.width, info.height),
+            preview_size(2048, 1366, 512).unwrap()
+        );
+        let render = |settings: DevelopSettings, long_edge, apply_geometry| {
+            let frame = engine
+                .render_blocking(RenderRequest {
+                    session: info.session,
+                    settings,
+                    format: FrameFormat::Rgba8,
+                    long_edge,
+                    apply_geometry,
+                })
+                .unwrap();
+            (frame.header.width, frame.header.height)
+        };
+        let builds_after_open = engine.view_builds();
+        // No geometry: the frame is the full image at the requested size,
+        // as before.
+        assert_eq!(
+            render(quarter_crop(), Some(384), false),
+            preview_size(2048, 1366, 384).unwrap()
+        );
+        assert_eq!(
+            render(quarter_crop(), None, false),
+            (info.width, info.height)
+        );
+        // A 25 % crop: the frame reaches the requested long edge (within one
+        // input step times the crop fraction).
+        let (w, h) = render(quarter_crop(), Some(384), true);
+        let long = w.max(h);
+        assert!((384..=384 + INPUT_STEP / 4).contains(&long), "{w}x{h}");
+        // Repeated frames with other tone settings use the same view.
+        let builds = engine.view_builds();
+        for ev in [0.5, 1.0, -0.5] {
+            let mut settings = quarter_crop();
+            settings.tone.exposure = ev;
+            assert_eq!(render(settings, Some(384), true), (w, h));
+        }
+        assert_eq!(engine.view_builds(), builds);
+        assert!(builds > builds_after_open);
+        // The frame limit: the full base gives a 512 px frame.
+        let (w, h) = render(quarter_crop(), None, true);
+        assert_eq!(w.max(h), 512, "{w}x{h}");
     }
 
     /// Stage timings at the default preview size. Run with:
