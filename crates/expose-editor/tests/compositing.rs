@@ -22,9 +22,13 @@ fn assert_px(got: Rgba, want: Rgba) {
     );
 }
 
+/// A spec with linear blending. The hand-computed values in these tests use
+/// linear math, so they set `BlendSpace::Linear` explicitly (the default is
+/// perceptual). `perceptual_blend_space_changes_mixing` tests the default.
 fn spec(w: u32, h: u32, bg: Background) -> DocumentSpec {
     DocumentSpec {
         background: bg,
+        blend_space: BlendSpace::Linear,
         ..DocumentSpec::new(w, h)
     }
 }
@@ -98,7 +102,7 @@ fn alpha_edge_cases_hand_computed() {
 
     // Screen, both half-transparent: backdrop 0.3 (a 0.5), source 0.6 (a 0.5).
     // B = 0.72; co = 0.25 * 0.6 + 0.25 * 0.3 + 0.25 * 0.72 = 0.405; ao = 0.75.
-    let mut doc = Document::new_empty(DocumentSpec::new(1, 1)).unwrap();
+    let mut doc = Document::new_empty(spec(1, 1, Background::Transparent)).unwrap();
     add_top(&mut doc, None, "b", solid(1, 1, [0.3; 3], 0.5, (0, 0)));
     let s = add_top(&mut doc, None, "s", solid(1, 1, [0.6; 3], 0.5, (0, 0)));
     doc.set_blend_mode(s, BlendMode::Screen).unwrap();
@@ -133,15 +137,21 @@ fn non_separable_mode_in_composite() {
 
 #[test]
 fn perceptual_blend_space_changes_mixing() {
-    // White at 50 % over black: linear gives 0.5; perceptual mixes the
-    // encoded values (1 and 0) to 0.5 and decodes to 0.214041.
-    let mut doc = Document::new(spec(1, 1, Background::Black)).unwrap();
+    // White at 50 % over black: perceptual (the default) mixes the encoded
+    // values (1 and 0) to 0.5 and decodes to 0.214041; linear gives 0.5.
+    assert_eq!(BlendSpace::default(), BlendSpace::Perceptual);
+    let default_spec = DocumentSpec {
+        background: Background::Black,
+        ..DocumentSpec::new(1, 1)
+    };
+    assert_eq!(default_spec.blend_space, BlendSpace::Perceptual);
+    let mut doc = Document::new(default_spec).unwrap();
     let l = add_top(&mut doc, None, "w", solid(1, 1, [1.0; 3], 1.0, (0, 0)));
     doc.set_opacity(l, 0.5).unwrap();
-    assert_px(full(&doc).pixel(0, 0).unwrap(), [0.5, 0.5, 0.5, 1.0]);
-    doc.set_blend_space(BlendSpace::Perceptual).unwrap();
     let v = 0.214_041;
     assert_px(full(&doc).pixel(0, 0).unwrap(), [v, v, v, 1.0]);
+    doc.set_blend_space(BlendSpace::Linear).unwrap();
+    assert_px(full(&doc).pixel(0, 0).unwrap(), [0.5, 0.5, 0.5, 1.0]);
 }
 
 #[test]

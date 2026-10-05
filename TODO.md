@@ -2,9 +2,9 @@
 
 Work tracker for Expose. `FEATURES.md` is the master feature list. This file tracks the work in progress and partial work.
 
-`FEATURES.md` items marked `[x]` (2026-10-04, after the operator check in the real webview): 2.2 exposure, contrast, highlights/shadows/whites/blacks; 2.2 point tone curve; 5.1 the four P1 export items. White balance stays open (presets in the UI and the eyedropper are missing); automatic tone stays open (no UI yet). Loupe view stays open (no 1:1 zoom).
+`FEATURES.md` items marked `[x]` (2026-10-04, after the operator check in the real webview): 2.2 exposure, contrast, highlights/shadows/whites/blacks; 2.2 point tone curve; sharpening; crop with presets and overlays; straighten/rotate/flip; histogram with clipping warnings (P2); 5.1 the four P1 export items. White balance stays open (presets in the UI and the eyedropper are missing); automatic tone stays open (no UI yet). Loupe view stays open (no 1:1 zoom).
 
-Operator checks in the real webview (2026-10-04): loupe view, Grid/Loupe keys, and the Tone curve panel work.
+Operator checks in the real webview (2026-10-04): loupe view, Grid/Loupe keys, Tone curve panel, Detail panel, histogram, and crop tool work.
 
 ## In progress
 
@@ -14,8 +14,8 @@ Operator checks in the real webview (2026-10-04): loupe view, Grid/Loupe keys, a
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **operator check** — in the real webview: Detail panel + histogram (PR #33), crop tool (PR #34: `R`, handles, presets, angle, flips, `Enter`/`Esc`, `O`, `X`). After the check: mark `FEATURES.md` sharpening, crop, straighten/flip.
-2. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI. Needs the open operator decision on the editor blend space.
+1. [ ] **editor-gpu** (O) — GPU compositor in `expose-editor` (through `expose-gpu`) that matches the CPU reference; perceptual blending is the default, so it must be fast (ADR 0005).
+2. [ ] **editor-ui** — the editor canvas UI (after editor-gpu).
 
 ### Follow-ups from merged work
 
@@ -42,7 +42,6 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 ### Open operator decisions
 
-- Editor default blend space: linear (current) or perceptual (ADR 0005, "Open").
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done

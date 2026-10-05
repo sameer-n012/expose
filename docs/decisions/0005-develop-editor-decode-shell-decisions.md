@@ -1,6 +1,6 @@
 # 0005 — Develop, Editor, Decode, and Shell Decisions
 
-- **Status:** Accepted (one item open for the operator, see "Open")
+- **Status:** Accepted (the open item was decided on 2026-10-04, see "Blend space default")
 - **Date:** 2026-10-03
 - **Decided by:** Claude (implementation details)
 
@@ -25,7 +25,7 @@ PRs #5–#8 added the catalog commands in the desktop shell, the develop pipelin
 - Each operation returns its inverse edit. History stores the inverse edits. Pixel edits store only the changed rectangle.
 - Locks of a group apply to its children. A write that changes alpha on a transparency-locked layer is an error.
 - Groups are pass-through by default.
-- Blend space is a per-document setting: `Linear` (default) or `Perceptual` (sRGB encoding around the blend).
+- Blend space is a per-document setting: `Perceptual` (sRGB encoding around the blend; default since 2026-10-04) or `Linear`.
 - Modes that are defined only for 0..1 clamp their inputs and then add back the backdrop's part outside 0..1.
 - Adjustment layers always work on sRGB-encoded values.
 
@@ -46,9 +46,11 @@ PRs #5–#8 added the catalog commands in the desktop shell, the develop pipelin
 - All commands run on blocking threads. Import scans the file system before it takes the catalog lock.
 - Errors go to the UI as `{ kind, message }`.
 
-## Open (operator decision)
+## Blend space default (operator decision, 2026-10-04)
 
-- **Default blend space for the editor:** linear (now) or perceptual. Linear is physically correct, but opacity fades and the "light"/"dodge" modes look different from what most users expect in other editors. The setting is per document, so both stay possible.
+- **Decided: perceptual.** New documents blend in the perceptual space (`BlendSpace::Perceptual`, `DocumentSpec::new`). Opacity fades and the "light"/"dodge" modes then look as most users expect from other editors.
+- Linear stays available per document (physically correct mixing of light).
+- Consequence: the compositor fast path for normal/dissolve modes applies only to linear documents. The future GPU compositor must make perceptual blending fast, because it is the common case.
 
 ## Consequences
 
