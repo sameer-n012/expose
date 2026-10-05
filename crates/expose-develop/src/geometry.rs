@@ -168,6 +168,11 @@ impl Geometry {
         (self.origin_x, self.origin_y)
     }
 
+    /// The flips `(horizontal, vertical)`.
+    pub fn flips(&self) -> (bool, bool) {
+        (self.flip_horizontal, self.flip_vertical)
+    }
+
     /// Returns `true` when the angle is not zero, so the stage interpolates.
     pub fn needs_resample(&self) -> bool {
         self.rotated
@@ -197,14 +202,15 @@ impl Geometry {
     ///
     /// # Errors
     ///
-    /// - [`DevelopError::Internal`] when the image size is not the source
-    ///   size of this geometry (a caller bug).
+    /// - [`DevelopError::SizeMismatch`] when the image size is not the
+    ///   source size of this geometry.
     /// - [`DevelopError::Core`] when the output buffer cannot be made.
     pub fn apply_cpu(&self, image: &WorkingImage) -> DevelopResult<WorkingImage> {
         if image.width() != self.source_width || image.height() != self.source_height {
-            return Err(DevelopError::Internal(
-                "the image size is not the source size of the geometry",
-            ));
+            return Err(DevelopError::SizeMismatch {
+                expected: self.source_size(),
+                actual: (image.width(), image.height()),
+            });
         }
         let pixels = if self.rotated {
             self.resample(image)
@@ -724,7 +730,10 @@ mod tests {
         let g = Geometry::new(&Crop::default(), 4, 4).unwrap();
         assert!(matches!(
             g.apply_cpu(&pattern(4, 5)),
-            Err(DevelopError::Internal(_))
+            Err(DevelopError::SizeMismatch {
+                expected: (4, 4),
+                actual: (4, 5)
+            })
         ));
         assert!(max_inscribed_rect(4, 4, 0.0, Some(0.0)).is_err());
         assert!(max_inscribed_rect(4, 0, 0.0, None).is_err());

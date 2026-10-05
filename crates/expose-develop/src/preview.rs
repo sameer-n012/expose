@@ -13,14 +13,15 @@
 //! compared with a windowed sinc filter; for a screen preview this is not
 //! important.
 //!
-//! The downsample runs on the CPU, because the `expose-gpu` kernel contract
-//! needs input and output images of the same size. Do it once for each
-//! photo (see [`PreviewRenderer`]), not for each slider change.
+//! The downsample runs on the CPU. Do it once for each photo (see
+//! [`PreviewRenderer`]), not for each slider change.
 
+use expose_core::CoreError;
 use expose_core::buffer::{Rgba, WorkingImage};
 use expose_core::develop::DevelopSettings;
 use expose_gpu::{GpuContext, GpuImage, ImageFormat};
 
+use crate::develop_gpu::DevelopTargets;
 use crate::error::{DevelopError, DevelopResult};
 use crate::pipeline::{Pipeline, read_working_image};
 use crate::source::SourceInfo;
@@ -141,16 +142,31 @@ pub fn downsample_area(image: &WorkingImage, max_long_edge: u32) -> DevelopResul
 }
 
 /// A preview of one photo on the GPU. It keeps the downsampled source and
-/// an output image on the GPU, so that each slider change needs only one
-/// kernel run and one read-back.
+/// the output images on the GPU, so that each slider change needs only the
+/// kernel runs and one read-back.
+///
+/// There are two develop paths:
+///
+/// - [`Self::develop`]: the tone stages only. The result is in
+///   [`Self::output`] and has the preview size [`Self::size`].
+/// - [`Self::develop_full`]: all stages (geometry, tone, sharpening). The
+///   result size is `pipeline.output_size(size)`, which differs from
+///   [`Self::size`] when a crop applies. The caller must use the size of the
+///   returned image for the next step (for example, the display encode).
 #[derive(Debug)]
 pub struct PreviewRenderer {
     input: GpuImage,
     output: GpuImage,
+    pixel_scale: f32,
+    targets: DevelopTargets,
 }
 
 impl PreviewRenderer {
     /// Downsamples `source` to `max_long_edge` and uploads it.
+    ///
+    /// The pixel scale is `preview long edge / source long edge`. When
+    /// `source` is itself a reduced copy of the original, call
+    /// [`Self::set_original_size`].
     pub async fn new(
         ctx: &GpuContext,
         source: &WorkingImage,
@@ -158,10 +174,16 @@ impl PreviewRenderer {
     ) -> DevelopResult<Self> {
         let small = downsample_area(source, max_long_edge)?;
         let (w, h) = (small.width(), small.height());
+        let pixel_scale = long_edge_ratio((w, h), (source.width(), source.height()))?;
         let input =
             GpuImage::from_rgba_f32(ctx, w, h, ImageFormat::Rgba32Float, small.as_slice()).await?;
         let output = GpuImage::new(ctx, w, h, ImageFormat::Rgba32Float).await?;
-        Ok(Self { input, output })
+        Ok(Self {
+            input,
+            output,
+            pixel_scale,
+            targets: DevelopTargets::new(),
+        })
     }
 
     /// The preview width and height.
@@ -169,10 +191,52 @@ impl PreviewRenderer {
         (self.input.width(), self.input.height())
     }
 
-    /// Runs `pipeline` on the GPU. The result stays on the GPU in
-    /// [`Self::output`] (for display without a read-back).
+    /// Output pixels for each full-resolution source pixel (at most 1.0
+    /// when the preview is not larger than the original).
+    pub fn pixel_scale(&self) -> f32 {
+        self.pixel_scale
+    }
+
+    /// Sets the size of the full-resolution original, so that the pixel
+    /// scale is `preview long edge / original long edge`.
+    ///
+    /// # Errors
+    ///
+    /// [`DevelopError::Core`] when a side is zero.
+    pub fn set_original_size(&mut self, width: u32, height: u32) -> DevelopResult<()> {
+        self.pixel_scale = long_edge_ratio(self.size(), (width, height))?;
+        Ok(())
+    }
+
+    /// Runs the tone stages of `pipeline` on the GPU. The result stays on
+    /// the GPU in [`Self::output`] (for display without a read-back).
+    /// Geometry and sharpening are not applied; see [`Self::develop_full`].
     pub async fn develop(&self, ctx: &GpuContext, pipeline: &Pipeline) -> DevelopResult<()> {
         pipeline.render_gpu(ctx, &self.input, &self.output).await
+    }
+
+    /// Runs all stages of `pipeline` on the GPU at [`Self::pixel_scale`].
+    /// Returns the result image (it stays on the GPU). Its size is
+    /// `pipeline.output_size(self.size())`. The internal images are made
+    /// again only when that size changes.
+    ///
+    /// # Errors
+    ///
+    /// See [`Pipeline::develop_gpu`].
+    pub async fn develop_full(
+        &mut self,
+        ctx: &GpuContext,
+        pipeline: &Pipeline,
+    ) -> DevelopResult<&GpuImage> {
+        pipeline
+            .develop_gpu(ctx, &self.input, self.pixel_scale, &mut self.targets)
+            .await
+    }
+
+    /// The intermediate images of [`Self::develop_full`] (for example, to
+    /// read [`DevelopTargets::allocation_count`]).
+    pub fn targets(&self) -> &DevelopTargets {
+        &self.targets
     }
 
     /// The developed preview on the GPU (valid after [`Self::develop`]).
@@ -189,6 +253,24 @@ impl PreviewRenderer {
         self.develop(ctx, pipeline).await?;
         read_working_image(ctx, &self.output).await
     }
+}
+
+/// Returns `long edge of size / long edge of original`.
+fn long_edge_ratio(size: (u32, u32), original: (u32, u32)) -> DevelopResult<f32> {
+    let long = original.0.max(original.1);
+    if original.0 == 0 || original.1 == 0 {
+        return Err(CoreError::InvalidDimensions {
+            width: original.0,
+            height: original.1,
+        }
+        .into());
+    }
+    let ratio = f64::from(size.0.max(size.1)) / f64::from(long);
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the ratio of two u32 values is a finite, positive f32 range value"
+    )]
+    Ok(ratio as f32)
 }
 
 /// Develops a preview of `source`: downsample to `max_long_edge` (area

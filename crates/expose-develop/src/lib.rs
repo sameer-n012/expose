@@ -16,7 +16,8 @@
 //!
 //! # fn run(image: &WorkingImage, settings: &DevelopSettings) -> Result<(), expose_develop::DevelopError> {
 //! let pipeline = Pipeline::new(settings, &SourceInfo::RENDERED)?;
-//! let developed = pipeline.render_cpu(image); // or `render_image_gpu`
+//! // All stages. 1.0: `image` is the full-size source.
+//! let developed = pipeline.develop_cpu(image, 1.0)?; // or `develop_image_gpu`
 //! # Ok(())
 //! # }
 //! ```
@@ -25,6 +26,9 @@
 //!
 //! The order is fixed:
 //!
+//! 0. **Geometry** ([`geometry`]): flip, straighten, and crop. It is first:
+//!    it works on the linear source data, and it makes the image smaller
+//!    before the other stages.
 //! 1. **White balance** ([`white_balance`]): Bradford adaptation from the
 //!    scene white to D65. It is first, because it corrects the light of the
 //!    scene. All later stages expect neutral colors to be neutral.
@@ -40,11 +44,19 @@
 //!    then per channel) in a display-like (sRGB) encoding. It is the last
 //!    creative step, because the user draws it against the result of the
 //!    sliders.
-//! 6. **Output** (not in this crate): conversion to the display or export
+//! 6. **Sharpening** ([`sharpen`]): luminance sharpening of the toned
+//!    image. It is after the tone stages, so that it sees the final
+//!    contrast. Its radius is in source pixels and scales with the pixel
+//!    scale of the image.
+//! 7. **Output** (not in this crate): conversion to the display or export
 //!    color space, and the clip to `0..=1`.
 //!
 //! Stages that are the identity are skipped. Stages 1 and 2 are fused into
 //! one matrix, and stages 3 and 4 into one LUT (see [`Pipeline`]).
+//!
+//! [`Pipeline::develop_cpu`] and [`Pipeline::develop_gpu`] run all stages.
+//! [`Pipeline::apply_cpu`], [`Pipeline::render_cpu`], and
+//! [`Pipeline::render_gpu`] run stages 1 to 5 only (the tone stages).
 //!
 //! # Scene-referred values
 //!
@@ -54,17 +66,20 @@
 //!
 //! # CPU and GPU
 //!
-//! [`Pipeline::apply_pixel`] is the CPU reference. It is deterministic. The
-//! GPU kernel ([`DEVELOP_KERNEL`], one fused pass) uses the same tables and
-//! the same arithmetic. The GPU result agrees with the CPU result within
-//! about `1e-5` relative (the GPU `log2`, `exp2`, and `pow` functions are
-//! not bit-exact).
+//! [`Pipeline::apply_pixel`] is the CPU reference of the tone stages. It is
+//! deterministic. The GPU kernel ([`DEVELOP_KERNEL`], one fused pass) uses
+//! the same tables and the same arithmetic. The GPU result agrees with the
+//! CPU result within about `1e-5` relative (the GPU `log2`, `exp2`, and
+//! `pow` functions are not bit-exact).
+//!
+//! The geometry kernel ([`GEOMETRY_KERNEL`]) and the four sharpening
+//! kernels use the same math order as [`Geometry::apply_cpu`] and
+//! [`Sharpener::apply_cpu`]. A crop or flip without rotation is bit-exact.
+//! [`DevelopTargets`] keeps the intermediate GPU images between renders.
 //!
 //! # Not in this version
 //!
-//! Crop, straighten, flip, sharpening, masks, HSL, and color grading. The
-//! settings types for crop and sharpening exist in `expose-core`; this
-//! pipeline keeps them but does not apply them.
+//! Masks, HSL, color grading, noise reduction, and lens correction.
 //!
 //! # Dependency rules
 //!
@@ -78,6 +93,7 @@ pub mod auto_tone;
     reason = "spline math uses the usual one-letter names"
 )]
 pub mod curve;
+mod develop_gpu;
 mod display;
 mod error;
 #[allow(
@@ -86,6 +102,7 @@ mod error;
 )]
 pub mod geometry;
 mod gpu;
+mod gpu_stages;
 mod pipeline;
 pub mod preview;
 pub mod sharpen;
@@ -102,11 +119,19 @@ pub mod tone;
 pub mod white_balance;
 
 pub use auto_tone::{LuminanceHistogram, auto_tone};
+pub use develop_gpu::DevelopTargets;
 pub use display::{DISPLAY_ENCODE_KERNEL, DisplayEncoder, DisplayParams, DisplaySpace};
 pub use error::{DevelopError, DevelopResult};
+pub use geometry::{Geometry, max_inscribed_rect, rect_is_inside};
 pub use gpu::{DEVELOP_KERNEL, GpuParams};
+pub use gpu_stages::{
+    GEOMETRY_KERNEL, GeometryParams, SHARPEN_BLUR_H_KERNEL, SHARPEN_BLUR_V_KERNEL,
+    SHARPEN_COMBINE_KERNEL, SHARPEN_ENCODE_KERNEL, SharpenBlurParams, SharpenCombineParams,
+    SharpenEncodeParams,
+};
 pub use pipeline::{Pipeline, Stage};
 pub use preview::{PreviewRenderer, downsample_area, preview_size, render_preview};
+pub use sharpen::Sharpener;
 pub use source::{SourceInfo, SourceWhite, chromaticity_to_temperature_tint};
 
 /// The name of this crate.
