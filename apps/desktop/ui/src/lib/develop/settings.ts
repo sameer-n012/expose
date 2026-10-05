@@ -6,6 +6,7 @@
  * document and changes one value, so all other fields (also fields that
  * this UI does not know) go back to the shell unchanged.
  */
+import { identityCurve, type CurveChannel, type CurvePoint, type ToneCurveSettings } from './curve';
 
 /** The ranges of the sliders. Keep them equal to `expose_core::develop::ranges`. */
 export const RANGES = {
@@ -38,12 +39,35 @@ export interface ToneSettings {
   readonly [key: string]: unknown;
 }
 
-/** The settings document. Other fields (tone curve, crop, ...) stay as they are. */
+/** The settings document. Other fields (crop, ...) stay as they are. */
 export interface DevelopDocument {
   readonly version: number;
   readonly white_balance: WhiteBalanceSettings;
   readonly tone: ToneSettings;
+  /** Missing in old documents: every channel is then the identity curve. */
+  readonly tone_curve?: Partial<ToneCurveSettings>;
   readonly [key: string]: unknown;
+}
+
+/** The points of one curve channel of a document (identity when missing). */
+export function curveOf(doc: DevelopDocument, channel: CurveChannel): readonly CurvePoint[] {
+  return doc.tone_curve?.[channel] ?? identityCurve();
+}
+
+/** Returns a copy of `doc` with one curve channel changed. All four channels are written. */
+export function withCurve(
+  doc: DevelopDocument,
+  channel: CurveChannel,
+  points: readonly CurvePoint[],
+): DevelopDocument {
+  const full: Record<CurveChannel, readonly CurvePoint[]> = {
+    master: curveOf(doc, 'master'),
+    red: curveOf(doc, 'red'),
+    green: curveOf(doc, 'green'),
+    blue: curveOf(doc, 'blue'),
+  };
+  full[channel] = points;
+  return { ...doc, tone_curve: { ...doc.tone_curve, ...full } };
 }
 
 /** A slider that the Basic panel edits. */
