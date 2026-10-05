@@ -8,15 +8,15 @@ Work tracker for Expose. `FEATURES.md` is the master feature list. This file tra
 
 develop-geometry-detail is split into tasks (2026-10-04, ADR 0011). Done: develop-geometry (#24), develop-sharpen (#25), gpu-multi-input (#26).
 
-- [ ] **develop-geometry-gpu** (O, `expose-develop`, agent running) — GPU kernels for geometry and the four sharpening passes; `Pipeline::develop_cpu`/`develop_gpu`, `DevelopTargets`, `PreviewRenderer::develop_full`.
-- Then: **geometry-integration** (O) — preview engine, thumbnails, and export use the full develop API (preview frames change size with the crop).
+- [ ] **geometry-integration** (O, `src-tauri`, agent running) — preview engine, thumbnails, and export use the full develop API (preview frames change size with the crop); `preview_render` gets optional `applyGeometry`.
+- Then: **develop-panels** remainder (S) — Detail (sharpening) panel, crop/straighten tool (uses `applyGeometry: false` while dragging, `max_inscribed_rect` needs a shell command), histogram.
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
 1. [ ] **develop-geometry-detail** (O) — crop/straighten and sharpening stages in `expose-develop` (CPU reference + GPU), used by preview, thumbnails, and export. Needs neighborhood and size-changing kernels (see gpu-api).
-2. [ ] **develop-panels** (S) — Tone curve, Detail (sharpening), and crop/straighten UI for the existing `DevelopSettings` fields; histogram (needs a shell command). The crop and Detail UI need item 1.
+2. [ ] **develop-panels** (S) — Tone curve done (PR #28). Open: Detail (sharpening), crop/straighten UI, histogram (needs a shell command). The crop and Detail UI need item 1.
 3. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 
 ### Follow-ups from merged work
@@ -45,6 +45,9 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **develop-geometry-gpu** (PR #29) — geometry (first) and sharpening (last) in `Pipeline`: `develop_cpu`/`develop_cpu_owned`, `develop_gpu` + `DevelopTargets`, `PreviewRenderer::develop_full`/`set_original_size`, `set_apply_geometry`; 5 new GPU kernels (GPU vs CPU ≤ 2.3e-6 relative). `is_identity` now covers all stages; `tone_is_identity` is the old meaning. ADR 0011.
+- [x] **tone-curve-panel** (PR #28) — Tone curve panel in Develop (Master/R/G/B, add/drag/remove points, keyboard, per-channel reset); `lib/develop/curve.ts`. "Reset all" still resets only the Basic values. Not checked in the real webview yet.
 
 - [x] **loupe-view** (PR #27) — the library loupe shows the photo with its saved develop settings (`LoupeStore`, `LoupeImage`): one preview session per loupe photo, late results dropped, session closed on step/leave/module change; thumbnail until the first frame; caption with name and date. Not checked in the real webview yet.
 
