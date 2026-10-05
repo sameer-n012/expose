@@ -111,6 +111,7 @@ Decisions:
 - **Off-main-thread conversion.** The default draw mode is `bitmap` (`createImageBitmap`). The presenter uses `putImageData` when `createImageBitmap` does not exist.
 - **Target size.** `preview_render` takes an optional `long_edge` (scheme: `long=<n>`). The shell rejects 0 and values above 8192, and clamps others to 64..=session size (`effective_long_edge`). The client computes the size from the canvas box and the device pixel ratio (`size.ts`), rounds it up to a multiple of 128, and caps it at the session size. When the size changes, the engine frees the old GPU source view before it makes the new one.
 - **Canvas CSS.** The canvas fills its box with `object-fit: contain`, so a smaller frame scales up.
+- **Update (PR #38, 2026-10-05): `long_edge` is the frame (output) long edge.** With a crop, the engine makes the develop input larger by the crop factor (`input_long_edge`, 128 px steps, cached per session; the view is made again only when the step changes or geometry is switched). The session keeps a source of `max(maxLongEdge, 4096)` px (about 180 MB CPU for a 3:2 photo; two sessions about 360 MB), so crops to about 60 % of the long edge still reach a 2560 px frame. The UI computes the target from the crop aspect. The scheme takes `geometry=0|1`. See ADR 0011.
 
 Consequences and open items:
 
