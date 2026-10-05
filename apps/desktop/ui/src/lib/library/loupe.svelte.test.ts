@@ -50,6 +50,19 @@ describe('LoupeStore', () => {
     expect(store.session).toBeNull();
   });
 
+  it('logs a failed close', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { store, api } = setup();
+    const failure = new Error('gone');
+    api.closePreview.mockRejectedValueOnce(failure);
+    await store.show(1);
+    store.dispose();
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith('loupe: preview session could not be closed', 10, failure),
+    );
+    warn.mockRestore();
+  });
+
   it('closes the session on dispose', async () => {
     const { store, api } = setup();
     await store.show(1);

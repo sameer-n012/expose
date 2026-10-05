@@ -109,8 +109,13 @@ export class LoupeStore {
     }
   }
 
-  /** Closes a session. A failed close has no effect for the user; the shell frees old sessions. */
+  /**
+   * Closes a session. A failed close is logged and not shown in a toast:
+   * the user cannot act on it.
+   */
   #closeQuietly(session: number): void {
-    void (async () => this.#api.closePreview(session))().catch(() => undefined);
+    void (async () => this.#api.closePreview(session))().catch((error: unknown) => {
+      console.warn('loupe: preview session could not be closed', session, error);
+    });
   }
 }
