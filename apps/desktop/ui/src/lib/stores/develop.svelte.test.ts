@@ -109,8 +109,70 @@ describe('DevelopStore', () => {
     store.resetSlider('contrast');
     expect(store.settings?.tone.contrast).toBe(0);
     expect(store.settings?.white_balance.tint).toBe(10);
-    store.resetAll();
+    store.resetBasic();
     expect(store.settings?.white_balance).toMatchObject({ mode: 'as_shot', tint: 0 });
+  });
+
+  describe('resetAll', () => {
+    const ramp = [
+      { x: 0, y: 0 },
+      { x: 0.5, y: 0.7 },
+      { x: 1, y: 1 },
+    ];
+
+    async function edited(extra: Record<string, unknown> = {}) {
+      const ctx = setup(doc(extra));
+      await ctx.store.activate(3);
+      ctx.store.setSlider('exposure', 1);
+      ctx.store.setSlider('temperature', 7000);
+      ctx.store.setCurve('red', ramp);
+      ctx.store.setSharpening('amount', 80);
+      ctx.store.setCropAngle(5);
+      await ctx.store.flush();
+      ctx.api.setSettings.mockClear();
+      return ctx;
+    }
+
+    it('resets every section in one update and one save', async () => {
+      const { store, api } = await edited({ future_field: { a: 1 } });
+      expect(store.atDefaults).toBe(false);
+      store.resetAll();
+      const s = store.settings;
+      expect(s?.white_balance).toMatchObject({ mode: 'as_shot', temperature: 5500, tint: 0 });
+      expect(s?.tone.exposure).toBe(0);
+      expect(s?.tone_curve?.red).toEqual([{ x: 0, y: 0 }, { x: 1, y: 1 }]);
+      expect(s?.tone_curve?.master).toEqual([{ x: 0, y: 0 }, { x: 1, y: 1 }]);
+      expect(s?.sharpening?.amount).toBe(0);
+      expect(s?.['crop']).toMatchObject({ angle: 0, rect: { left: 0, top: 0, width: 1, height: 1 } });
+      expect(s?.['future_field']).toEqual({ a: 1 });
+      expect(store.atDefaults).toBe(true);
+      await store.flush();
+      expect(api.setSettings).toHaveBeenCalledTimes(1);
+    });
+
+    it('does nothing at defaults', async () => {
+      const { store, api } = setup();
+      await store.activate(3);
+      const before = store.settings;
+      expect(store.atDefaults).toBe(true);
+      store.resetAll();
+      expect(store.settings).toBe(before);
+      await store.flush();
+      expect(api.setSettings).not.toHaveBeenCalled();
+    });
+
+    it('keeps the crop tool active and Cancel restores the start crop', async () => {
+      const { store } = await edited();
+      const start = store.settings?.['crop'];
+      expect(store.enterCrop()).toBe(true);
+      store.resetAll();
+      expect(store.cropActive).toBe(true);
+      expect(store.crop?.angle).toBe(0);
+      expect(store.crop?.rect).toEqual({ left: 0, top: 0, width: 1, height: 1 });
+      store.cancelCrop();
+      expect(store.cropActive).toBe(false);
+      expect(store.settings?.['crop']).toEqual(start);
+    });
   });
 
   it('flushes the edits when the photo changes', async () => {

@@ -87,7 +87,7 @@
       />
     {/each}
     <div class="actions">
-      <button type="button" disabled={settings === null} onclick={() => develop.resetAll()}>Reset all</button>
+      <button type="button" disabled={settings === null} onclick={() => develop.resetBasic()}>Reset</button>
     </div>
   </div>
 </details>

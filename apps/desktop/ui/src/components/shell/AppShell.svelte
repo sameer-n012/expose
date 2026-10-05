@@ -22,6 +22,7 @@
   import CropPanel from '../develop/CropPanel.svelte';
   import DetailPanel from '../develop/DetailPanel.svelte';
   import HistogramView from '../develop/HistogramView.svelte';
+  import ResetAllPanel from '../develop/ResetAllPanel.svelte';
   import ToneCurvePanel from '../develop/ToneCurvePanel.svelte';
   import DevelopView from '../modules/DevelopView.svelte';
   import { MODULE_LABELS, type ModuleId } from '../../lib/modules';
@@ -79,6 +80,17 @@
     }
     return registerActions(registry, cropModeActions(develop));
   });
+
+  // `Mod+Shift+R` resets all develop settings (a no-op at defaults).
+  $effect(() =>
+    registry.register({
+      id: 'develop.resetAll',
+      label: 'Reset all develop settings',
+      scope: 'develop',
+      defaultBinding: 'Mod+Shift+R',
+      run: () => develop.resetAll(),
+    }),
+  );
 
   /** Shortcut text per module. Null if the action is not registered or has no key. */
   function shortcutFor(actionId: string): string | null {
@@ -143,6 +155,7 @@
           <ToneCurvePanel {develop} />
           <DetailPanel {develop} />
           <PanelSections sections={PANEL_SECTIONS.develop.right} />
+          <ResetAllPanel {develop} />
         {:else}
           <PanelSections sections={PANEL_SECTIONS[id][side]} />
         {/if}
