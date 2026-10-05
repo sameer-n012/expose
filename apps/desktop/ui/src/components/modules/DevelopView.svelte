@@ -4,11 +4,17 @@
   The view follows `develop.target` (the focused photo of the library while
   the module is active). When the module is hidden or the view is
   destroyed, the store saves the edits and frees the session.
+
+  In crop mode the preview shows the full image without geometry. CSS
+  shows the flip and the rotation, and the crop frame overlay is on top.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import { withoutCrop } from '../../lib/develop/crop';
+  import { cropTransform, type ScreenRect } from '../../lib/develop/cropView';
   import { HistogramFeed } from '../../lib/develop/histogram';
   import type { DevelopStore } from '../../lib/stores/develop.svelte';
+  import CropOverlay from '../develop/CropOverlay.svelte';
   import PreviewCanvas from '../develop/PreviewCanvas.svelte';
 
   interface Props {
@@ -35,7 +41,14 @@
     feed.cancel();
     void develop.dispose();
   });
+
+  const cropping = $derived(develop.cropActive);
+  const transform = $derived(cropping && develop.crop !== null ? cropTransform(develop.crop) : 'none');
 </script>
+
+{#snippet cropOverlay(content: ScreenRect)}
+  <CropOverlay {develop} {content} />
+{/snippet}
 
 <div class="develop">
   {#if develop.status === 'empty'}
@@ -49,7 +62,11 @@
   {:else if develop.settings !== null}
     <PreviewCanvas
       session={develop.session}
-      settings={develop.settings}
+      settings={cropping ? withoutCrop(develop.settings) : develop.settings}
+      applyGeometry={!cropping}
+      {transform}
+      padded={cropping}
+      overlay={cropping ? cropOverlay : undefined}
       onframe={(event) => feed.push(event.frame)}
     />
   {/if}

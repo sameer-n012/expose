@@ -17,7 +17,9 @@
   import { ExportStore } from '../../lib/stores/export.svelte';
   import ExportDialog from '../export/ExportDialog.svelte';
   import ExportProgress from '../export/ExportProgress.svelte';
+  import { cropModeActions, cropToggleAction, registerActions } from '../../lib/develop/cropActions';
   import BasicPanel from '../develop/BasicPanel.svelte';
+  import CropPanel from '../develop/CropPanel.svelte';
   import DetailPanel from '../develop/DetailPanel.svelte';
   import HistogramView from '../develop/HistogramView.svelte';
   import ToneCurvePanel from '../develop/ToneCurvePanel.svelte';
@@ -68,6 +70,15 @@
 
   // The shortcut needs the shell, because the shell knows the active photo.
   $effect(() => registry.register(exportAction(exportPhotos)));
+
+  // The crop tool: `R` always; Enter, Esc, O, and X only while it is active.
+  $effect(() => registry.register(cropToggleAction(develop)));
+  $effect(() => {
+    if (!develop.cropActive) {
+      return;
+    }
+    return registerActions(registry, cropModeActions(develop));
+  });
 
   /** Shortcut text per module. Null if the action is not registered or has no key. */
   function shortcutFor(actionId: string): string | null {
@@ -127,6 +138,7 @@
         {/if}
         {#if id === 'develop' && side === 'right'}
           <HistogramView histogram={develop.histogram} />
+          <CropPanel {develop} />
           <BasicPanel {develop} />
           <ToneCurvePanel {develop} />
           <DetailPanel {develop} />

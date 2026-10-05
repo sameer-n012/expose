@@ -6,10 +6,17 @@
   its box as the target long edge, so the shell renders no more pixels
   than the screen shows. CSS scales the canvas to fit the box and keeps
   the aspect ratio.
+
+  For the crop tool, `applyGeometry = false` requests frames of the full
+  image, `transform` is a CSS transform of the canvas (about its center),
+  and `overlay` draws on top of the image rect (the session aspect, scaled
+  to fit). A request with the same session and the same settings as the
+  last one is not sent again.
 -->
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, untrack, type Snippet } from 'svelte';
   import { isCommandError } from '../../lib/catalog';
+  import { containRect, type ScreenRect } from '../../lib/develop/cropView';
   import { frameContext, type DrawMode } from '../../lib/develop/draw';
   import {
     DEFAULT_PRESENT_MODE,
@@ -45,6 +52,14 @@
     onframe?: (event: PresentedEvent) => void;
     /** Called for each failed frame. The component also shows the message. */
     onerror?: (error: unknown) => void;
+    /** `false`: frames without flip, straighten, and crop. Default true. */
+    applyGeometry?: boolean;
+    /** CSS transform of the canvas, about its center. Default `none`. */
+    transform?: string;
+    /** Adds space around the image (the crop tool shows handles there). */
+    padded?: boolean;
+    /** Drawn over the image rect (in CSS pixels of the stage), when set. */
+    overlay?: Snippet<[ScreenRect]> | undefined;
   }
 
   let {
@@ -56,10 +71,21 @@
     maxInFlight,
     onframe,
     onerror,
+    applyGeometry = true,
+    transform = 'none',
+    padded = false,
+    overlay,
   }: Props = $props();
 
   let box: HTMLDivElement | undefined = $state();
+  let stage: HTMLDivElement | undefined = $state();
+  let stageSize = $state({ width: 0, height: 0 });
   let canvas: HTMLCanvasElement | undefined = $state();
+
+  /** The image rect in the stage (session aspect, scaled to fit). */
+  const content: ScreenRect = $derived(
+    containRect(stageSize.width, stageSize.height, session?.width ?? 0, session?.height ?? 0),
+  );
   let message: string | null = $state(null);
   let context: CanvasRenderingContext2D | null = null;
 
@@ -99,8 +125,23 @@
     return { client: { ...client.stats }, presenter: { ...presenter.stats } };
   }
 
+  /** Measures the stage, for the overlay. */
+  function measureStage(): void {
+    if (stage === undefined) {
+      return;
+    }
+    // The client size is the layout size: a CSS transform does not change
+    // it (the stage has none), and it has no border or padding.
+    const width = stage.clientWidth;
+    const height = stage.clientHeight;
+    if (width !== stageSize.width || height !== stageSize.height) {
+      stageSize = { width, height };
+    }
+  }
+
   /** Sends the device-pixel size of the box as the target long edge. */
   function updateTarget(): void {
+    untrack(measureStage);
     const current = untrack(() => session);
     if (box === undefined || current === null) {
       return;
@@ -127,16 +168,41 @@
     }
     const observer = new ResizeObserver(() => updateTarget());
     observer.observe(box);
+    // The stage changes size without the box when the padding changes.
+    if (stage !== undefined) {
+      observer.observe(stage);
+    }
     return () => observer.disconnect();
   });
+
+  $effect(() => {
+    // Before the settings effect, so that a request of the same update
+    // already carries the new value.
+    client.setApplyGeometry(applyGeometry);
+  });
+
+  /** The session and settings of the last request (JSON), to skip repeats. */
+  let lastRequest: string | null = null;
 
   $effect(() => {
     // The snapshot reads all nested fields, so a change of any field
     // requests a frame.
     const snapshot = $state.snapshot(settings);
-    if (session !== null) {
+    if (session === null) {
+      lastRequest = null;
+      return;
+    }
+    const key = `${session.session}:${JSON.stringify(snapshot)}`;
+    if (key !== lastRequest) {
+      lastRequest = key;
       client.request(snapshot);
     }
+  });
+
+  $effect(() => {
+    // A padding change resizes the stage.
+    void padded;
+    measureStage();
   });
 
   onDestroy(() => {
@@ -145,13 +211,27 @@
   });
 </script>
 
-<div class="preview" bind:this={box}>
-  <canvas
-    bind:this={canvas}
-    width={session?.width ?? 0}
-    height={session?.height ?? 0}
-    aria-label="Develop preview"
-  ></canvas>
+<div class="preview" class:padded bind:this={box}>
+  <div class="stage" bind:this={stage}>
+    <canvas
+      bind:this={canvas}
+      width={session?.width ?? 0}
+      height={session?.height ?? 0}
+      style:transform
+      aria-label="Develop preview"
+    ></canvas>
+    {#if overlay !== undefined && session !== null && content.width > 0}
+      <div
+        class="overlay"
+        style:left="{content.x}px"
+        style:top="{content.y}px"
+        style:width="{content.width}px"
+        style:height="{content.height}px"
+      >
+        {@render overlay(content)}
+      </div>
+    {/if}
+  </div>
   {#if message !== null}
     <p class="message" role="alert">{message}</p>
   {/if}
@@ -166,14 +246,30 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
+    box-sizing: border-box;
   }
 
-  /* The canvas fills the box; `object-fit` scales the frame to fit and
-     keeps the aspect ratio, for frames smaller or larger than the box. */
+  .padded {
+    padding: var(--space-6);
+  }
+
+  .stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* The canvas fills the stage; `object-fit` scales the frame to fit and
+     keeps the aspect ratio, for frames smaller or larger than the stage. */
   canvas {
+    display: block;
     width: 100%;
     height: 100%;
     object-fit: contain;
+  }
+
+  .overlay {
+    position: absolute;
   }
 
   .message {

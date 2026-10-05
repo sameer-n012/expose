@@ -13,7 +13,7 @@ export const PANEL_SECTIONS: Readonly<Record<ModuleId, Readonly<Record<Side, rea
   },
   develop: {
     left: ['Navigator', 'Presets', 'Snapshots', 'History'],
-    // The Histogram, Basic, Tone curve, and Detail panels (AppShell) show above these.
+    // The Histogram, Crop, Basic, Tone curve, and Detail panels (AppShell) show above these.
     right: ['Color', 'Optics'],
   },
   editor: {

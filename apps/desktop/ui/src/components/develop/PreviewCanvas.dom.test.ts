@@ -94,6 +94,23 @@ describe('PreviewCanvas', () => {
     expect(onframe).toHaveBeenCalledOnce();
   });
 
+  it('sends the geometry flag and skips a request with equal settings', async () => {
+    let seq = 0;
+    const { transport, render: renderFrame } = fakeTransport(() => Promise.resolve(makeFrameBody(4, 3, seq++)));
+    const view = render(PreviewCanvas, { session, settings: { tone: { exposure: 0 } }, transport });
+    await waitFor(() => expect(putImageData).toHaveBeenCalledOnce());
+    // A new object with the same values: no new request.
+    await view.rerender({ session, settings: { tone: { exposure: 0 } }, transport });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(renderFrame).toHaveBeenCalledOnce();
+
+    await view.rerender({ session, settings: { tone: { exposure: 0 } }, transport, applyGeometry: false, transform: 'matrix(-1, 0, 0, 1, 0, 0)' });
+    await waitFor(() => expect(renderFrame).toHaveBeenCalledTimes(2));
+    expect(renderFrame).toHaveBeenLastCalledWith(1, { tone: { exposure: 0 } }, { longEdge: null, applyGeometry: false });
+    const canvas = screen.getByLabelText('Develop preview') as HTMLCanvasElement;
+    expect(canvas.style.transform).toBe('matrix(-1, 0, 0, 1, 0, 0)');
+  });
+
   it('requests nothing without a session', async () => {
     const { transport, render: renderFrame } = fakeTransport(() => Promise.resolve(makeFrameBody(4, 3)));
     render(PreviewCanvas, { session: null, settings: {}, transport });
