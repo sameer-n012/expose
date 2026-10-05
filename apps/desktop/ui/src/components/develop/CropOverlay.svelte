@@ -17,6 +17,7 @@
     type CropHandle,
     type NormalizedRect,
   } from '../../lib/develop/cropGeometry';
+  import { applyCropKey, CROP_KEYS_HELP } from '../../lib/develop/cropKeys';
   import { overlayLines, toNormalizedDelta, type ScreenRect } from '../../lib/develop/cropView';
   import type { DevelopStore } from '../../lib/stores/develop.svelte';
 
@@ -30,7 +31,7 @@
 
   const crop = $derived(develop.crop);
   const rect = $derived(crop?.rect ?? null);
-  const lines = $derived(overlayLines(develop.straightening ? 'fine' : develop.cropOverlay));
+  const lines = $derived(overlayLines(develop.fineGrid ? 'fine' : develop.cropOverlay));
 
   const HANDLE_LABELS: Readonly<Record<CropHandle, string>> = {
     nw: 'top left',
@@ -84,6 +85,28 @@
     develop.setCropRect(next);
   }
 
+  /**
+   * Arrow keys move or resize the rect (see `cropKeys.ts`). Other keys go
+   * on to the shortcut registry (Enter, Escape, O, X).
+   */
+  function onKey(event: KeyboardEvent): void {
+    const settings = crop;
+    const size = develop.frameSize;
+    if (settings === null || size === null || event.target !== event.currentTarget) {
+      return;
+    }
+    const next = applyCropKey(
+      { width: size.width, height: size.height, angle: settings.angle },
+      settings.rect,
+      event,
+      lockedRatio(settings, size),
+    );
+    if (next !== null) {
+      event.preventDefault();
+      develop.setCropRect(next);
+    }
+  }
+
   function end(event: PointerEvent): void {
     if (drag !== null && event.pointerId === drag.pointerId) {
       drag = null;
@@ -103,10 +126,16 @@
   onpointercancel={end}
 >
   {#if rect !== null}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- The frame is a focusable group: arrow keys move or resize it (the label names the keys). -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="crop-rect"
       data-testid="crop-rect"
+      role="group"
+      tabindex="0"
+      aria-label={CROP_KEYS_HELP}
+      title={CROP_KEYS_HELP}
+      onkeydown={onKey}
       style:left="{rect.left * 100}%"
       style:top="{rect.top * 100}%"
       style:width="{rect.width * 100}%"
@@ -145,6 +174,10 @@
     /* Darkens all of the preview outside the rect; the preview box clips it. */
     box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.55);
     cursor: move;
+  }
+  .crop-rect:focus-visible {
+    outline: 2px solid var(--color-accent, #4c9aff);
+    outline-offset: 2px;
   }
 
   .guides {

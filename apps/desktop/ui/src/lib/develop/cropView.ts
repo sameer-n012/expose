@@ -18,22 +18,30 @@ import type { CropSettings } from './crop';
  * The backend flips first, then rotates clockwise by `angle`. Thus the
  * matrix is `R(angle) * S` with `S = diag(sx, sy)` (`-1` for a flip).
  */
-export function cropMatrix(crop: Pick<CropSettings, 'angle' | 'flip_horizontal' | 'flip_vertical'>): [number, number, number, number] {
+export function cropMatrix(
+  crop: ViewGeometry,
+  scale = 1,
+): [number, number, number, number] {
   const rad = (crop.angle * Math.PI) / 180;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
   const sx = crop.flip_horizontal ? -1 : 1;
   const sy = crop.flip_vertical ? -1 : 1;
   // R = [[cos, -sin], [sin, cos]] (clockwise on a y-down screen).
-  return [cos * sx, sin * sx, -sin * sy, cos * sy];
+  // The uniform `scale` (the zoom-out of the view) multiplies all four.
+  return [cos * sx * scale, sin * sx * scale, -sin * sy * scale, cos * sy * scale];
 }
+
+/** The part of the crop settings that the view shows with a CSS transform. */
+export type ViewGeometry = Pick<CropSettings, 'angle' | 'flip_horizontal' | 'flip_vertical'>;
 
 /**
  * The CSS `transform` of the preview canvas in crop mode, or `none`. The
  * transform origin must be the center of the canvas (the CSS default).
+ * `scale` is the zoom-out of the view (see `rotatedFitScale`).
  */
-export function cropTransform(crop: Pick<CropSettings, 'angle' | 'flip_horizontal' | 'flip_vertical'>): string {
-  if (crop.angle === 0 && !crop.flip_horizontal && !crop.flip_vertical) {
+export function cropTransform(crop: ViewGeometry, scale = 1): string {
+  if (crop.angle === 0 && !crop.flip_horizontal && !crop.flip_vertical && scale === 1) {
     return 'none';
   }
   const fmt = (v: number): string => {
@@ -41,8 +49,54 @@ export function cropTransform(crop: Pick<CropSettings, 'angle' | 'flip_horizonta
     const r = Math.round(v * 1e9) / 1e9;
     return Object.is(r, -0) ? '0' : String(r);
   };
-  const [a, b, c, d] = cropMatrix(crop);
+  const [a, b, c, d] = cropMatrix(crop, scale);
   return `matrix(${fmt(a)}, ${fmt(b)}, ${fmt(c)}, ${fmt(d)}, 0, 0)`;
+}
+
+/**
+ * The scale that makes the bounding box of the rotated image fit the box
+ * (at most 1: the view never zooms in). `image` is the displayed image
+ * rect before the zoom-out. Flips do not change the bounding box.
+ */
+export function rotatedFitScale(
+  angle: number,
+  image: Pick<ScreenRect, 'width' | 'height'>,
+  box: { readonly width: number; readonly height: number },
+): number {
+  if (!(image.width > 0 && image.height > 0 && box.width > 0 && box.height > 0) || !Number.isFinite(angle)) {
+    return 1;
+  }
+  const rad = (angle * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  const boundWidth = image.width * cos + image.height * sin;
+  const boundHeight = image.width * sin + image.height * cos;
+  return Math.min(1, box.width / boundWidth, box.height / boundHeight);
+}
+
+/** `content` scaled by `scale` about its center (the center of the view). */
+export function scaleContent(content: ScreenRect, scale: number): ScreenRect {
+  const width = content.width * scale;
+  const height = content.height * scale;
+  return {
+    x: content.x + (content.width - width) / 2,
+    y: content.y + (content.height - height) / 2,
+    width,
+    height,
+  };
+}
+
+/** A point of the frame (`0..1` units) as a screen position, in the (scaled) `content` rect. */
+export function frameToScreen(content: ScreenRect, fx: number, fy: number): { x: number; y: number } {
+  return { x: content.x + fx * content.width, y: content.y + fy * content.height };
+}
+
+/** A screen position as a point of the frame (`0..1` units), in the (scaled) `content` rect. */
+export function screenToFrame(content: ScreenRect, x: number, y: number): { x: number; y: number } {
+  if (!(content.width > 0 && content.height > 0)) {
+    return { x: 0, y: 0 };
+  }
+  return { x: (x - content.x) / content.width, y: (y - content.y) / content.height };
 }
 
 /** A rectangle in CSS pixels. */
@@ -67,7 +121,10 @@ export function containRect(boxWidth: number, boxHeight: number, imageWidth: num
   return { x: (boxWidth - width) / 2, y: (boxHeight - height) / 2, width, height };
 }
 
-/** A pointer move in CSS pixels as a normalized move in the frame shown in `content`. */
+/**
+ * A pointer move in CSS pixels as a normalized move in the frame shown in
+ * `content`. `content` is the displayed (zoomed-out) image rect.
+ */
 export function toNormalizedDelta(dx: number, dy: number, content: ScreenRect): { dx: number; dy: number } {
   if (!(content.width > 0 && content.height > 0)) {
     return { dx: 0, dy: 0 };

@@ -11,7 +11,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import { withoutCrop } from '../../lib/develop/crop';
-  import { cropTransform, type ScreenRect } from '../../lib/develop/cropView';
+  import type { ScreenRect } from '../../lib/develop/cropView';
   import { HistogramFeed } from '../../lib/develop/histogram';
   import type { DevelopStore } from '../../lib/stores/develop.svelte';
   import CropOverlay from '../develop/CropOverlay.svelte';
@@ -43,7 +43,7 @@
   });
 
   const cropping = $derived(develop.cropActive);
-  const transform = $derived(cropping && develop.crop !== null ? cropTransform(develop.crop) : 'none');
+  const geometry = $derived(cropping ? develop.crop : null);
 </script>
 
 {#snippet cropOverlay(content: ScreenRect)}
@@ -64,7 +64,7 @@
       session={develop.session}
       settings={cropping ? withoutCrop(develop.settings) : develop.settings}
       applyGeometry={!cropping}
-      {transform}
+      {geometry}
       padded={cropping}
       overlay={cropping ? cropOverlay : undefined}
       onframe={(event) => feed.push(event.frame)}

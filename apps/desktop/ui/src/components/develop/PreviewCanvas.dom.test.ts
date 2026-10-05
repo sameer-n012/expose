@@ -128,7 +128,7 @@ describe('PreviewCanvas', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(renderFrame).toHaveBeenCalledOnce();
 
-    await view.rerender({ session, settings: { tone: { exposure: 0 } }, transport, applyGeometry: false, transform: 'matrix(-1, 0, 0, 1, 0, 0)' });
+    await view.rerender({ session, settings: { tone: { exposure: 0 } }, transport, applyGeometry: false, geometry: { angle: 0, flip_horizontal: true, flip_vertical: false } });
     await waitFor(() => expect(renderFrame).toHaveBeenCalledTimes(2));
     expect(renderFrame).toHaveBeenLastCalledWith(1, { tone: { exposure: 0 } }, { longEdge: null, applyGeometry: false });
     const canvas = screen.getByLabelText('Develop preview') as HTMLCanvasElement;
