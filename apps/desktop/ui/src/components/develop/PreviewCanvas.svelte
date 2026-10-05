@@ -7,6 +7,12 @@
   than the screen shows. CSS scales the canvas to fit the box and keeps
   the aspect ratio.
 
+  The target is the long edge of the frame. With geometry on, the frame
+  has the aspect ratio of the crop, so the target uses the aspect ratio of
+  the last drawn frame (limited by the session long edge). When a frame
+  arrives with a new aspect ratio (a new crop), the target is computed
+  again.
+
   For the crop tool, `applyGeometry = false` requests frames of the full
   image, `transform` is a CSS transform of the canvas (about its center),
   and `overlay` draws on top of the image rect (the session aspect, scaled
@@ -25,7 +31,7 @@
     type PresenterStats,
   } from '../../lib/develop/presenter';
   import { PreviewClient, type PreviewClientStats } from '../../lib/develop/previewClient';
-  import { targetLongEdge } from '../../lib/develop/size';
+  import { sameAspect, targetLongEdge, type Size } from '../../lib/develop/size';
   import {
     selectTransport,
     type DevelopSettingsJson,
@@ -102,12 +108,37 @@
     onerror?.(error);
   }
 
+  /**
+   * The size of the last drawn frame with geometry on, for the aspect
+   * ratio of the target. Null: use the session size (no frame yet, or
+   * geometry off). Not reactive: only `updateTarget` reads it.
+   */
+  let frameShape: Size | null = null;
+
+  /** Keeps the frame aspect ratio for the target; a new ratio updates the target. */
+  function noteFrameShape(width: number, height: number): void {
+    if (!untrack(() => applyGeometry) || !client.applyGeometry) {
+      return;
+    }
+    const shape = { width, height };
+    if (frameShape !== null && sameAspect(frameShape, shape)) {
+      return;
+    }
+    const current = untrack(() => session);
+    const before = frameShape ?? (current === null ? null : { width: current.width, height: current.height });
+    frameShape = shape;
+    if (before === null || !sameAspect(before, shape)) {
+      updateTarget();
+    }
+  }
+
   const presenter = new FramePresenter({
     context: getContext,
     mode: untrack(() => drawMode),
     space: untrack(() => displaySpace),
     onPresented: (event) => {
       message = null;
+      noteFrameShape(event.frame.width, event.frame.height);
       onframe?.(event);
     },
     onError: report,
@@ -139,7 +170,11 @@
     }
   }
 
-  /** Sends the device-pixel size of the box as the target long edge. */
+  /**
+   * Sends the device-pixel size of the box as the target long edge: the
+   * fit of the frame aspect ratio (see `frameShape`) into the box, limited
+   * by the session long edge.
+   */
   function updateTarget(): void {
     untrack(measureStage);
     const current = untrack(() => session);
@@ -148,7 +183,8 @@
     }
     const rect = box.getBoundingClientRect();
     const ratio = typeof devicePixelRatio === 'number' ? devicePixelRatio : 1;
-    client.setTargetLongEdge(targetLongEdge(rect, ratio, current));
+    const shape = untrack(() => applyGeometry) && frameShape !== null ? frameShape : current;
+    client.setTargetLongEdge(targetLongEdge(rect, ratio, shape, Math.max(current.width, current.height)));
   }
 
   $effect(() => {
@@ -156,6 +192,7 @@
     if (id !== client.session) {
       client.setSession(id);
       presenter.reset();
+      frameShape = null;
     }
     // Measure before the first request of the session, so that its
     // first frame already has the right size.
@@ -178,7 +215,15 @@
   $effect(() => {
     // Before the settings effect, so that a request of the same update
     // already carries the new value.
-    client.setApplyGeometry(applyGeometry);
+    const on = applyGeometry;
+    if (on !== client.applyGeometry) {
+      // The frame shape of the other mode does not apply. Set the target
+      // first, so that the first request of the new mode has it (the
+      // client drops frames of requests with the old flag).
+      frameShape = null;
+      updateTarget();
+      client.setApplyGeometry(on);
+    }
   });
 
   /** The session and settings of the last request (JSON), to skip repeats. */

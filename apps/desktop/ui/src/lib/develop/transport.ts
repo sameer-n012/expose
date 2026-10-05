@@ -40,15 +40,18 @@ export const TRANSPORT_STORAGE_KEY = 'expose.previewTransport';
 /** Options of one frame request. */
 export interface RenderOptions {
   /**
-   * The target long edge of the develop input in pixels. The shell clamps
-   * it to the session size and to a minimum. A crop makes the frame
-   * smaller than this value; the frame header has the real size. `null`
-   * or absent: the session size.
+   * The target long edge of the frame (the develop output) in pixels. The
+   * shell clamps it to the session size and to a minimum. With a crop, the
+   * shell enlarges the develop input by the crop factor, so the frame long
+   * edge is about this value (smaller only when the session source is too
+   * small for the crop). The frame header has the real size. `null` or
+   * absent: the session size.
    */
   readonly longEdge?: number | null;
   /**
    * `false` skips the geometry stage (flip, straighten, crop), so the frame
-   * shows the full image. Absent: `true`. Only the `ipc` transport sends it.
+   * shows the full image. Absent: `true`. Both transports send it (`ipc`:
+   * the `applyGeometry` argument; `scheme`: the `geometry=0` query value).
    */
   readonly applyGeometry?: boolean;
 }
@@ -102,14 +105,20 @@ export function previewSchemeBase(httpForm: boolean): string {
 /** The URL form of this web view. Computed once. */
 const HTTP_FORM: boolean = typeof navigator !== 'undefined' && usesHttpSchemeForm(navigator.userAgent);
 
-/** The URL of a frame of `session` in the given format, with an optional target long edge. */
+/**
+ * The URL of a frame of `session` in the given format, with an optional
+ * target long edge. `applyGeometry: false` adds `geometry=0` (no flip,
+ * straighten, or crop); `true` adds nothing (the shell default).
+ */
 export function previewFrameUrl(
   session: number,
   format: 'rgba8' | 'jpeg' | 'png' = 'rgba8',
   longEdge: number | null = null,
+  applyGeometry = true,
 ): string {
   const long = longEdge === null ? '' : `&long=${Math.round(longEdge)}`;
-  return `${previewSchemeBase(HTTP_FORM)}/${encodeURIComponent(String(session))}?format=${format}${long}`;
+  const geometry = applyGeometry ? '' : '&geometry=0';
+  return `${previewSchemeBase(HTTP_FORM)}/${encodeURIComponent(String(session))}?format=${format}${long}${geometry}`;
 }
 
 /** A failed scheme request, with the HTTP status. */
@@ -146,7 +155,8 @@ export function schemeErrorKind(status: number): 'superseded' | 'notFound' | 'in
 export const schemeTransport: FrameTransport = {
   name: 'scheme',
   async render(session, settings, options = {}) {
-    const response = await fetch(previewFrameUrl(session, 'rgba8', options.longEdge ?? null), {
+    const url = previewFrameUrl(session, 'rgba8', options.longEdge ?? null, options.applyGeometry ?? true);
+    const response = await fetch(url, {
       method: 'POST',
       // `text/plain` keeps the request a CORS "simple request" (no preflight).
       headers: { 'Content-Type': 'text/plain' },

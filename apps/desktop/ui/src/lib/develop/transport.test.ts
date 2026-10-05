@@ -92,6 +92,14 @@ describe('scheme transport', () => {
     fetchMock.mockResolvedValue(new Response(new ArrayBuffer(4), { status: 200 }));
     await schemeTransport.render(7, {}, { longEdge: 1280 });
     expect(fetchMock.mock.calls[1]?.[0]).toMatch(/\/7\?format=rgba8&long=1280$/);
+
+    // The geometry switch: `geometry=0` only when it is off.
+    fetchMock.mockResolvedValue(new Response(new ArrayBuffer(4), { status: 200 }));
+    await schemeTransport.render(7, {}, { longEdge: 640, applyGeometry: false });
+    expect(fetchMock.mock.calls[2]?.[0]).toMatch(/\/7\?format=rgba8&long=640&geometry=0$/);
+    fetchMock.mockResolvedValue(new Response(new ArrayBuffer(4), { status: 200 }));
+    await schemeTransport.render(7, {}, { applyGeometry: true });
+    expect(fetchMock.mock.calls[3]?.[0]).toMatch(/\/7\?format=rgba8$/);
   });
 
   it('turns an HTTP error into a command error', async () => {

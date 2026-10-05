@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_TARGET_LONG_EDGE, MIN_TARGET_LONG_EDGE, TARGET_LONG_EDGE_STEP, targetLongEdge } from './size';
+import {
+  MAX_TARGET_LONG_EDGE,
+  MIN_TARGET_LONG_EDGE,
+  TARGET_LONG_EDGE_STEP,
+  sameAspect,
+  targetLongEdge,
+} from './size';
 
 const landscape = { width: 2560, height: 1707 };
 
@@ -37,9 +43,32 @@ describe('targetLongEdge', () => {
     expect(targetLongEdge({ width: 9000, height: 9000 }, 2, huge)).toBe(MAX_TARGET_LONG_EDGE);
   });
 
+  it('uses the frame aspect ratio and the session limit for a crop', () => {
+    // A small portrait crop frame (300 x 600) of a landscape session in a
+    // tall box: the frame fills the box height, 1600 device px.
+    const crop = { width: 300, height: 600 };
+    expect(targetLongEdge({ width: 800, height: 800 }, 2, crop, 2560)).toBe(1664);
+    // The session aspect would give a smaller target (soft frame).
+    expect(targetLongEdge({ width: 400, height: 800 }, 2, landscape)).toBe(896);
+    expect(targetLongEdge({ width: 400, height: 800 }, 2, crop, 2560)).toBe(1664);
+    // The session long edge limits the target, not the frame size.
+    expect(targetLongEdge({ width: 3000, height: 3000 }, 2, crop, 2560)).toBe(2560);
+    // Without a limit: the long edge of the image.
+    expect(targetLongEdge({ width: 3000, height: 3000 }, 2, crop)).toBe(600);
+    expect(targetLongEdge({ width: 500, height: 500 }, 1, crop, 0)).toBeNull();
+  });
+
   it('returns null for an empty or invalid size', () => {
     expect(targetLongEdge({ width: 0, height: 500 }, 2, landscape)).toBeNull();
     expect(targetLongEdge({ width: 500, height: 500 }, Number.NaN, landscape)).toBeNull();
     expect(targetLongEdge({ width: 500, height: 500 }, 1, { width: 0, height: 0 })).toBeNull();
+  });
+});
+
+describe('sameAspect', () => {
+  it('ignores pixel rounding and detects real changes', () => {
+    expect(sameAspect({ width: 640, height: 427 }, { width: 1280, height: 853 })).toBe(true);
+    expect(sameAspect({ width: 640, height: 427 }, { width: 640, height: 480 })).toBe(false);
+    expect(sameAspect({ width: 0, height: 427 }, { width: 640, height: 427 })).toBe(false);
   });
 });
