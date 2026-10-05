@@ -26,8 +26,11 @@
 //!   the file, if it has one with a long edge of at least
 //!   [`THUMB_LONG_EDGE`] (see [`expose_raw::embedded_preview_min`]).
 //! - All other photos (and the fallback): a full decode, an area
-//!   downsample to [`WORK_LONG_EDGE`], the develop pipeline on the CPU,
-//!   and a Lanczos-3 resize to the thumbnail size.
+//!   downsample to [`WORK_LONG_EDGE`], the full develop pipeline on the
+//!   CPU (geometry, tone, sharpening), and a Lanczos-3 resize to the
+//!   thumbnail size. A crop gives the thumbnail the aspect ratio of the
+//!   crop, and a smaller thumbnail when the cropped image is smaller than
+//!   [`THUMB_LONG_EDGE`] (no enlargement).
 //!
 //! # Threads
 //!
@@ -66,7 +69,9 @@ pub const THUMB_JPEG_QUALITY: u8 = 85;
 /// The version of the thumbnail format. Increase it when the generation
 /// changes (size, quality, color processing), so that old files are made
 /// again.
-pub const THUMB_FORMAT_VERSION: u32 = 1;
+///
+/// Version 2: thumbnails apply geometry (crop) and sharpening.
+pub const THUMB_FORMAT_VERSION: u32 = 2;
 
 /// The name of the thumbnail folder in the application cache folder.
 pub const THUMB_DIR_NAME: &str = "thumbnails";
@@ -315,6 +320,10 @@ pub fn render_thumbnail(
     let decoded = decode(&data)?;
     // Free the file data before the develop work.
     drop(data);
+    // The full decode gives the full-resolution original in display
+    // orientation (the embedded preview is used only for default settings,
+    // above). Thus its size is the original size for the pixel scale.
+    let original = (decoded.image.width(), decoded.image.height());
     let small = downsample_area(&decoded.image, WORK_LONG_EDGE)?;
     drop(decoded);
     // The decoders apply the as-shot white balance of RAW files, so the
@@ -323,9 +332,28 @@ pub fn render_thumbnail(
     let developed = if pipeline.is_identity() {
         small
     } else {
-        pipeline.render_cpu(&small)
+        let scale = pixel_scale((small.width(), small.height()), original);
+        // Geometry (crop) changes the output size and aspect ratio;
+        // `fit_thumbnail` accepts any size.
+        pipeline.develop_cpu_owned(small, scale)?
     };
     fit_thumbnail(&developed)
+}
+
+/// Returns the output pixels for each original pixel: `long edge of
+/// small / long edge of original`. The sharpening radius is in original
+/// pixels, so the develop pipeline needs this value.
+///
+/// A zero-size original gives a value that is not finite; the develop
+/// pipeline rejects it with an error (no silent fallback).
+fn pixel_scale(small: (u32, u32), original: (u32, u32)) -> f32 {
+    let ratio = f64::from(small.0.max(small.1)) / f64::from(original.0.max(original.1));
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the ratio of two u32 long edges is in the f32 range"
+    )]
+    let ratio = ratio as f32;
+    ratio
 }
 
 /// Decodes an embedded preview and applies the orientation of the file.
@@ -739,6 +767,35 @@ mod tests {
         write_png(&src, 40, 30);
         let image = render_thumbnail(&src, &DevelopSettings::default()).unwrap();
         assert_eq!((image.width(), image.height()), (40, 30));
+    }
+
+    #[test]
+    fn crop_changes_the_thumbnail_aspect_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("wide.png");
+        write_png(&src, 1200, 600);
+        let mut settings = DevelopSettings::default();
+        // The left half: a square crop.
+        settings.crop.rect.width = 0.5;
+        settings.sharpening.amount = 50.0;
+        let image = render_thumbnail(&src, &settings).unwrap();
+        assert_eq!(
+            (image.width(), image.height()),
+            (THUMB_LONG_EDGE, THUMB_LONG_EDGE)
+        );
+        // No geometry: the aspect ratio of the source.
+        let image = render_thumbnail(&src, &DevelopSettings::default()).unwrap();
+        assert_eq!((image.width(), image.height()), (THUMB_LONG_EDGE, 256));
+    }
+
+    #[test]
+    fn pixel_scale_is_the_long_edge_ratio() {
+        assert!((pixel_scale((1024, 683), (6000, 4000)) - 1024.0 / 6000.0).abs() < 1e-6);
+        // Portrait: the long edge is the height.
+        assert!((pixel_scale((683, 1024), (4000, 6000)) - 1024.0 / 6000.0).abs() < 1e-6);
+        assert!((pixel_scale((40, 30), (40, 30)) - 1.0).abs() < f32::EPSILON);
+        // A zero-size original gives a value that the pipeline rejects.
+        assert!(!pixel_scale((40, 30), (0, 0)).is_finite());
     }
 
     #[test]
