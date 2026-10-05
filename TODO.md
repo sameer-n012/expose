@@ -14,14 +14,16 @@ Operator checks in the real webview (2026-10-04): loupe view, Grid/Loupe keys, a
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **develop-panels** (S) — Tone curve done (PR #28). Open: Detail (sharpening) panel; crop/straighten tool (aspect presets, overlays; `applyGeometry: false` while dragging; `max_inscribed_rect` needs a shell command); histogram (needs a shell command). The pipeline side is done (PRs #24–#26, #29, #31).
-2. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
+1. [ ] **operator check** — in the real webview: Detail panel + histogram (PR #33), crop tool (PR #34: `R`, handles, presets, angle, flips, `Enter`/`Esc`, `O`, `X`). After the check: mark `FEATURES.md` sharpening, crop, straighten/flip.
+2. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI. Needs the open operator decision on the editor blend space.
 
 ### Follow-ups from merged work
 
 - [ ] **develop-ui-followups** (S) — the TS slider ranges in `ui/src/lib/develop/settings.ts` are copies of the Rust constants (add a test or generate them); the shell drops unknown settings fields (ADR 0009).
 
 - [ ] **geometry-followups** — after a strong crop the preview asks for a `longEdge` of the uncropped size, so the frame is enlarged and soft (ask for `longEdge / crop fraction`, may need a larger session); thumbnails crop after the 1024 px reduction (reduce less when a crop is set); `PreviewRenderer` still allocates its unused tone-only output image (change in `expose-develop`); `DevelopTargets` intermediates are full `rgba32float` (single-channel formats in `expose-gpu` would save memory).
+- [ ] **crop-followups** (S) — the `preview://` scheme transport (not the default) ignores `applyGeometry` (needs a query parameter in the Rust scheme handler); no zoom-out in crop mode at large angles (corners can clip at the box edge); no keyboard control of the crop handles; the fine grid shows only for a pointer drag on the angle slider; auto straighten (P2).
+- [ ] **develop-ui-followups-2** (S) — "Reset all" resets only the Basic values (not curve, detail, crop); histogram is computed from the 8-bit display frame (not the working data).
 - [ ] **export-followups** — copy metadata (see encode-followups); output sharpening, naming templates, presets (P2); the UI `Mod+Shift+E` does nothing while the dialog is open (by design, the dialog stops key events).
 - [ ] **bench-recheck** (operator, optional) — on a quiet machine: `?bench=transport&only=slider-ipc` and `&only=ipc-rgba8-bitmap` against the 2026-10-03 rows. PR #22 found no leak; the slow rows were most likely background load.
 - [ ] **preview-followups** — the slider simulation is limited by main-thread time (timer ticks), not the transport; one waiting slot per session in the engine if a prefetch supersedes a visible request; update the target size when the display pixel density changes; move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
@@ -44,6 +46,9 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **crop-tool** (PR #34) — Crop panel and crop mode (`R`; `Enter` keeps, `Esc` cancels; `O` overlays; `X` swaps orientation). Preview with `applyGeometry: false` and one CSS matrix for flip + rotation (tested against the backend mapping); 8 handles, move, aspect presets and lock; `maxInscribedRect`/`rectIsInside` ported to `lib/develop/cropGeometry.ts` with the Rust test cases. Not checked in the real webview yet.
+- [x] **detail-histogram** (PR #33) — Detail panel (amount, radius, detail, masking); RGB histogram of the displayed frame (UI-side, throttled 100 ms, subsampled, sqrt scale, clip indicators). Develop panel order: Histogram, Crop, Basic, Tone curve, Detail. Not checked in the real webview yet.
 
 - [x] **geometry-integration** (PR #31) — preview, thumbnails, and export run the full develop (crop, straighten, flip, sharpening). `preview_render` optional `applyGeometry` (default true); frame header size = real output size; display encoder rebuilt only on a size change. Thumbnail format version 2. Export develops at source resolution before the resize. ADR 0011.
 
