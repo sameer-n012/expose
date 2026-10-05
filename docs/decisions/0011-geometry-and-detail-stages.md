@@ -39,6 +39,15 @@ Full develop: **geometry → white balance and exposure → tone zones and contr
 - The 12 layouts (3 output formats x 4 input counts) are made when the context is made. The pipeline cache key is (kernel name, output format, input count).
 - Each call is one queue submit. The queue keeps the order, so a pass can read the output of the pass before it.
 
+### Pipeline API (PR #29)
+
+- `Pipeline::new` does not know the image size. Size-dependent parts are built per call: `geometry(w, h)`, `sharpener(pixel_scale)`, `output_size(w, h)`.
+- `develop_cpu` / `develop_gpu` run all stages. The old `apply_cpu`, `render_cpu`, and `render_gpu` run the tone stages only.
+- `is_identity()` is true only when no stage of any kind is active. `tone_is_identity()` is the per-pixel part.
+- `set_apply_geometry(false)` turns geometry off, so the crop tool can show the full image while the user drags.
+- GPU intermediates are `rgba32float` images (only the red channel is used for the luminance passes, because `expose-gpu` has no single-channel format). `DevelopTargets` makes them again only when a size changes.
+- Export sharpens at source resolution, before the resize (the radius is in source pixels).
+
 ## Consequences
 
 - The preview, thumbnail, and export paths must change to the full develop API to show crop and sharpening (task `geometry-integration`).
