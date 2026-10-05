@@ -9,7 +9,6 @@ Work tracker for Expose. `FEATURES.md` is the master feature list. This file tra
 develop-geometry-detail is split into tasks (2026-10-04, ADR 0011). Done: develop-geometry (#24), develop-sharpen (#25), gpu-multi-input (#26).
 
 - [ ] **develop-geometry-gpu** (O, `expose-develop`, agent running) — GPU kernels for geometry and the four sharpening passes; `Pipeline::develop_cpu`/`develop_gpu`, `DevelopTargets`, `PreviewRenderer::develop_full`.
-- [ ] **loupe-view** (S, `ui`, agent running) — see "Follow-ups" below.
 - Then: **geometry-integration** (O) — preview engine, thumbnails, and export use the full develop API (preview frames change size with the crop).
 
 ## Next (suggested order)
@@ -24,7 +23,6 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 - [ ] **develop-ui-followups** (S) — the TS slider ranges in `ui/src/lib/develop/settings.ts` are copies of the Rust constants (add a test or generate them); the shell drops unknown settings fields (ADR 0009).
 
-- [ ] **loupe-view** (S, `ui`, later) — the Library loupe (double-click on a grid cell) is still a gray placeholder with the file name and date (`ui/src/components/modules/LibraryView.svelte`). Show the photo with its develop settings through `PreviewCanvas` / `PreviewClient` (as in Develop).
 - [ ] **export-followups** — apply crop and sharpening (after develop-geometry-detail); copy metadata (see encode-followups); output sharpening, naming templates, presets (P2); the UI `Mod+Shift+E` does nothing while the dialog is open (by design, the dialog stops key events).
 - [ ] **bench-recheck** (operator, optional) — on a quiet machine: `?bench=transport&only=slider-ipc` and `&only=ipc-rgba8-bitmap` against the 2026-10-03 rows. PR #22 found no leak; the slow rows were most likely background load.
 - [ ] **preview-followups** — the slider simulation is limited by main-thread time (timer ticks), not the transport; one waiting slot per session in the engine if a prefetch supersedes a visible request; update the target size when the display pixel density changes; move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
@@ -47,6 +45,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **loupe-view** (PR #27) — the library loupe shows the photo with its saved develop settings (`LoupeStore`, `LoupeImage`): one preview session per loupe photo, late results dropped, session closed on step/leave/module change; thumbnail until the first frame; caption with name and date. Not checked in the real webview yet.
 
 - [x] **develop-geometry / develop-sharpen / gpu-multi-input** (PRs #24, #25, #26) — CPU references for flip/straighten/crop (`Geometry`, `max_inscribed_rect`, `rect_is_inside`) and for luminance sharpening (`Sharpener`, four passes); `GpuContext::run_kernel_multi` (1..=4 inputs, any output size). ADR 0011.
 
