@@ -4,7 +4,7 @@
   First it reads the catalog status. If the catalog is not available, the
   view shows the error instead of the grid. Else it shows the toolbar and
   the photo grid. A double-click on a cell opens the loupe view (one large
-  photo; a placeholder until the preview exists).
+  photo with its saved develop settings; see LoupeImage).
 -->
 <script lang="ts">
   import { formatCaptureTime } from '../../lib/library/dateFormat';
@@ -13,6 +13,7 @@
   import type { LibraryViewMode, ModuleStore } from '../../lib/stores/modules.svelte';
   import LibraryGrid from '../library/LibraryGrid.svelte';
   import LibraryToolbar from '../library/LibraryToolbar.svelte';
+  import LoupeImage from '../library/LoupeImage.svelte';
 
   interface Props {
     modules: ModuleStore;
@@ -59,14 +60,17 @@
       <LibraryGrid {library} onopen={(index) => openLoupeAt(modules, library, index)} />
     {:else}
       <div class="loupe" data-testid="library-loupe">
-        <div class="photo">
-          {#if loupePhoto === undefined}
-            No photo
-          {:else}
-            <div>{loupePhoto.fileName}</div>
-            <div class="date">{formatCaptureTime(loupePhoto.captureTimeMs)}</div>
-          {/if}
-        </div>
+        {#if loupePhoto === undefined}
+          <div class="empty">No photo</div>
+        {:else}
+          <div class="photo">
+            <LoupeImage photo={loupePhoto} />
+          </div>
+          <div class="caption">
+            <span>{loupePhoto.fileName}</span>
+            <span class="date">{formatCaptureTime(loupePhoto.captureTimeMs)}</span>
+          </div>
+        {/if}
       </div>
     {/if}
   {/if}
@@ -93,21 +97,26 @@
   }
   .loupe {
     flex: 1;
-    display: grid;
-    place-items: center;
-    padding: var(--space-6);
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-4);
+    gap: var(--space-2);
+    background: var(--color-bg-placeholder);
   }
   .photo {
-    width: min(100%, 900px);
-    aspect-ratio: 3 / 2;
-    display: grid;
-    place-content: center;
-    gap: var(--space-2);
-    text-align: center;
-    background: var(--color-bg-placeholder);
+    flex: 1;
+    min-height: 0;
+  }
+  .empty {
+    margin: auto;
     color: var(--color-text-muted);
   }
-  .date {
+  .caption {
+    display: flex;
+    gap: var(--space-3);
+    justify-content: center;
+    color: var(--color-text-muted);
     font-size: var(--font-size-sm);
   }
 </style>
