@@ -5,16 +5,21 @@
 <script lang="ts">
   import type { ColorLabel, Flag, SortField } from '../../lib/catalog';
   import type { LibraryStore } from '../../lib/stores/library.svelte';
+  import type { LibraryViewMode } from '../../lib/stores/modules.svelte';
 
   interface Props {
     library: LibraryStore;
-    /** Text of the view mode, for example "Grid". */
-    mode: string;
+    /** The view mode that shows now. */
+    mode: LibraryViewMode;
+    /** True if the loupe can open (a photo has the focus). */
+    canOpenLoupe: boolean;
+    /** Called when the user picks a view mode. */
+    onmode: (mode: LibraryViewMode) => void;
     /** Opens the export dialog. Without it, the Export button is not shown. */
     onexport?: (() => void) | undefined;
   }
 
-  let { library, mode, onexport }: Props = $props();
+  let { library, mode, canOpenLoupe, onmode, onexport }: Props = $props();
 
   let search = $state('');
 
@@ -174,7 +179,27 @@
   <span class="status" aria-live="polite">
     {library.total} photos{library.selection.ids.size > 0 ? `, ${library.selection.ids.size} selected` : ''}
   </span>
-  <span class="mode">{mode}</span>
+  <div class="modes" role="group" aria-label="View mode">
+    <button
+      type="button"
+      class="mode"
+      aria-pressed={mode === 'grid'}
+      title="Grid view (G)"
+      onclick={() => onmode('grid')}
+    >
+      Grid
+    </button>
+    <button
+      type="button"
+      class="mode"
+      aria-pressed={mode === 'loupe'}
+      title="Loupe view (L)"
+      disabled={!canOpenLoupe && mode !== 'loupe'}
+      onclick={() => onmode('loupe')}
+    >
+      Loupe
+    </button>
+  </div>
 </div>
 
 <style>
@@ -267,7 +292,30 @@
     margin-left: auto;
     color: var(--color-text-muted);
   }
+  .modes {
+    display: flex;
+  }
   .mode {
+    background: var(--color-bg-panel-raised);
+    border: 1px solid var(--color-border-strong);
+    padding: var(--space-2) var(--space-3);
+    font: inherit;
     color: var(--color-text-muted);
+    cursor: pointer;
+  }
+  .mode:first-child {
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  }
+  .mode:last-child {
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    border-left: none;
+  }
+  .mode[aria-pressed='true'] {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
+  }
+  .mode:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 </style>

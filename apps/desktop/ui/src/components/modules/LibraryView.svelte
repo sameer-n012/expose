@@ -9,7 +9,8 @@
 <script lang="ts">
   import { formatCaptureTime } from '../../lib/library/dateFormat';
   import type { LibraryStore } from '../../lib/stores/library.svelte';
-  import type { ModuleStore } from '../../lib/stores/modules.svelte';
+  import { canOpenLoupe, openLoupeAt, openLoupeOnSelection } from '../../lib/library/libraryNavigation';
+  import type { LibraryViewMode, ModuleStore } from '../../lib/stores/modules.svelte';
   import LibraryGrid from '../library/LibraryGrid.svelte';
   import LibraryToolbar from '../library/LibraryToolbar.svelte';
 
@@ -22,16 +23,19 @@
 
   let { modules, library, onexport }: Props = $props();
 
-  let loupeIndex = $state(0);
-  const loupePhoto = $derived(library.photoAt(loupeIndex));
+  // The loupe shows the photo at the focus of the selection (see libraryNavigation.ts).
+  const loupePhoto = $derived(library.focusIndex === null ? undefined : library.photoAt(library.focusIndex));
 
   $effect(() => {
     void library.init();
   });
 
-  function openLoupe(index: number): void {
-    loupeIndex = index;
-    modules.libraryView = 'loupe';
+  function setMode(mode: LibraryViewMode): void {
+    if (mode === 'grid') {
+      modules.libraryView = 'grid';
+    } else {
+      openLoupeOnSelection(modules, library);
+    }
   }
 </script>
 
@@ -44,9 +48,15 @@
       <span>{library.view.message}</span>
     </div>
   {:else}
-    <LibraryToolbar {library} {onexport} mode={modules.libraryView === 'grid' ? 'Grid' : 'Loupe'} />
+    <LibraryToolbar
+      {library}
+      {onexport}
+      mode={modules.libraryView}
+      canOpenLoupe={canOpenLoupe(library)}
+      onmode={setMode}
+    />
     {#if modules.libraryView === 'grid'}
-      <LibraryGrid {library} onopen={openLoupe} />
+      <LibraryGrid {library} onopen={(index) => openLoupeAt(modules, library, index)} />
     {:else}
       <div class="loupe" data-testid="library-loupe">
         <div class="photo">

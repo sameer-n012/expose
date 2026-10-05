@@ -5,6 +5,7 @@
  */
 import { registerAppActions } from './appActions';
 import { registerLibraryActions } from './library/libraryActions';
+import { loupeAwareCommands, registerLibraryNavigation } from './library/libraryNavigation';
 import type { Platform } from './shortcuts/keys';
 import { ShortcutRegistry } from './shortcuts/registry';
 import { LayoutStore } from './stores/layout.svelte';
@@ -37,7 +38,17 @@ export function createAppState({ platform, toasts }: AppStateOptions): AppState 
   const removeAppActions = registerAppActions(registry, { modules, layout });
   let removeLibraryActions: () => void;
   try {
-    removeLibraryActions = registerLibraryActions(registry, library.commands);
+    const removeCommands = registerLibraryActions(registry, loupeAwareCommands(modules, library, library.commands));
+    try {
+      const removeNavigation = registerLibraryNavigation(registry, modules, library);
+      removeLibraryActions = () => {
+        removeNavigation();
+        removeCommands();
+      };
+    } catch (error: unknown) {
+      removeCommands();
+      throw error;
+    }
   } catch (error: unknown) {
     removeAppActions();
     throw error;
