@@ -1,11 +1,13 @@
 //! GPU tests. Each test skips (prints a message and passes) when the machine
 //! has no GPU adapter, so that CI without a GPU still passes.
 
-// Test helpers panic on failure, and test indices are small.
+// Test helpers panic on failure, and test indices are small (and clamped to
+// be non-negative before a cast to `usize`).
 #![allow(
     clippy::expect_used,
     clippy::cast_precision_loss,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
 )]
 
 use expose_gpu::{GpuContext, GpuContextOptions, GpuError, GpuImage, ImageFormat, Kernel, kernels};
@@ -384,4 +386,243 @@ fn tall_image_uses_several_read_back_strips() {
     })
     .expect("round trip failed");
     assert!(back == pixels, "strip round trip changed data");
+}
+
+/// Returns pixel `(x, y)` of an RGBA image, with the coordinates clamped to
+/// the image (the edge rule of the built-in crop and downsample kernels).
+fn clamped_pixel(pixels: &[f32], width: u32, height: u32, x: i64, y: i64) -> [f32; 4] {
+    let x = x.clamp(0, i64::from(width) - 1) as usize;
+    let y = y.clamp(0, i64::from(height) - 1) as usize;
+    let start = (y * width as usize + x) * 4;
+    [
+        pixels[start],
+        pixels[start + 1],
+        pixels[start + 2],
+        pixels[start + 3],
+    ]
+}
+
+/// CPU reference of `kernels::CROP_COPY`.
+fn cpu_crop(pixels: &[f32], out_width: u32, out_height: u32, offset: [i32; 2]) -> Vec<f32> {
+    (0..out_height)
+        .flat_map(|y| (0..out_width).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            clamped_pixel(
+                pixels,
+                WIDTH,
+                HEIGHT,
+                i64::from(x) + i64::from(offset[0]),
+                i64::from(y) + i64::from(offset[1]),
+            )
+        })
+        .collect()
+}
+
+/// Runs `kernel` with `inputs` (all `WIDTH` x `HEIGHT`, `Rgba32Float`) and
+/// an `Rgba32Float` output of `out_width` x `out_height`.
+fn run_multi(
+    ctx: &GpuContext,
+    kernel: &Kernel,
+    params: &impl bytemuck::Pod,
+    inputs: &[&[f32]],
+    out_width: u32,
+    out_height: u32,
+) -> Result<Vec<f32>, GpuError> {
+    pollster::block_on(async {
+        let mut images = Vec::with_capacity(inputs.len());
+        for pixels in inputs {
+            images.push(
+                GpuImage::from_rgba_f32(ctx, WIDTH, HEIGHT, ImageFormat::Rgba32Float, pixels)
+                    .await?,
+            );
+        }
+        let refs: Vec<&GpuImage> = images.iter().collect();
+        let output = GpuImage::new(ctx, out_width, out_height, ImageFormat::Rgba32Float).await?;
+        ctx.run_kernel_multi(kernel, params, &refs, &output).await?;
+        output.read_rgba_f32(ctx).await
+    })
+}
+
+#[test]
+fn crop_kernel_writes_smaller_output_like_cpu_crop() {
+    let Some(ctx) = context() else { return };
+    let pixels = test_pixels(WIDTH, HEIGHT);
+    // Inside the input, with an odd output size (partial workgroups).
+    let params = kernels::OffsetParams::new(5, 7);
+    let result =
+        run_multi(&ctx, &kernels::CROP_COPY, &params, &[&pixels], 20, 11).expect("crop failed");
+    assert_eq!(result, cpu_crop(&pixels, 20, 11, [5, 7]));
+
+    // Partly outside the input: the edge pixels repeat.
+    let params = kernels::OffsetParams::new(30, -3);
+    let result =
+        run_multi(&ctx, &kernels::CROP_COPY, &params, &[&pixels], 10, 9).expect("crop failed");
+    assert_eq!(result, cpu_crop(&pixels, 10, 9, [30, -3]));
+}
+
+#[test]
+fn run_kernel_rejects_crop_size_but_multi_accepts_it() {
+    let Some(ctx) = context() else { return };
+    pollster::block_on(async {
+        let input = GpuImage::new(&ctx, WIDTH, HEIGHT, ImageFormat::Rgba32Float)
+            .await
+            .expect("image");
+        let output = GpuImage::new(&ctx, 8, 8, ImageFormat::Rgba32Float)
+            .await
+            .expect("image");
+        let params = kernels::OffsetParams::new(1, 1);
+        let error = ctx
+            .run_kernel(&kernels::CROP_COPY, &params, &input, &output)
+            .await
+            .expect_err("run_kernel must keep the same-size rule");
+        assert!(matches!(error, GpuError::SizeMismatch { .. }), "{error}");
+        ctx.run_kernel_multi(&kernels::CROP_COPY, &params, &[&input], &output)
+            .await
+            .expect("different sizes are valid for run_kernel_multi");
+    });
+}
+
+#[test]
+fn add2_kernel_sums_two_inputs() {
+    let Some(ctx) = context() else { return };
+    let a = test_pixels(WIDTH, HEIGHT);
+    let b: Vec<f32> = a.iter().rev().map(|v| v * 0.5 - 1.0).collect();
+    let expected: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
+    let result =
+        run_multi(&ctx, &kernels::ADD2, &(), &[&a, &b], WIDTH, HEIGHT).expect("add failed");
+    assert_close(&result, &expected, 1e-6);
+}
+
+#[test]
+fn one_image_can_be_two_inputs() {
+    let Some(ctx) = context() else { return };
+    let pixels = test_pixels(WIDTH, HEIGHT);
+    let result = pollster::block_on(async {
+        let input =
+            GpuImage::from_rgba_f32(&ctx, WIDTH, HEIGHT, ImageFormat::Rgba32Float, &pixels).await?;
+        let output = GpuImage::new(&ctx, WIDTH, HEIGHT, ImageFormat::Rgba32Float).await?;
+        ctx.run_kernel_multi(&kernels::ADD2, &(), &[&input, &input], &output)
+            .await?;
+        output.read_rgba_f32(&ctx).await
+    })
+    .expect("add failed");
+    let expected: Vec<f32> = pixels.iter().map(|v| v * 2.0).collect();
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn box_downsample_matches_cpu_mean() {
+    let Some(ctx) = context() else { return };
+    let pixels = test_pixels(WIDTH, HEIGHT);
+    let (out_width, out_height) = (WIDTH.div_ceil(2), HEIGHT.div_ceil(2));
+    let result = run_multi(
+        &ctx,
+        &kernels::BOX_DOWNSAMPLE_2X,
+        &(),
+        &[&pixels],
+        out_width,
+        out_height,
+    )
+    .expect("downsample failed");
+    let expected: Vec<f32> = (0..out_height)
+        .flat_map(|y| (0..out_width).map(move |x| (i64::from(x) * 2, i64::from(y) * 2)))
+        .flat_map(|(x, y)| {
+            let mut sum = [0.0_f32; 4];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let p = clamped_pixel(&pixels, WIDTH, HEIGHT, x + dx, y + dy);
+                for (s, v) in sum.iter_mut().zip(p) {
+                    *s += v;
+                }
+            }
+            sum.map(|s| s * 0.25)
+        })
+        .collect();
+    assert_close(&result, &expected, 1e-6);
+}
+
+#[test]
+fn multi_input_errors() {
+    let Some(ctx) = context() else { return };
+    pollster::block_on(async {
+        let a = GpuImage::new(&ctx, WIDTH, HEIGHT, ImageFormat::Rgba32Float)
+            .await
+            .expect("image");
+        let out = GpuImage::new(&ctx, WIDTH, HEIGHT, ImageFormat::Rgba32Float)
+            .await
+            .expect("image");
+
+        let error = ctx
+            .run_kernel_multi(&kernels::ADD2, &(), &[&a, &out], &out)
+            .await
+            .expect_err("output as second input must fail");
+        assert!(matches!(error, GpuError::SameImage), "{error}");
+
+        let error = ctx
+            .run_kernel_multi(&kernels::COPY, &(), &[], &out)
+            .await
+            .expect_err("zero inputs must fail");
+        assert!(
+            matches!(error, GpuError::InputCount { count: 0, max: 4 }),
+            "{error}"
+        );
+
+        let error = ctx
+            .run_kernel_multi(&kernels::COPY, &(), &[&a; 5], &out)
+            .await
+            .expect_err("five inputs must fail");
+        assert!(
+            matches!(error, GpuError::InputCount { count: 5, max: 4 }),
+            "{error}"
+        );
+        assert_eq!(ctx.cached_pipeline_count(), 0);
+
+        // ADD2 declares binding 3, but a one-input layout does not have it.
+        let error = ctx
+            .run_kernel_multi(&kernels::ADD2, &(), &[&a], &out)
+            .await
+            .expect_err("too few inputs for the shader must fail");
+        assert!(matches!(error, GpuError::Validation(_)), "{error}");
+        assert_eq!(
+            ctx.cached_pipeline_count(),
+            0,
+            "a failed pipeline is cached"
+        );
+
+        // The context stays usable after the validation error.
+        ctx.run_kernel_multi(&kernels::ADD2, &(), &[&a, &a], &out)
+            .await
+            .expect("valid run after an error");
+    });
+}
+
+#[test]
+fn pipeline_cache_is_keyed_by_input_count() {
+    let Some(ctx) = context() else { return };
+    let pixels = test_pixels(WIDTH, HEIGHT);
+    let run_count = |kernel: &Kernel, count: usize, format: ImageFormat| {
+        pollster::block_on(async {
+            let input = GpuImage::from_rgba_f32(&ctx, WIDTH, HEIGHT, format, &pixels).await?;
+            let output = GpuImage::new(&ctx, WIDTH, HEIGHT, format).await?;
+            let inputs = vec![&input; count];
+            ctx.run_kernel_multi(kernel, &(), &inputs, &output).await
+        })
+        .expect("kernel run failed");
+    };
+
+    run(&ctx, &kernels::COPY, &(), &pixels, ImageFormat::Rgba32Float);
+    assert_eq!(ctx.cached_pipeline_count(), 1);
+    // `run_kernel` and a one-input `run_kernel_multi` share one pipeline.
+    run_count(&kernels::COPY, 1, ImageFormat::Rgba32Float);
+    assert_eq!(ctx.cached_pipeline_count(), 1);
+    // A shader can ignore extra inputs; the pipeline is a new cache entry.
+    run_count(&kernels::COPY, 2, ImageFormat::Rgba32Float);
+    assert_eq!(ctx.cached_pipeline_count(), 2);
+    run_count(&kernels::ADD2, 2, ImageFormat::Rgba32Float);
+    assert_eq!(ctx.cached_pipeline_count(), 3);
+    run_count(&kernels::ADD2, 2, ImageFormat::Rgba32Float);
+    assert_eq!(ctx.cached_pipeline_count(), 3);
+    run_count(&kernels::ADD2, 4, ImageFormat::Rgba32Float);
+    assert_eq!(ctx.cached_pipeline_count(), 4);
+    run_count(&kernels::ADD2, 2, ImageFormat::Rgba16Float);
+    assert_eq!(ctx.cached_pipeline_count(), 5);
 }
