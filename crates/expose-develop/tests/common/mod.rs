@@ -5,7 +5,8 @@
 
 use expose_core::buffer::{Rgba, WorkingImage};
 use expose_core::develop::{
-    BasicTone, CurvePoint, DevelopSettings, ToneCurve, WhiteBalance, WhiteBalanceMode,
+    BasicTone, Crop, CurvePoint, DevelopSettings, NormalizedRect, Sharpening, ToneCurve,
+    WhiteBalance, WhiteBalanceMode,
 };
 
 /// An odd size: partial GPU workgroups at the right and bottom edges.
@@ -33,6 +34,80 @@ pub fn test_image() -> WorkingImage {
         })
         .collect();
     WorkingImage::from_pixels(WIDTH, HEIGHT, pixels).expect("valid test image")
+}
+
+/// A smooth test image (no hard steps between neighbors) of the given size.
+/// Rotation tests use it, because a hard step makes the result sensitive to
+/// float rounding of the sample position.
+pub fn smooth_image(width: u32, height: u32) -> WorkingImage {
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let (u, v) = (x as f32 / width as f32, y as f32 / height as f32);
+            pixels.push([
+                0.05 + 0.8 * u * u,
+                0.1 + 0.5 * (6.0 * u + 3.0 * v).sin().abs(),
+                0.9 - 0.7 * v,
+                1.0,
+            ]);
+        }
+    }
+    WorkingImage::from_pixels(width, height, pixels).expect("valid smooth image")
+}
+
+/// A test image with sharp edges for the sharpening stage: a checker of
+/// 4 x 4 blocks with a color tint.
+pub fn edge_image(width: u32, height: u32) -> WorkingImage {
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let on = ((x / 4) + (y / 4)) % 2 == 0;
+            let v = if on { 0.6 } else { 0.08 };
+            pixels.push([v, v * 0.8, v * 0.5 + 0.01, 1.0]);
+        }
+    }
+    WorkingImage::from_pixels(width, height, pixels).expect("valid edge image")
+}
+
+/// A crop with the given rect, angle, and flips.
+pub fn crop(rect: NormalizedRect, angle: f32, flip_h: bool, flip_v: bool) -> Crop {
+    Crop {
+        rect,
+        angle,
+        flip_horizontal: flip_h,
+        flip_vertical: flip_v,
+        ..Crop::default()
+    }
+}
+
+/// A rect in the frame (normalized).
+pub fn rect(left: f32, top: f32, width: f32, height: f32) -> NormalizedRect {
+    NormalizedRect {
+        left,
+        top,
+        width,
+        height,
+    }
+}
+
+/// Sharpening settings with the given amount and masking.
+pub fn sharpening(amount: f32, masking: f32) -> Sharpening {
+    Sharpening {
+        amount,
+        radius: 1.2,
+        detail: 40.0,
+        masking,
+    }
+}
+
+/// Settings that use every stage group: a rotated crop with a flip, white
+/// balance, tone, a tone curve, and sharpening.
+pub fn all_stages_settings() -> DevelopSettings {
+    let mut s = settings_set()[1].clone();
+    s.tone_curve = settings_set()[2].tone_curve.clone();
+    s.crop = crop(rect(0.1, 0.15, 0.75, 0.7), 4.0, true, false);
+    s.sharpening = sharpening(120.0, 20.0);
+    s
 }
 
 /// A set of non-trivial settings that use every stage.

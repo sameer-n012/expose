@@ -111,6 +111,8 @@ fn stage_order_is_fixed_and_identity_stages_are_skipped() {
             Stage::ToneZones { .. } => "zones",
             Stage::Contrast { .. } => "contrast",
             Stage::ToneCurve { .. } => "curve",
+            Stage::Geometry { .. } => "geometry",
+            Stage::Sharpen { .. } => "sharpen",
         })
         .collect();
     assert_eq!(kinds, ["wb", "exposure", "zones", "contrast"]);

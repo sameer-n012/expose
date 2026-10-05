@@ -30,6 +30,14 @@ pub enum DevelopError {
     /// rule.
     #[error("internal error: {0}")]
     Internal(&'static str),
+    /// An image does not have the size that the operation needs.
+    #[error("the image size is {actual:?}, but {expected:?} is necessary")]
+    SizeMismatch {
+        /// The necessary size `(width, height)`.
+        expected: (u32, u32),
+        /// The size `(width, height)` of the image.
+        actual: (u32, u32),
+    },
     /// The GPU result does not have the length of the image.
     #[error("the GPU returned {actual} samples, but the image has {expected}")]
     ReadbackLength {
