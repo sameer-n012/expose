@@ -143,7 +143,7 @@
       shortcuts={moduleShortcuts}
       visible={layout.visible}
       {version}
-      onswitch={(id) => modules.switchTo(id)}
+      onswitch={(id) => modules.activateTab(id)}
       ontoggle={(region) => layout.toggle(region)}
     />
   </div>

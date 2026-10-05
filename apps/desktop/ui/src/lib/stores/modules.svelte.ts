@@ -34,6 +34,18 @@ export class ModuleStore {
     this.active = id;
   }
 
+  /**
+   * Handles a click on a module tab. A click on the Library tab while the
+   * Library loupe shows returns to the grid. Else it switches the module.
+   */
+  activateTab(id: ModuleId): void {
+    if (id === 'library' && this.active === 'library' && this.libraryView === 'loupe') {
+      this.libraryView = 'grid';
+      return;
+    }
+    this.switchTo(id);
+  }
+
   /** Opens the Library module in grid view. */
   showLibraryGrid(): void {
     this.libraryView = 'grid';
