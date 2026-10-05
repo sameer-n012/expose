@@ -2,7 +2,7 @@
 
 Work tracker for Expose. `FEATURES.md` is the master feature list. This file tracks the work in progress and partial work.
 
-`FEATURES.md` items marked `[x]` (2026-10-04, after the operator check in the real webview): 2.2 exposure, contrast, highlights/shadows/whites/blacks; 2.2 point tone curve; sharpening; crop with presets and overlays; straighten/rotate/flip; histogram with clipping warnings (P2); 5.1 the four P1 export items. White balance stays open (presets in the UI and the eyedropper are missing); automatic tone stays open (no UI yet). Loupe view stays open (no 1:1 zoom).
+`FEATURES.md` items marked `[x]` (2026-10-04, after the operator check in the real webview): 2.2 exposure, contrast, highlights/shadows/whites/blacks; 2.2 point tone curve; sharpening; crop with presets and overlays; straighten/rotate/flip; histogram with clipping warnings (P2); reset (all settings or one panel); 5.1 the four P1 export items. White balance stays open (presets in the UI and the eyedropper are missing); automatic tone stays open (no UI yet). Loupe view stays open (no 1:1 zoom).
 
 Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys, Tone curve panel, Detail panel, histogram, crop tool, Reset all, sharp cropped previews, and crop polish work. All items in "Done" are checked.
 
@@ -24,7 +24,7 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - [ ] **geometry-followups** — crops tighter than about 60 % of the long edge hit the 4096 px session base and show slightly enlarged; `PreviewRenderer` still allocates its unused tone-only output image (change in `expose-develop`); `DevelopTargets` intermediates are full `rgba32float` (single-channel formats in `expose-gpu` would save memory); auto straighten (P2).
 - [ ] **develop-ui-followups-2** (S) — histogram is computed from the 8-bit display frame (not the working data).
 - [ ] **export-followups** — copy metadata (see encode-followups); output sharpening, naming templates, presets (P2); the UI `Mod+Shift+E` does nothing while the dialog is open (by design, the dialog stops key events).
-- [ ] **bench-recheck** (operator, optional) — on a quiet machine: `?bench=transport&only=slider-ipc` and `&only=ipc-rgba8-bitmap` against the 2026-10-03 rows. PR #22 found no leak; the slow rows were most likely background load.
+- [ ] **bench-recheck** (operator, optional) — the numbers are from before the geometry/sharpening stages (PR #29) and the 4096 px session source (PR #38); measure again. On a quiet machine: `?bench=transport&only=slider-ipc` and `&only=ipc-rgba8-bitmap` against the 2026-10-03 rows. PR #22 found no leak; the slow rows were most likely background load.
 - [ ] **preview-followups** — the slider simulation is limited by main-thread time (timer ticks), not the transport; one waiting slot per session in the engine if a prefetch supersedes a visible request; update the target size when the display pixel density changes; move the full-size downsample at session open off the render thread (it stops other sessions for about 0.1 s); check `invoke` binary responses on Linux/Windows (message IPC fallback gives a number array); native GPU surface if the measurement is below 30 fps (P3).
 - [ ] **core-followups** (S) — `Rect::translated` is not used yet (editor `add_offset` works on tuples); the Planckian locus also has a piece boundary at 2222 K (y fit) with a small kink.
 - [ ] **gpu-api** (O) — GPU downsample in the preview (multi-input and any-size kernels exist since PR #26), storage buffers, single-channel formats, parameter buffer reuse, double-buffered read-back, `WorkingImage` at the API boundary, render graph.
@@ -93,4 +93,4 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 ## Known issues
 
 - An editor tool can put a `rustfmt` for a different CPU earlier in `PATH`. `scripts/check.sh` sets `RUSTFMT` to the toolchain binary. For manual runs, use `RUSTFMT="$(rustup which rustfmt)" cargo fmt --all`.
-- The Tauri app runs in the real webview on macOS (operator, 2026-10-03): thumbnails show, and the transport benchmark runs. The folder picker and the full layout are not checked in detail yet.
+- The Tauri app runs in the real webview on macOS (operator, 2026-10-03 to 2026-10-05): library, loupe, Develop panels, crop tool, and export are checked. The preview frame rate is not measured again since the geometry stages (PR #29); see bench-recheck.

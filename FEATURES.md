@@ -152,7 +152,7 @@ This file is the master list of features for Expose.
 ### 2.9 Workflow tools
 - [ ] **P1** Undo/redo history with named steps
 - [ ] **P1** Before/after view (split, side by side, toggle)
-- [ ] **P1** Reset (all settings, or one panel)
+- [x] **P1** Reset (all settings, or one panel)
 - [ ] **P2** Snapshots (save a named edit state)
 - [ ] **P2** Copy/paste settings with a choice of which settings
 - [ ] **P2** Synchronize settings across many selected photos

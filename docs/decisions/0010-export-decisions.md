@@ -42,5 +42,5 @@ PRs #20 (shell) and #21 (UI) added photo export: JPEG, PNG, and TIFF, size optio
 
 ## Consequences
 
-- Export does not apply crop or sharpening yet, because the develop pipeline has only per-pixel stages. See `TODO.md` → export-followups.
+- Export does not apply crop or sharpening yet, because the develop pipeline has only per-pixel stages. **Update (PR #31, 2026-10-04):** export runs the full develop (crop, straighten, flip, sharpening) at source resolution before the resize. See ADR 0011.
 - Export does not copy metadata (EXIF/XMP/IPTC) yet. See encode-followups.
