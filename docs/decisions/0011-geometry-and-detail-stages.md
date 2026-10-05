@@ -58,5 +58,6 @@ Full develop: **geometry → white balance and exposure → tone zones and contr
 ## Consequences
 
 - The preview frame size changes when the crop changes. The UI presenter fits each frame again, so it accepts frames of a new size.
-- After a strong crop the preview frame is small and shown enlarged. A later fix can ask for a larger `longEdge`.
+- PR #38 keeps cropped previews sharp: `longEdge` is the frame size, and the engine enlarges the develop input by the crop factor up to a 4096 px session source (ADR 0008 update). Thumbnails of cropped photos develop on up to 4096 px (thumbnail format version 3). Crops tighter than about 60 % of the long edge still show slightly enlarged.
+- The crop UI (PRs #34, #39) shows the full image with one CSS matrix (flip, rotate, zoom-out to fit) and keeps the rect inside the rotated image with TS ports of `max_inscribed_rect` and `rect_is_inside`.
 - Each GPU pass still makes a new parameter buffer and bind group. Buffer reuse is in the `gpu-api` backlog.
