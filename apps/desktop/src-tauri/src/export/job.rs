@@ -252,7 +252,12 @@ fn export_photo(
     let pipeline = Pipeline::new(&settings, &SourceInfo::RENDERED)
         .map_err(|error| format!("cannot apply the develop settings: {error}"))?;
     if !pipeline.is_identity() {
-        pipeline.apply_cpu(&mut image);
+        // All stages at source resolution (pixel scale 1): geometry first,
+        // sharpening last, before the resize. The output size below thus
+        // uses the cropped size.
+        image = pipeline
+            .develop_cpu_owned(image, 1.0)
+            .map_err(|error| format!("cannot develop the image: {error}"))?;
     }
 
     let (width, height) = output_size(image.width(), image.height(), plan.size, plan.allow_upscale)
