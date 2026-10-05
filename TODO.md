@@ -6,13 +6,19 @@ Work tracker for Expose. `FEATURES.md` is the master feature list. This file tra
 
 ## In progress
 
-- (none — all agent branches are merged)
+develop-geometry-detail is split into these tasks (2026-10-04). The first three run in parallel:
+
+- [ ] **develop-geometry** (O, `expose-develop/src/geometry.rs`) — CPU reference: flip, straighten, crop; output size; inscribed-crop helper.
+- [ ] **develop-sharpen** (O, `expose-develop/src/sharpen.rs`) — CPU reference: luminance unsharp mask with radius, detail, masking.
+- [ ] **gpu-multi-input** (O, `expose-gpu`) — kernels with 1..=4 inputs and an output of a different size.
+- [ ] **library-navigation** (S, `ui`) — see "Follow-ups" below.
+- Then: **develop-geometry-gpu** (O) — GPU kernels for geometry and sharpening, wired into `Pipeline` (needs the three tasks above); then **geometry-integration** — preview, thumbnails, and export use the new stages.
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **develop-geometry-detail** (O, wait for the operator go-ahead) — crop/straighten and sharpening stages in `expose-develop` (CPU reference + GPU), used by preview, thumbnails, and export. Needs neighborhood and size-changing kernels (see gpu-api).
+1. [ ] **develop-geometry-detail** (O) — crop/straighten and sharpening stages in `expose-develop` (CPU reference + GPU), used by preview, thumbnails, and export. Needs neighborhood and size-changing kernels (see gpu-api).
 2. [ ] **develop-panels** (S) — Tone curve, Detail (sharpening), and crop/straighten UI for the existing `DevelopSettings` fields; histogram (needs a shell command). The crop and Detail UI need item 1.
 3. [ ] **editor-gpu / editor-ui** — later: GPU compositor that matches the CPU reference, then the editor canvas UI.
 

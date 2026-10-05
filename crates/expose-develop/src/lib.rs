@@ -80,9 +80,15 @@ pub mod auto_tone;
 pub mod curve;
 mod display;
 mod error;
+#[allow(
+    clippy::many_single_char_names,
+    reason = "geometry math uses the usual one-letter names"
+)]
+pub mod geometry;
 mod gpu;
 mod pipeline;
 pub mod preview;
+pub mod sharpen;
 #[allow(
     clippy::many_single_char_names,
     reason = "colorimetry and Newton steps use the usual one-letter names"
