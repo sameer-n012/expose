@@ -6,12 +6,11 @@ Work tracker for Expose. `FEATURES.md` is the master feature list. This file tra
 
 ## In progress
 
-develop-geometry-detail is split into these tasks (2026-10-04). The first three run in parallel:
+develop-geometry-detail is split into tasks (2026-10-04, ADR 0011). Done: develop-geometry (#24), develop-sharpen (#25), gpu-multi-input (#26).
 
-- [ ] **develop-geometry** (O, `expose-develop/src/geometry.rs`) — CPU reference: flip, straighten, crop; output size; inscribed-crop helper.
-- [ ] **develop-sharpen** (O, `expose-develop/src/sharpen.rs`) — CPU reference: luminance unsharp mask with radius, detail, masking.
-- [ ] **gpu-multi-input** (O, `expose-gpu`) — kernels with 1..=4 inputs and an output of a different size.
-- Then: **develop-geometry-gpu** (O) — GPU kernels for geometry and sharpening, wired into `Pipeline` (needs the three tasks above); then **geometry-integration** — preview, thumbnails, and export use the new stages.
+- [ ] **develop-geometry-gpu** (O, `expose-develop`, agent running) — GPU kernels for geometry and the four sharpening passes; `Pipeline::develop_cpu`/`develop_gpu`, `DevelopTargets`, `PreviewRenderer::develop_full`.
+- [ ] **loupe-view** (S, `ui`, agent running) — see "Follow-ups" below.
+- Then: **geometry-integration** (O) — preview engine, thumbnails, and export use the full develop API (preview frames change size with the crop).
 
 ## Next (suggested order)
 
@@ -48,6 +47,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **develop-geometry / develop-sharpen / gpu-multi-input** (PRs #24, #25, #26) — CPU references for flip/straighten/crop (`Geometry`, `max_inscribed_rect`, `rect_is_inside`) and for luminance sharpening (`Sharpener`, four passes); `GpuContext::run_kernel_multi` (1..=4 inputs, any output size). ADR 0011.
 
 - [x] **library-navigation** (PR #23) — Grid/Loupe toggle in the library toolbar; `L` opens the loupe on the selected photo (`E` is the Editor module); `G` and `Esc` return to the grid; a click on the Library tab in the loupe returns to the grid; ArrowLeft/ArrowRight step in the loupe (no wrap). The selection follows the loupe photo, so rating/flag/label keys act on it. Not checked in the real webview yet.
 - [x] **bench-regression** (PR #22) — no leak in the preview path; release tests added (bitmaps closed, late responses dropped before parse). Benchmark options `only=`, `reverse=1`, `settle=<ms>`. The 12 ms shell time at `@1280` was one GPU view rebuild in the mean; slider candidates now render a warm-up frame.

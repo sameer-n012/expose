@@ -1,0 +1,46 @@
+# 0011 — Geometry and detail stages
+
+- **Status:** Accepted
+- **Date:** 2026-10-04
+- **Decided by:** Claude (implementation details; the operator approved the start of the work)
+
+## Context
+
+The develop pipeline had only per-pixel stages (ADR 0005, 0009). Crop, straighten, flip, and sharpening settings existed in `DevelopSettings`, but no stage applied them. Export and thumbnails ignored them. The work is split into tasks: CPU geometry (PR #24), CPU sharpening (PR #25), GPU kernels with several inputs and any output size (PR #26), the pipeline connection with GPU kernels, and the shell connection.
+
+## Decisions
+
+### Stage order
+
+Full develop: **geometry → white balance and exposure → tone zones and contrast → tone curve → sharpening → output encode**.
+
+- Geometry is first. It works on linear source data, and a crop makes the image smaller before the other stages.
+- Sharpening is last. It works on the toned image, so the halo strength does not change when the tone sliders change.
+
+### Geometry (`expose-develop/src/geometry.rs`)
+
+- Order: flip, then rotate by `angle` (degrees, clockwise on the screen) about the image center, then crop.
+- The crop frame is a `W x H` frame with the same center as the image. `Crop::rect` is normalized to this frame. The output size is `round(rect.width * W) x round(rect.height * H)`, at least 1 x 1.
+- The per-pixel mapping is one affine transform (output pixel center to source position). It is computed in `f64` and stored as `f32`, so the GPU kernel uses the same numbers.
+- Angle 0: integer copy (crop and flips are bit-exact). Other angles: bicubic Catmull-Rom (`a = -0.5`) with clamp-to-edge taps.
+- A sample point outside the source gives transparent black. The pipeline does not change the rect. The crop tool must keep the rect inside the rotated image with `max_inscribed_rect` and `rect_is_inside`.
+
+### Sharpening (`expose-develop/src/sharpen.rs`)
+
+- An unsharp mask on luminance only, so it adds no color fringes. RGB is scaled by `Y' / Y`.
+- The detail is found in the sRGB-encoded luminance, an approximately perceptual scale.
+- Four passes, one GPU kernel each: encode, horizontal blur, vertical blur, combine.
+- The blur sigma is `radius * pixel_scale`. `pixel_scale` is the number of output pixels for each full-resolution source pixel, so a downscaled preview looks like the full-size result. A sigma below 0.25 makes the stage a no-op. The sigma is limited to 5 (16 weights per side).
+- `detail` limits large differences softly (halo suppression). `masking` makes an edge mask from the gradient of the blurred luminance. The constants are public in the module.
+
+### GPU kernels with several inputs (`expose-gpu`)
+
+- `run_kernel_multi`: 1 to 4 inputs at bindings 0, 3, 4, 5. Bindings 0, 1, 2 keep their meaning, so old kernels work unchanged. The output can have any size.
+- The 12 layouts (3 output formats x 4 input counts) are made when the context is made. The pipeline cache key is (kernel name, output format, input count).
+- Each call is one queue submit. The queue keeps the order, so a pass can read the output of the pass before it.
+
+## Consequences
+
+- The preview, thumbnail, and export paths must change to the full develop API to show crop and sharpening (task `geometry-integration`).
+- The preview frame size changes when the crop changes. The UI must accept frames of a new size.
+- Each GPU pass still makes a new parameter buffer and bind group. Buffer reuse is in the `gpu-api` backlog.
