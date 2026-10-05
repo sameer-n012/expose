@@ -32,6 +32,7 @@ import type { NormalizedRect } from '../develop/cropGeometry';
 import { nextOverlay, type CropOverlayKind } from '../develop/cropView';
 import { identityCurve, type CurveChannel, type CurvePoint } from '../develop/curve';
 import type { Histogram } from '../develop/histogram';
+import { isAtDefaults, resetEverything } from '../develop/resetAll';
 import {
   RANGES,
   SHARPEN_RANGES,
@@ -259,10 +260,27 @@ export class DevelopStore {
   }
 
   /** Sets all Basic panel values to identity. */
-  resetAll(): void {
+  resetBasic(): void {
     if (this.settings !== null) {
       this.#edit(resetBasic(this.settings));
     }
+  }
+
+  /**
+   * Sets every section (white balance, tone, curves, sharpening, crop) to
+   * its default in one edit: one save and one preview render. The crop tool
+   * stays active, with the full frame. Cancel still restores the crop of
+   * the tool start.
+   */
+  resetAll(): void {
+    if (this.settings !== null) {
+      this.#edit(resetEverything(this.settings));
+    }
+  }
+
+  /** True when all sections equal their defaults (or there are no settings). */
+  get atDefaults(): boolean {
+    return this.settings === null || isAtDefaults(this.settings);
   }
 
   /** The crop of the settings, or null while they load. */

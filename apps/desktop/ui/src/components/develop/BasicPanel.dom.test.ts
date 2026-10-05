@@ -68,7 +68,7 @@ describe('BasicPanel', () => {
     await fireEvent.dblClick(screen.getByRole('slider', { name: 'Exposure' }));
     expect(store.settings?.tone.exposure).toBe(0);
     await fireEvent.input(screen.getByRole('slider', { name: 'Shadows' }), { target: { value: '40' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Reset all' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
     expect(store.settings?.tone.shadows).toBe(0);
   });
 });
