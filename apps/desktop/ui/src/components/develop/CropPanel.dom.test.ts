@@ -82,6 +82,37 @@ describe('CropPanel', () => {
     expect(store.straightening).toBe(false);
   });
 
+  it('shows the fine grid after a key change of the angle and hides it later', async () => {
+    vi.useFakeTimers();
+    try {
+      const store = await makeStore();
+      store.enterCrop();
+      const { container } = render(CropPanel, { develop: store });
+      const slider = screen.getByRole('slider', { name: 'Angle' });
+      await fireEvent.keyDown(slider, { key: 'a' });
+      expect(store.fineGrid).toBe(false);
+      await fireEvent.keyDown(slider, { key: 'ArrowRight' });
+      expect(store.fineGrid).toBe(true);
+      vi.advanceTimersByTime(500);
+      // A new key restarts the time.
+      await fireEvent.keyDown(slider, { key: 'ArrowRight' });
+      vi.advanceTimersByTime(500);
+      expect(store.fineGrid).toBe(true);
+      vi.advanceTimersByTime(101);
+      expect(store.fineGrid).toBe(false);
+      expect(container).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows no fine grid after a key outside the crop tool', async () => {
+    const store = await makeStore();
+    render(CropPanel, { develop: store });
+    await fireEvent.keyDown(screen.getByRole('slider', { name: 'Angle' }), { key: 'ArrowRight' });
+    expect(store.fineGrid).toBe(false);
+  });
+
   it('flips, sets the aspect, locks, swaps, and resets', async () => {
     const store = await makeStore();
     render(CropPanel, { develop: store });
@@ -168,5 +199,37 @@ describe('CropOverlay', () => {
     const store = await makeStore();
     const { container } = render(CropOverlay, { develop: store, content });
     expect(container.querySelectorAll('line')).toHaveLength(4);
+  });
+
+  it('is focusable and arrow keys move the rect (Shift: big steps)', async () => {
+    const store = await makeStore();
+    store.setCropAspect('free');
+    store.setCropRect({ left: 0.25, top: 0.25, width: 0.5, height: 0.5 });
+    render(CropOverlay, { develop: store, content });
+    const rect = screen.getByRole('group', { name: /Arrow keys move it/ });
+    expect(rect).toBe(screen.getByTestId('crop-rect'));
+    expect(rect.getAttribute('tabindex')).toBe('0');
+    await fireEvent.keyDown(rect, { key: 'ArrowRight' });
+    expect(store.crop?.rect.left).toBeCloseTo(0.26, 9);
+    await fireEvent.keyDown(rect, { key: 'ArrowDown', shiftKey: true });
+    expect(store.crop?.rect.top).toBeCloseTo(0.35, 9);
+    expect(store.crop?.rect.width).toBeCloseTo(0.5, 9);
+  });
+
+  it('Alt and arrow keys resize from the bottom right, and other keys pass', async () => {
+    const store = await makeStore();
+    store.setCropAspect('free');
+    store.setCropRect({ left: 0.25, top: 0.25, width: 0.5, height: 0.5 });
+    render(CropOverlay, { develop: store, content });
+    const rect = screen.getByTestId('crop-rect');
+    await fireEvent.keyDown(rect, { key: 'ArrowRight', altKey: true });
+    expect(store.crop?.rect.left).toBeCloseTo(0.25, 9);
+    expect(store.crop?.rect.width).toBeCloseTo(0.51, 9);
+    await fireEvent.keyDown(rect, { key: 'ArrowUp', altKey: true, shiftKey: true });
+    expect(store.crop?.rect.height).toBeCloseTo(0.4, 9);
+    // Enter is not a crop key: the event is not cancelled.
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    rect.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(false);
   });
 });

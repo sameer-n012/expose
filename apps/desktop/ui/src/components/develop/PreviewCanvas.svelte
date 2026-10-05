@@ -14,15 +14,22 @@
   again.
 
   For the crop tool, `applyGeometry = false` requests frames of the full
-  image, `transform` is a CSS transform of the canvas (about its center),
+  image, `geometry` is the flip and angle that CSS shows (about the center),
   and `overlay` draws on top of the image rect (the session aspect, scaled
-  to fit). A request with the same session and the same settings as the
+  to fit, and zoomed out with the canvas for large angles). A request with the same session and the same settings as the
   last one is not sent again.
 -->
 <script lang="ts">
   import { onDestroy, untrack, type Snippet } from 'svelte';
   import { isCommandError } from '../../lib/catalog';
-  import { containRect, type ScreenRect } from '../../lib/develop/cropView';
+  import {
+    containRect,
+    cropTransform,
+    rotatedFitScale,
+    scaleContent,
+    type ScreenRect,
+    type ViewGeometry,
+  } from '../../lib/develop/cropView';
   import { frameContext, type DrawMode } from '../../lib/develop/draw';
   import {
     DEFAULT_PRESENT_MODE,
@@ -60,8 +67,12 @@
     onerror?: (error: unknown) => void;
     /** `false`: frames without flip, straighten, and crop. Default true. */
     applyGeometry?: boolean;
-    /** CSS transform of the canvas, about its center. Default `none`. */
-    transform?: string;
+    /**
+     * The flip and the angle that CSS shows on the canvas, about its
+     * center (crop mode). The view zooms out so that the rotated image
+     * fits the stage. Default: no transform.
+     */
+    geometry?: ViewGeometry | null;
     /** Adds space around the image (the crop tool shows handles there). */
     padded?: boolean;
     /** Drawn over the image rect (in CSS pixels of the stage), when set. */
@@ -78,7 +89,7 @@
     onframe,
     onerror,
     applyGeometry = true,
-    transform = 'none',
+    geometry = null,
     padded = false,
     overlay,
   }: Props = $props();
@@ -92,6 +103,11 @@
   const content: ScreenRect = $derived(
     containRect(stageSize.width, stageSize.height, session?.width ?? 0, session?.height ?? 0),
   );
+  /** The zoom-out that keeps the rotated image inside the stage. */
+  const zoom = $derived(geometry === null ? 1 : rotatedFitScale(geometry.angle, content, stageSize));
+  const transform = $derived(geometry === null ? 'none' : cropTransform(geometry, zoom));
+  /** The displayed image rect: `content` with the zoom-out. The overlay sits on it. */
+  const shown: ScreenRect = $derived(scaleContent(content, zoom));
   let message: string | null = $state(null);
   let context: CanvasRenderingContext2D | null = null;
 
@@ -268,12 +284,12 @@
     {#if overlay !== undefined && session !== null && content.width > 0}
       <div
         class="overlay"
-        style:left="{content.x}px"
-        style:top="{content.y}px"
-        style:width="{content.width}px"
-        style:height="{content.height}px"
+        style:left="{shown.x}px"
+        style:top="{shown.y}px"
+        style:width="{shown.width}px"
+        style:height="{shown.height}px"
       >
-        {@render overlay(content)}
+        {@render overlay(shown)}
       </div>
     {/if}
   </div>

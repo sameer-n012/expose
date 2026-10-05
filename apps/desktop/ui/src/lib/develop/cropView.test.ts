@@ -3,8 +3,12 @@ import {
   containRect,
   cropMatrix,
   cropTransform,
+  frameToScreen,
   nextOverlay,
   overlayLines,
+  rotatedFitScale,
+  scaleContent,
+  screenToFrame,
   toNormalizedDelta,
 } from './cropView';
 
@@ -127,5 +131,72 @@ describe('overlays', () => {
     expect(golden[0]).toBeCloseTo(0.381966, 6);
     expect(golden[1]).toBeCloseTo(0.618034, 6);
     expect(overlayLines('fine').length).toBeGreaterThan(overlayLines('grid').length);
+  });
+});
+
+describe('rotatedFitScale', () => {
+  const image = { width: 300, height: 200 };
+
+  it('is 1 at angle 0 and never zooms in', () => {
+    expect(rotatedFitScale(0, image, image)).toBe(1);
+    expect(rotatedFitScale(0, image, { width: 900, height: 900 })).toBe(1);
+    expect(rotatedFitScale(45, image, { width: 9000, height: 9000 })).toBe(1);
+  });
+
+  it('fits the bounding box of a 3:2 image at 45 degrees', () => {
+    // Bounding box: (300 + 200) * cos 45 on both sides = 353.55.
+    const expected = 200 / (500 * Math.SQRT1_2);
+    expect(rotatedFitScale(45, image, image)).toBeCloseTo(expected, 9);
+    expect(expected).toBeCloseTo(0.565685, 6);
+    expect(rotatedFitScale(-45, image, image)).toBeCloseTo(expected, 9);
+  });
+
+  it('uses the tighter side of the box', () => {
+    expect(rotatedFitScale(90, image, { width: 200, height: 300 })).toBeCloseTo(1, 9);
+    expect(rotatedFitScale(90, image, { width: 100, height: 300 })).toBeCloseTo(0.5, 9);
+  });
+
+  it('does not depend on flips (the angle is the only input) and is 1 for an empty box', () => {
+    // The flip changes the sign of the matrix terms, not the bounding box:
+    // the zoomed matrix of a flipped view has the same length per axis.
+    const [a, b] = cropMatrix({ angle: 30, flip_horizontal: true, flip_vertical: false }, 0.5);
+    const [a2, b2] = cropMatrix({ angle: 30, flip_horizontal: false, flip_vertical: false }, 0.5);
+    expect(Math.hypot(a, b)).toBeCloseTo(Math.hypot(a2, b2), 12);
+    expect(rotatedFitScale(30, image, { width: 0, height: 0 })).toBe(1);
+  });
+});
+
+describe('zoomed view', () => {
+  it('scales the matrix and keeps its shape', () => {
+    const flat = cropMatrix({ angle: 30, flip_horizontal: true, flip_vertical: false });
+    const scaled = cropMatrix({ angle: 30, flip_horizontal: true, flip_vertical: false }, 0.5);
+    scaled.forEach((v, i) => expect(v).toBeCloseTo((flat[i] ?? 0) * 0.5, 12));
+    expect(cropTransform({ angle: 0, flip_horizontal: false, flip_vertical: false }, 0.5)).toBe('matrix(0.5, 0, 0, 0.5, 0, 0)');
+    expect(cropTransform({ angle: 0, flip_horizontal: false, flip_vertical: false }, 1)).toBe('none');
+  });
+
+  it('scales the content about its center', () => {
+    const content = { x: 50, y: 20, width: 400, height: 200 };
+    expect(scaleContent(content, 0.5)).toEqual({ x: 150, y: 70, width: 200, height: 100 });
+    expect(scaleContent(content, 1)).toEqual(content);
+  });
+
+  it('maps a frame point to the screen and back with the zoom-out', () => {
+    const content = scaleContent({ x: 50, y: 20, width: 400, height: 200 }, 0.6);
+    for (const [fx, fy] of [
+      [0, 0],
+      [1, 1],
+      [0.25, 0.8],
+    ] as const) {
+      const screen = frameToScreen(content, fx, fy);
+      const back = screenToFrame(content, screen.x, screen.y);
+      expect(back.x).toBeCloseTo(fx, 12);
+      expect(back.y).toBeCloseTo(fy, 12);
+    }
+    // The frame center stays at the center of the unscaled content.
+    expect(frameToScreen(content, 0.5, 0.5)).toEqual({ x: 250, y: 120 });
+    // A pointer move maps with the scaled size.
+    expect(toNormalizedDelta(120, 0, content).dx).toBeCloseTo(0.5, 12);
+    expect(screenToFrame({ x: 0, y: 0, width: 0, height: 0 }, 5, 5)).toEqual({ x: 0, y: 0 });
   });
 });

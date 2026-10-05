@@ -45,6 +45,18 @@
     }
   }
 
+  /** The keys that change a slider or a number field. */
+  const ANGLE_KEYS: ReadonlySet<string> = new Set([
+    'ArrowLeft',
+    'ArrowRight',
+    'ArrowUp',
+    'ArrowDown',
+    'PageUp',
+    'PageDown',
+    'Home',
+    'End',
+  ]);
+
   /** The angle drag shows the fine grid until the pointer goes up anywhere. */
   function endStraighten(): void {
     if (develop.straightening) {
@@ -71,8 +83,20 @@
       {/if}
     </div>
 
-    <!-- The pointer-down starts the fine grid of the angle drag. -->
-    <div class="angle" onpointerdown={() => (develop.straightening = develop.cropActive)} role="presentation">
+    <!--
+      The pointer-down starts the fine grid of the angle drag. A key that
+      changes the slider shows it for a short time.
+    -->
+    <div
+      class="angle"
+      onpointerdown={() => (develop.straightening = develop.cropActive)}
+      onkeydown={(event) => {
+        if (ANGLE_KEYS.has(event.key)) {
+          develop.noteAngleKey();
+        }
+      }}
+      role="presentation"
+    >
       <SliderRow
         label="Angle"
         value={crop?.angle ?? 0}

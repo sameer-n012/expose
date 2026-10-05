@@ -58,6 +58,9 @@ import { describeError, type ToastStore } from './toasts.svelte';
 /** The quiet time after the last edit before the settings are saved. */
 export const SAVE_DELAY_MS = 300;
 
+/** The time the fine grid stays after the last keyboard change of the angle. */
+export const ANGLE_KEY_HIDE_MS = 600;
+
 /** The backend calls of the store. Tests replace them. */
 export interface DevelopApi {
   getSettings(photoId: PhotoId): Promise<DevelopDocument>;
@@ -105,6 +108,9 @@ export class DevelopStore {
   cropOverlay = $state<CropOverlayKind>('thirds');
   /** True while the user drags the angle slider (the overlay shows a fine grid). */
   straightening = $state(false);
+  /** True for a short time after the angle changed by keyboard (see `noteAngleKey`). */
+  angleKeying = $state(false);
+  #angleKeyTimer: ReturnType<typeof setTimeout> | null = null;
 
   readonly #library: DevelopStoreOptions['library'];
   readonly #modules: DevelopStoreOptions['modules'];
@@ -317,7 +323,37 @@ export class DevelopStore {
   commitCrop(): void {
     this.cropActive = false;
     this.straightening = false;
+    this.#clearAngleKey();
     this.#cropOnEnter = null;
+  }
+
+  /** True while the overlay shows the fine grid (pointer drag or recent key change of the angle). */
+  get fineGrid(): boolean {
+    return this.straightening || this.angleKeying;
+  }
+
+  /**
+   * Shows the fine grid after a keyboard change of the angle. The grid
+   * hides `ANGLE_KEY_HIDE_MS` after the last call. It has no effect
+   * while the crop tool is not active.
+   */
+  noteAngleKey(): void {
+    if (!this.cropActive) {
+      return;
+    }
+    this.angleKeying = true;
+    if (this.#angleKeyTimer !== null) {
+      clearTimeout(this.#angleKeyTimer);
+    }
+    this.#angleKeyTimer = setTimeout(() => this.#clearAngleKey(), ANGLE_KEY_HIDE_MS);
+  }
+
+  #clearAngleKey(): void {
+    if (this.#angleKeyTimer !== null) {
+      clearTimeout(this.#angleKeyTimer);
+      this.#angleKeyTimer = null;
+    }
+    this.angleKeying = false;
   }
 
   /** Ends the crop tool and restores the crop of the start (Cancel, Escape). */

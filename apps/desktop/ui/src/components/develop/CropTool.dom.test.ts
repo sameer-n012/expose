@@ -94,8 +94,8 @@ describe('crop tool', () => {
     await openDevelop();
     await press('r');
     await fireEvent.input(screen.getByRole('slider', { name: 'Angle' }), { target: { value: '90' } });
-    // 90 is clamped to 45 degrees.
-    await waitFor(() => expect(canvas().style.transform).toMatch(/^matrix\(0\.7071/));
+    // 90 is clamped to 45 degrees. The 4:3 image in the 1000 x 600 box zooms out to 600 / 1400 (about 0.4286) to fit the rotated bounding box.
+    await waitFor(() => expect(canvas().style.transform).toMatch(/^matrix\(0\.4285/));
     // The crop edits do not request frames in crop mode (no crop field is sent).
     expect(lastRender()?.settings['crop']).toBeUndefined();
 
