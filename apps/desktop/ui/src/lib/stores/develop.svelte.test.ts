@@ -140,6 +140,29 @@ describe('DevelopStore', () => {
     expect(api.setSettings).toHaveBeenCalledTimes(2);
   });
 
+  it('sets, clamps, saves, and resets sharpening', async () => {
+    const { store, api } = setup();
+    await store.activate(3);
+    store.setSharpening('amount', 60);
+    store.setSharpening('radius', 9);
+    expect(store.settings?.sharpening).toEqual({ amount: 60, radius: 3, detail: 25, masking: 0 });
+    store.setSharpening('masking', Number.NaN);
+    expect(store.settings?.sharpening?.masking).toBe(0);
+    await vi.advanceTimersByTimeAsync(SAVE_DELAY_MS);
+    expect(api.setSettings).toHaveBeenCalledTimes(1);
+    store.resetSharpenKey('amount');
+    expect(store.settings?.sharpening?.amount).toBe(0);
+    store.resetSharpening();
+    expect(store.settings?.sharpening).toEqual({ amount: 0, radius: 1, detail: 25, masking: 0 });
+  });
+
+  it('does not add a sharpening field when resetting an old document', async () => {
+    const { store } = setup();
+    await store.activate(3);
+    store.resetSharpening();
+    expect(store.settings).not.toHaveProperty('sharpening');
+  });
+
   it('shows a toast when a save fails', async () => {
     const { store, api, toasts } = setup();
     api.setSettings.mockRejectedValueOnce({ kind: 'invalidInput', message: 'no' });

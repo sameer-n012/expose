@@ -18,11 +18,13 @@
     /** The number of decimals that the number input shows. */
     decimals?: number;
     disabled?: boolean;
+    /** Shows the row dimmed but still usable (the value has no effect now). */
+    dimmed?: boolean;
     onchange: (value: number) => void;
     onreset: () => void;
   }
 
-  let { label, value, min, max, step, unit = '', decimals = 0, disabled = false, onchange, onreset }: Props = $props();
+  let { label, value, min, max, step, unit = '', decimals = 0, disabled = false, dimmed = false, onchange, onreset }: Props = $props();
 
   const uid = $props.id();
   const shown = $derived(value.toFixed(decimals));
@@ -44,7 +46,7 @@
   }
 </script>
 
-<div class="row" class:disabled>
+<div class="row" class:disabled class:dimmed>
   <!-- A double-click on the label resets the slider. -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <label for="{uid}-range" ondblclick={disabled ? undefined : onreset}>{label}</label>
@@ -90,6 +92,9 @@
   }
   .disabled {
     opacity: 0.5;
+  }
+  .dimmed:not(.disabled) {
+    opacity: 0.6;
   }
   label {
     grid-area: label;
