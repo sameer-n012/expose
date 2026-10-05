@@ -18,6 +18,8 @@
   import ExportDialog from '../export/ExportDialog.svelte';
   import ExportProgress from '../export/ExportProgress.svelte';
   import BasicPanel from '../develop/BasicPanel.svelte';
+  import DetailPanel from '../develop/DetailPanel.svelte';
+  import HistogramView from '../develop/HistogramView.svelte';
   import ToneCurvePanel from '../develop/ToneCurvePanel.svelte';
   import DevelopView from '../modules/DevelopView.svelte';
   import { MODULE_LABELS, type ModuleId } from '../../lib/modules';
@@ -124,12 +126,11 @@
           <FolderPanel {library} />
         {/if}
         {#if id === 'develop' && side === 'right'}
-          {@const sections = PANEL_SECTIONS.develop.right}
-          {@const basicAt = sections.indexOf('Basic')}
-          <PanelSections sections={sections.slice(0, basicAt)} />
+          <HistogramView histogram={develop.histogram} />
           <BasicPanel {develop} />
           <ToneCurvePanel {develop} />
-          <PanelSections sections={sections.slice(basicAt + 1).filter((name) => name !== 'Tone curve')} />
+          <DetailPanel {develop} />
+          <PanelSections sections={PANEL_SECTIONS.develop.right} />
         {:else}
           <PanelSections sections={PANEL_SECTIONS[id][side]} />
         {/if}

@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import { HistogramFeed } from '../../lib/develop/histogram';
   import type { DevelopStore } from '../../lib/stores/develop.svelte';
   import PreviewCanvas from '../develop/PreviewCanvas.svelte';
 
@@ -21,7 +22,17 @@
     untrack(() => void develop.activate(target));
   });
 
+  // The histogram follows the displayed frames, at most every 100 ms.
+  const feed = new HistogramFeed({ onHistogram: (histogram) => (develop.histogram = histogram) });
+
+  $effect(() => {
+    // A new or closed session: drop the frame that waits for a histogram.
+    void develop.session;
+    feed.cancel();
+  });
+
   onDestroy(() => {
+    feed.cancel();
     void develop.dispose();
   });
 </script>
@@ -36,7 +47,11 @@
       The develop settings of this photo could not be read: {develop.loadError}
     </p>
   {:else if develop.settings !== null}
-    <PreviewCanvas session={develop.session} settings={develop.settings} />
+    <PreviewCanvas
+      session={develop.session}
+      settings={develop.settings}
+      onframe={(event) => feed.push(event.frame)}
+    />
   {/if}
 </div>
 

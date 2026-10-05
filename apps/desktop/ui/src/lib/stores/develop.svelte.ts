@@ -15,15 +15,21 @@
 import type { PhotoId } from '../catalog';
 import { getDevelopSettings, isCommandError, setDevelopSettings } from '../catalog';
 import { identityCurve, type CurveChannel, type CurvePoint } from '../develop/curve';
+import type { Histogram } from '../develop/histogram';
 import {
   RANGES,
+  SHARPEN_RANGES,
   withCurve,
   resetBasic,
+  resetSharpenKey,
+  resetSharpening,
   resetSlider,
   sameDocument,
+  withSharpening,
   withSlider,
   withWhiteBalanceMode,
   type DevelopDocument,
+  type SharpenKey,
   type SliderKey,
 } from '../develop/settings';
 import { closePreview, openPreview, type SessionInfo } from '../develop/transport';
@@ -68,6 +74,8 @@ export class DevelopStore {
   settings = $state.raw<DevelopDocument | null>(null);
   /** The preview session of the photo, or null. */
   session = $state.raw<SessionInfo | null>(null);
+  /** The histogram of the newest displayed frame, or null (no frame yet). */
+  histogram = $state.raw<Histogram | null>(null);
   status = $state<DevelopStatus>('empty');
   /** The reason of the `error` status. */
   loadError = $state<string | null>(null);
@@ -195,6 +203,29 @@ export class DevelopStore {
     this.setCurve(channel, identityCurve());
   }
 
+  /** Sets one sharpening value (clamped to its range). */
+  setSharpening(key: SharpenKey, value: number): void {
+    if (this.settings === null || !Number.isFinite(value)) {
+      return;
+    }
+    const range = SHARPEN_RANGES[key];
+    this.#edit(withSharpening(this.settings, key, Math.min(range.max, Math.max(range.min, value))));
+  }
+
+  /** Sets one sharpening value to its default. */
+  resetSharpenKey(key: SharpenKey): void {
+    if (this.settings !== null) {
+      this.#edit(resetSharpenKey(this.settings, key));
+    }
+  }
+
+  /** Sets all four sharpening values to their defaults. */
+  resetSharpening(): void {
+    if (this.settings !== null) {
+      this.#edit(resetSharpening(this.settings));
+    }
+  }
+
   /** Sets all Basic panel values to identity. */
   resetAll(): void {
     if (this.settings !== null) {
@@ -255,6 +286,7 @@ export class DevelopStore {
   #closeSession(): void {
     const session = this.session;
     this.session = null;
+    this.histogram = null;
     if (session !== null) {
       void this.#closeQuietly(session.session);
     }

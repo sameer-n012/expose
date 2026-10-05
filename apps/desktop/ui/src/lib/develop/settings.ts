@@ -16,6 +16,31 @@ export const RANGES = {
   tone: { min: -100, max: 100, step: 1 },
 } as const;
 
+/**
+ * The ranges of the sharpening sliders. Keep them equal to the constants
+ * `ranges::SHARPEN_*` in `crates/expose-core/src/develop.rs`.
+ */
+export const SHARPEN_RANGES = {
+  amount: { min: 0, max: 150, step: 1 },
+  radius: { min: 0.5, max: 3, step: 0.1 },
+  detail: { min: 0, max: 100, step: 1 },
+  masking: { min: 0, max: 100, step: 1 },
+} as const;
+
+export const SHARPEN_KEYS = ['amount', 'radius', 'detail', 'masking'] as const;
+export type SharpenKey = (typeof SHARPEN_KEYS)[number];
+
+/** The identity values of sharpening. Keep them equal to `Default` of `Sharpening` in `expose_core::develop`. */
+export const SHARPEN_DEFAULTS: Readonly<Record<SharpenKey, number>> = {
+  amount: 0,
+  radius: 1,
+  detail: 25,
+  masking: 0,
+};
+
+/** The sharpening settings (`sharpening` field of the document). */
+export type SharpeningSettings = Readonly<Record<SharpenKey, number>>;
+
 export const TONE_KEYS = ['contrast', 'highlights', 'shadows', 'whites', 'blacks'] as const;
 export type ToneKey = (typeof TONE_KEYS)[number];
 
@@ -46,7 +71,37 @@ export interface DevelopDocument {
   readonly tone: ToneSettings;
   /** Missing in old documents: every channel is then the identity curve. */
   readonly tone_curve?: Partial<ToneCurveSettings>;
+  /** Missing in old documents: every value is then its default. */
+  readonly sharpening?: Partial<SharpeningSettings>;
   readonly [key: string]: unknown;
+}
+
+/** The sharpening values of a document (defaults for missing values). */
+export function sharpeningOf(doc: DevelopDocument): SharpeningSettings {
+  return { ...SHARPEN_DEFAULTS, ...doc.sharpening };
+}
+
+/** Returns a copy of `doc` with one sharpening value changed. All four values are written. */
+export function withSharpening(doc: DevelopDocument, key: SharpenKey, value: number): DevelopDocument {
+  return { ...doc, sharpening: { ...sharpeningOf(doc), [key]: value } };
+}
+
+/** Returns a copy of `doc` with one sharpening value at its default. */
+export function resetSharpenKey(doc: DevelopDocument, key: SharpenKey): DevelopDocument {
+  if (sharpeningOf(doc)[key] === SHARPEN_DEFAULTS[key]) {
+    return doc;
+  }
+  return withSharpening(doc, key, SHARPEN_DEFAULTS[key]);
+}
+
+/** Returns a copy of `doc` with all sharpening values at their defaults. */
+export function resetSharpening(doc: DevelopDocument): DevelopDocument {
+  const current = sharpeningOf(doc);
+  if (SHARPEN_KEYS.every((key) => current[key] === SHARPEN_DEFAULTS[key])) {
+    // Nothing to reset: an old document without the field stays as it is.
+    return doc;
+  }
+  return { ...doc, sharpening: { ...SHARPEN_DEFAULTS } };
 }
 
 /** The points of one curve channel of a document (identity when missing). */
