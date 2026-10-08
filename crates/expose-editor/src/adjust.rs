@@ -85,10 +85,10 @@ impl BrightnessContrast {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PreparedBc {
-    brightness: f32,
+pub(crate) struct PreparedBc {
+    pub(crate) brightness: f32,
     /// Contrast slope. `None` is an infinite slope (threshold).
-    k: Option<f32>,
+    pub(crate) k: Option<f32>,
 }
 
 impl PreparedBc {
@@ -411,11 +411,13 @@ impl Adjustment {
 /// with [`Adjustment::prepare`].
 #[derive(Debug, Clone)]
 pub struct PreparedAdjustment {
-    inner: Prepared,
+    /// The GPU compositor ([`crate::gpu`]) reads this data to make its
+    /// kernel parameters.
+    pub(crate) inner: Prepared,
 }
 
 #[derive(Debug, Clone)]
-enum Prepared {
+pub(crate) enum Prepared {
     BrightnessContrast(PreparedBc),
     Levels(Levels),
     Curves {
