@@ -14,8 +14,11 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **editor-gpu** (O) — GPU compositor in `expose-editor` (through `expose-gpu`) that matches the CPU reference; perceptual blending is the default, so it must be fast (ADR 0005).
-2. [ ] **editor-ui** — the editor canvas UI (after editor-gpu).
+1. [ ] **editor-ui** — the editor canvas UI. Use `GpuCompositor` (ADR 0012) and read back a small display frame (`rgba16float`/`rgba8unorm`), not the full `rgba32float` image.
+
+### Follow-ups from editor-gpu (ADR 0012)
+
+- [ ] **editor-gpu-cache** (O) — per-layer content version (generation counter) in the document model, then a layer-texture cache keyed by `LayerId` + version (upload is about 245 ms of 271 ms at 4096², kernels about 27 ms); a display-size output path (downsample before read-back); a test for curve end points between table samples.
 
 ### Follow-ups from merged work
 
@@ -44,6 +47,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-gpu** (PR "GPU compositor") — `GpuCompositor` in `expose-editor` matches the CPU `composite` for all 27 blend modes in both blend spaces, the 4 adjustment kinds, masks, nested groups, and dissolve (ADR 0012). 4096², 10 layers, perceptual: CPU 15.3 s, GPU 271 ms (warm).
 
 - [x] **develop follow-ups** (PRs #37, #38, #39) — "Reset all" (footer, `Mod+Shift+R`) resets every panel in one edit; `longEdge` = frame long edge, the engine enlarges the develop input by the crop factor (session base up to 4096 px, about 180 MB CPU per session), thumbnails of cropped photos develop on up to 4096 px (format version 3), `preview://` `geometry=0|1`; crop mode zooms out at large angles, crop frame keys (arrows move, Alt+arrows resize), fine grid on keyboard angle changes.
 - [x] **crop-tool** (PR #34) — Crop panel and crop mode (`R`; `Enter` keeps, `Esc` cancels; `O` overlays; `X` swaps orientation). Preview with `applyGeometry: false` and one CSS matrix for flip + rotation (tested against the backend mapping); 8 handles, move, aspect presets and lock; `maxInscribedRect`/`rectIsInside` ported to `lib/develop/cropGeometry.ts` with the Rust test cases.- [x] **detail-histogram** (PR #33) — Detail panel (amount, radius, detail, masking); RGB histogram of the displayed frame (UI-side, throttled 100 ms, subsampled, sqrt scale, clip indicators). Develop panel order: Histogram, Crop, Basic, Tone curve, Detail.

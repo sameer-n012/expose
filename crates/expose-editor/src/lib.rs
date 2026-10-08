@@ -12,6 +12,8 @@
 //! - [`blend`]: blend modes and the blending space.
 //! - [`adjust`]: adjustment layer parameters and their apply functions.
 //! - [`composite`]: the CPU reference compositor.
+//! - [`gpu`]: the GPU compositor ([`GpuCompositor`]). It gives the same
+//!   result as the CPU reference, within float tolerance.
 //! - [`history`]: undo and redo.
 //!
 //! # Pixel format
@@ -37,11 +39,13 @@
 //!
 //! # Dependency rules
 //!
-//! - This crate can depend on `expose-core` only.
-//! - Do not use wgpu directly. GPU work goes through `expose-gpu` when a
-//!   later decision allows that dependency.
+//! - This crate depends on `expose-core` and `expose-gpu` only (of the
+//!   workspace crates).
+//! - Do not use wgpu directly. All GPU work goes through the `expose-gpu`
+//!   kernel API.
 //! - No file system, threads, or clock (the crate must build for
-//!   WebAssembly).
+//!   WebAssembly). The GPU functions are `async`; the caller supplies the
+//!   executor.
 
 // The color math uses the short names of the published formulas (for
 // example `cb`, `cs`, `l`, `n`, `x` in the W3C blending specification), so
@@ -53,6 +57,7 @@ pub mod blend;
 pub mod composite;
 pub mod document;
 pub mod error;
+pub mod gpu;
 pub mod history;
 pub mod layer;
 pub mod ops;
@@ -66,7 +71,8 @@ pub use composite::{composite, composite_straight, to_straight_alpha};
 pub use document::{
     Background, BitDepth, ColorMode, Document, DocumentSpec, MAX_DIMENSION, MAX_PIXELS,
 };
-pub use error::{EditorError, EditorResult};
+pub use error::{EditorError, EditorResult, SharedGpuError};
+pub use gpu::{CURVE_TABLE_SIZE, GpuCompositor};
 pub use history::{History, HistoryEntry};
 pub use layer::{
     Group, GroupIsolation, Layer, LayerContent, LayerId, LayerKind, LayerProps, LockKind, Locks,

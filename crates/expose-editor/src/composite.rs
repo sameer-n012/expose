@@ -1,7 +1,7 @@
 //! CPU reference compositor.
 //!
-//! The GPU compositor (later) must give the same result as this module
-//! (within float tolerance).
+//! The GPU compositor ([`crate::gpu`]) must give the same result as this
+//! module (within float tolerance). Change both together.
 //!
 //! # Model
 //!

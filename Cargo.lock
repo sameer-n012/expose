@@ -1005,7 +1005,10 @@ dependencies = [
 name = "expose-editor"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "expose-core",
+ "expose-gpu",
+ "pollster",
  "thiserror 2.0.21",
 ]
 
