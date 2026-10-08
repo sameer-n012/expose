@@ -1,6 +1,10 @@
 //! Error type for `expose-editor`.
 
+use std::fmt;
+use std::sync::Arc;
+
 use expose_core::CoreError;
+use expose_gpu::GpuError;
 use thiserror::Error;
 
 use crate::layer::{LayerId, LockKind};
@@ -89,6 +93,10 @@ pub enum EditorError {
     #[error("layer {0} has a transparency lock and the write changes alpha")]
     TransparencyLocked(LayerId),
 
+    /// A GPU operation failed (see [`crate::gpu`]).
+    #[error("GPU operation failed: {0}")]
+    Gpu(SharedGpuError),
+
     /// A rectangle is empty or is not fully inside the target buffer.
     #[error("rectangle {x},{y} {width}x{height} is empty or outside the target")]
     InvalidRect {
@@ -135,6 +143,45 @@ pub enum EditorError {
 
 /// Result type with [`EditorError`].
 pub type EditorResult<T> = Result<T, EditorError>;
+
+/// A shared [`GpuError`].
+///
+/// [`EditorError`] is `Clone` and `PartialEq`, but [`GpuError`] is not.
+/// This wrapper keeps the error in an [`Arc`]. Two values are equal only if
+/// they hold the same error object.
+#[derive(Debug, Clone)]
+pub struct SharedGpuError(Arc<GpuError>);
+
+impl SharedGpuError {
+    /// Returns the GPU error.
+    pub fn get(&self) -> &GpuError {
+        &self.0
+    }
+}
+
+impl PartialEq for SharedGpuError {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl fmt::Display for SharedGpuError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SharedGpuError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+impl From<GpuError> for EditorError {
+    fn from(error: GpuError) -> Self {
+        Self::Gpu(SharedGpuError(Arc::new(error)))
+    }
+}
 
 /// Returns an error if `value` is not finite or is outside `min..=max`.
 pub(crate) fn check_range(name: &'static str, value: f32, min: f32, max: f32) -> EditorResult<()> {
