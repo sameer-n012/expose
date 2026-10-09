@@ -20,9 +20,11 @@
     library: LibraryStore;
     /** Opens the export dialog for the selected photos. */
     onexport?: () => void;
+    /** Opens the focused photo in the Editor. */
+    onedit?: () => void;
   }
 
-  let { modules, library, onexport }: Props = $props();
+  let { modules, library, onexport, onedit }: Props = $props();
 
   // The loupe shows the photo at the focus of the selection (see libraryNavigation.ts).
   const loupePhoto = $derived(library.focusIndex === null ? undefined : library.photoAt(library.focusIndex));
@@ -52,6 +54,7 @@
     <LibraryToolbar
       {library}
       {onexport}
+      {onedit}
       mode={modules.libraryView}
       canOpenLoupe={canOpenLoupe(library)}
       onmode={setMode}

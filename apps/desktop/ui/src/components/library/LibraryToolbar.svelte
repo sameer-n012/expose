@@ -17,9 +17,11 @@
     onmode: (mode: LibraryViewMode) => void;
     /** Opens the export dialog. Without it, the Export button is not shown. */
     onexport?: (() => void) | undefined;
+    /** Opens the focused photo in the Editor. Without it, the button is not shown. */
+    onedit?: (() => void) | undefined;
   }
 
-  let { library, mode, canOpenLoupe, onmode, onexport }: Props = $props();
+  let { library, mode, canOpenLoupe, onmode, onexport, onedit }: Props = $props();
 
   let search = $state('');
 
@@ -99,6 +101,11 @@
   </button>
   {#if onexport !== undefined}
     <button type="button" class="import" onclick={onexport}>Export…</button>
+  {/if}
+  {#if onedit !== undefined}
+    <button type="button" class="import" disabled={!canOpenLoupe} title="Edit in Editor (Mod+E)" onclick={onedit}>
+      Edit in Editor
+    </button>
   {/if}
 
   <input
