@@ -8,17 +8,22 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged)
+Editor, first version (ADR 0013):
+
+- [ ] **editor-view** (O, `feat/editor-view`) — document revision and layer content versions, layer texture cache, cached full composite, `render_view` (zoom/pan view kernel), `History` gesture merge.
+- [x] **editor-ui** (S, merged) — Editor module: canvas with zoom/pan, layers panel, adjustment layers, undo/redo, `Mod+E` "Edit in Editor"; built against the command contract in ADR 0013 with mocked `invoke` (the commands do not exist until editor-shell). UI notes for editor-shell: `aboveLayerId` can be inside a group (insert above it in its parent); the UI ignores the frame `seq`; pixels outside the canvas must be transparent. Later: layer thumbnails, drag-and-drop reorder, moves into/out of groups.
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **editor-ui** — the editor canvas UI. Use `GpuCompositor` (ADR 0012) and read back a small display frame (`rgba16float`/`rgba8unorm`), not the full `rgba32float` image.
+1. [ ] **editor-shell** (O) — editor engine and commands in `src-tauri` (`editor_open/render/edit/undo/redo/close`, ADR 0013); starts after editor-view is merged.
+2. [ ] **editor-save** — decision first (operator): native layered file format and/or save back to the library.
+3. [ ] **editor-tools** — brush, selection, masks in the UI, levels/curves editors.
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
-- [ ] **editor-gpu-cache** (O) — per-layer content version (generation counter) in the document model, then a layer-texture cache keyed by `LayerId` + version (upload is about 245 ms of 271 ms at 4096², kernels about 27 ms); a display-size output path (downsample before read-back); a test for curve end points between table samples.
+- [ ] **editor-gpu-followups** — a test for curve end points between curve table samples.
 
 ### Follow-ups from merged work
 
