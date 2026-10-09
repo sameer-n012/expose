@@ -11,7 +11,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 Editor, first version (ADR 0013):
 
 - [ ] **editor-view** (O, `feat/editor-view`) — document revision and layer content versions, layer texture cache, cached full composite, `render_view` (zoom/pan view kernel), `History` gesture merge.
-- [ ] **editor-ui** (S, `feat/editor-ui`) — Editor module: canvas with zoom/pan, layers panel, adjustment layers, undo/redo; built against the command contract in ADR 0013.
+- [x] **editor-ui** (S, merged) — Editor module: canvas with zoom/pan, layers panel, adjustment layers, undo/redo, `Mod+E` "Edit in Editor"; built against the command contract in ADR 0013 with mocked `invoke` (the commands do not exist until editor-shell). UI notes for editor-shell: `aboveLayerId` can be inside a group (insert above it in its parent); the UI ignores the frame `seq`; pixels outside the canvas must be transparent. Later: layer thumbnails, drag-and-drop reorder, moves into/out of groups.
 
 ## Next (suggested order)
 
