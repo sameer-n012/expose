@@ -195,6 +195,14 @@ impl Document {
     /// Applies an edit and returns its inverse.
     ///
     /// If the function returns an error, the document did not change.
+    ///
+    /// Versions: each applied edit gives the document a new revision. Pixel
+    /// patches give the layer a new pixel version. Mask patches and mask
+    /// replacements give the layer a new mask version. Insert and remove
+    /// keep the versions of the layer: a layer that comes back by undo has
+    /// the same values as before, so its old versions are still correct.
+    /// A move (translate) keeps the versions, because the values do not
+    /// change (only the offsets).
     pub(crate) fn apply_edit(&mut self, edit: Edit) -> EditorResult<Edit> {
         let inverse = match edit.kind {
             EditKind::Insert { at, layer } => self.raw_insert(at, *layer)?,
@@ -223,7 +231,9 @@ impl Document {
                 }
             }
             EditKind::Mask { id, mask } => {
-                let old = self.layer_mut(id)?.replace_mask(mask.map(|m| *m));
+                let layer = self.layer_mut(id)?;
+                let old = layer.replace_mask(mask.map(|m| *m));
+                layer.touch_mask();
                 EditKind::Mask {
                     id,
                     mask: old.map(Box::new),
@@ -240,23 +250,24 @@ impl Document {
             }
             EditKind::Translate { id, dx, dy } => self.raw_translate(id, dx, dy)?,
             EditKind::PixelPatch { id, rect, mut data } => {
-                let LayerKind::Pixel(p) = self.layer_mut(id)?.kind_mut() else {
+                let layer = self.layer_mut(id)?;
+                let LayerKind::Pixel(p) = layer.kind_mut() else {
                     return Err(EditorError::NotAPixelLayer(id));
                 };
                 let img = p.image_mut();
                 check_patch(rect, img.bounds(), data.len())?;
                 let w = img.width();
                 swap_rect(img.pixels_mut(), w, rect, &mut data);
+                layer.touch_pixels();
                 EditKind::PixelPatch { id, rect, data }
             }
             EditKind::MaskPatch { id, rect, mut data } => {
-                let m = self
-                    .layer_mut(id)?
-                    .mask_mut()
-                    .ok_or(EditorError::NoMask(id))?;
+                let layer = self.layer_mut(id)?;
+                let m = layer.mask_mut().ok_or(EditorError::NoMask(id))?;
                 check_patch(rect, m.image.bounds(), data.len())?;
                 let w = m.image.width();
                 swap_rect(m.image.data_mut(), w, rect, &mut data);
+                layer.touch_mask();
                 EditKind::MaskPatch { id, rect, data }
             }
             EditKind::BlendSpace(space) => {
@@ -264,6 +275,8 @@ impl Document {
                 EditKind::BlendSpace(old)
             }
         };
+        // The edit is applied (each error above returns before a change).
+        self.touch();
         Ok(Edit::new(inverse))
     }
 

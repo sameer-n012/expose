@@ -194,3 +194,202 @@ fn failed_undo_restores_document_and_drops_dependent_steps() {
     assert_eq!(h.entries().len(), 0);
     assert!(!h.can_undo());
 }
+
+/// A slider gesture: three opacity changes with one merge key.
+fn opacity_gesture(doc: &mut Document, h: &mut History, key: u64, values: &[f32]) {
+    let bg = doc.layers()[0].id();
+    for &v in values {
+        let e = doc.set_opacity(bg, v).unwrap();
+        h.push_merge("Opacity", vec![e], key);
+    }
+}
+
+fn opacity(doc: &Document) -> f32 {
+    doc.layers()[0].opacity()
+}
+
+#[test]
+fn push_merge_merges_one_gesture() {
+    let mut doc = Document::new(DocumentSpec::new(4, 4)).unwrap();
+    let mut h = History::default();
+    opacity_gesture(&mut doc, &mut h, 7, &[0.9, 0.8, 0.7]);
+    assert_eq!(h.entries().len(), 1);
+    assert_eq!(h.entries().next().unwrap().name(), "Opacity");
+    assert_eq!(opacity(&doc), 0.7);
+    // Undo restores the state before the first edit of the gesture.
+    assert!(h.undo(&mut doc).unwrap());
+    assert_eq!(opacity(&doc), 1.0);
+    // Redo restores the end of the gesture.
+    assert!(h.redo(&mut doc).unwrap());
+    assert_eq!(opacity(&doc), 0.7);
+    assert!(h.undo(&mut doc).unwrap());
+    assert_eq!(opacity(&doc), 1.0);
+    assert!(!h.can_undo());
+}
+
+#[test]
+fn push_merge_does_not_merge_after_undo() {
+    let mut doc = Document::new(DocumentSpec::new(4, 4)).unwrap();
+    let mut h = History::default();
+    opacity_gesture(&mut doc, &mut h, 1, &[0.9]);
+    let bg = doc.layers()[0].id();
+    let e = doc.set_visible(bg, false).unwrap();
+    h.push_merge("Visible", vec![e], 2);
+    h.undo(&mut doc).unwrap();
+    // The same key as the undone entry: no merge into "Opacity", and the
+    // redo branch is dropped.
+    opacity_gesture(&mut doc, &mut h, 2, &[0.5]);
+    assert_eq!(h.entries().len(), 2);
+    assert!(!h.can_redo());
+    h.undo(&mut doc).unwrap();
+    assert_eq!(opacity(&doc), 0.9);
+    assert!(doc.layers()[0].visible());
+
+    // Undo then redo also ends the merge.
+    let mut doc = Document::new(DocumentSpec::new(4, 4)).unwrap();
+    let mut h = History::default();
+    opacity_gesture(&mut doc, &mut h, 3, &[0.9]);
+    h.undo(&mut doc).unwrap();
+    h.redo(&mut doc).unwrap();
+    opacity_gesture(&mut doc, &mut h, 3, &[0.8]);
+    assert_eq!(h.entries().len(), 2);
+}
+
+#[test]
+fn push_merge_does_not_merge_other_keys_or_after_push() {
+    let mut doc = Document::new(DocumentSpec::new(4, 4)).unwrap();
+    let mut h = History::default();
+    opacity_gesture(&mut doc, &mut h, 1, &[0.9, 0.8]);
+    opacity_gesture(&mut doc, &mut h, 2, &[0.7, 0.6]);
+    assert_eq!(h.entries().len(), 2);
+
+    // A plain push between two calls with the same key ends the merge.
+    let bg = doc.layers()[0].id();
+    let e = doc.rename_layer(bg, "Base").unwrap();
+    h.push("Rename", vec![e]);
+    opacity_gesture(&mut doc, &mut h, 2, &[0.5]);
+    assert_eq!(h.entries().len(), 4);
+
+    // `end_merge` also ends it.
+    h.end_merge();
+    opacity_gesture(&mut doc, &mut h, 2, &[0.4]);
+    assert_eq!(h.entries().len(), 5);
+
+    // Undo step by step: each gesture is one step.
+    for expected in [0.5, 0.6, 0.6, 0.8, 1.0] {
+        h.undo(&mut doc).unwrap();
+        assert_eq!(opacity(&doc), expected);
+    }
+    assert_eq!(doc.layers()[0].name(), "Background");
+}
+
+#[test]
+fn undo_of_merged_pixel_gesture_restores_start_pixels() {
+    let mut doc = Document::new(DocumentSpec::new(8, 8)).unwrap();
+    let mut h = History::default();
+    let start = snapshot(&doc);
+    let bg = doc.layers()[0].id();
+    // Overlapping writes: the undo must apply them newest first.
+    for (x, v) in [(0_u32, 0.1_f32), (2, 0.2), (4, 0.3)] {
+        let rect = Rect::new(x, 0, 4, 4);
+        let e = doc
+            .write_pixels(bg, rect, &vec![[v, v, v, 1.0]; 16])
+            .unwrap();
+        h.push_merge("Brush Stroke", vec![e], 99);
+    }
+    assert_eq!(h.entries().len(), 1);
+    let end = snapshot(&doc);
+    h.undo(&mut doc).unwrap();
+    assert!(snapshot(&doc) == start);
+    h.redo(&mut doc).unwrap();
+    assert!(snapshot(&doc) == end);
+}
+
+#[test]
+fn revision_changes_on_each_change() {
+    let mut doc = Document::new(DocumentSpec::new(4, 4)).unwrap();
+    let mut h = History::default();
+    let bg = doc.layers()[0].id();
+    let mut seen = vec![doc.revision()];
+    let mut check = |doc: &Document| {
+        assert!(!seen.contains(&doc.revision()));
+        seen.push(doc.revision());
+    };
+    let e = doc.set_opacity(bg, 0.5).unwrap();
+    check(&doc);
+    h.push("Opacity", vec![e]);
+    h.undo(&mut doc).unwrap();
+    check(&doc);
+    h.redo(&mut doc).unwrap();
+    check(&doc);
+    // A failed operation changes nothing.
+    let before = doc.revision();
+    assert!(doc.set_opacity(bg, 2.0).is_err());
+    assert_eq!(doc.revision(), before);
+    // A clone has the same revision; a change of the clone gives a new one.
+    let mut copy = doc.clone();
+    assert_eq!(copy.revision(), doc.revision());
+    copy.set_visible(bg, false).unwrap();
+    check(&copy);
+}
+
+#[test]
+fn content_versions_track_pixels_and_masks_only() {
+    let mut doc = Document::new(DocumentSpec::new(8, 8)).unwrap();
+    let mut h = History::default();
+    let bg = doc.layers()[0].id();
+    let versions = |doc: &Document| {
+        let l = doc.layer(bg).unwrap();
+        (l.pixel_version(), l.mask_version())
+    };
+    let v0 = versions(&doc);
+
+    // Property changes and moves keep both versions.
+    let mut edits = vec![
+        doc.set_opacity(bg, 0.5).unwrap(),
+        doc.set_blend_mode(bg, BlendMode::Multiply).unwrap(),
+        doc.set_visible(bg, false).unwrap(),
+        doc.translate_layer(bg, 2, 1).unwrap(),
+    ];
+    assert_eq!(versions(&doc), v0);
+
+    // A pixel write changes the pixel version only.
+    edits.push(
+        doc.write_pixels(bg, Rect::new(0, 0, 1, 1), &[[0.0, 0.0, 0.0, 1.0]])
+            .unwrap(),
+    );
+    let v1 = versions(&doc);
+    assert_ne!(v1.0, v0.0);
+    assert_eq!(v1.1, v0.1);
+
+    // Mask add and mask write change the mask version only.
+    let mask = Mask::new(
+        MaskImage::new_filled(4, 4, 1.0).unwrap(),
+        (0, 0),
+        MaskFill::White,
+    );
+    edits.push(doc.set_mask(bg, Some(mask)).unwrap());
+    let v2 = versions(&doc);
+    assert_eq!(v2.0, v1.0);
+    assert_ne!(v2.1, v1.1);
+    edits.push(doc.write_mask(bg, Rect::new(0, 0, 1, 1), &[0.0]).unwrap());
+    let v3 = versions(&doc);
+    assert_eq!(v3.0, v1.0);
+    assert_ne!(v3.1, v2.1);
+    // Mask enable is a property of the mask, not its values.
+    edits.push(doc.set_mask_enabled(bg, false).unwrap());
+    assert_eq!(versions(&doc), v3);
+
+    // Undo of all changes gives new versions (the values changed again).
+    h.push("All", edits);
+    h.undo(&mut doc).unwrap();
+    let v4 = versions(&doc);
+    assert_ne!(v4.0, v1.0);
+    assert_ne!(v4.1, v3.1);
+
+    // Delete and undo of the delete keep the versions of the layer.
+    let e = doc.delete_layer(bg).unwrap();
+    h.push("Delete", vec![e]);
+    h.undo(&mut doc).unwrap();
+    assert_eq!(versions(&doc), v4);
+}

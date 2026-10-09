@@ -61,6 +61,7 @@ pub mod gpu;
 pub mod history;
 pub mod layer;
 pub mod ops;
+pub mod version;
 
 pub use adjust::{
     Adjustment, BrightnessContrast, Curves, HueSaturation, Levels, LevelsChannel, MonotoneCubic,
