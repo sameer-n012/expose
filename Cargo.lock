@@ -975,6 +975,7 @@ dependencies = [
  "expose-catalog",
  "expose-core",
  "expose-develop",
+ "expose-editor",
  "expose-gpu",
  "expose-raw",
  "pollster",
