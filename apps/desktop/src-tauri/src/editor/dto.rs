@@ -1,0 +1,716 @@
+//! The transport types of the editor commands and their conversion to and
+//! from the `expose-editor` types.
+//!
+//! The UI types are in `ui/src/lib/editor/api.ts`. Keep the two in sync.
+//! All names are camelCase. Enums are tagged with the field `type`.
+
+use expose_core::develop::CurvePoint;
+use expose_editor::{
+    Adjustment, BlendMode, BrightnessContrast, Curves, Document, GroupIsolation, HueSaturation,
+    Layer, LayerKind, Levels, LevelsChannel,
+};
+use serde::{Deserialize, Serialize};
+
+/// The identifier of an open document. It is a process counter, so it is
+/// never used two times.
+pub type DocumentId = u64;
+
+/// A layer blend mode (the 27 modes of [`BlendMode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(
+    missing_docs,
+    reason = "the variants have the names of the BlendMode variants"
+)]
+pub enum BlendModeId {
+    Normal,
+    Dissolve,
+    Darken,
+    Multiply,
+    ColorBurn,
+    LinearBurn,
+    DarkerColor,
+    Lighten,
+    Screen,
+    ColorDodge,
+    LinearDodge,
+    LighterColor,
+    Overlay,
+    SoftLight,
+    HardLight,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    Difference,
+    Exclusion,
+    Subtract,
+    Divide,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+}
+
+impl From<BlendMode> for BlendModeId {
+    fn from(mode: BlendMode) -> Self {
+        match mode {
+            BlendMode::Normal => Self::Normal,
+            BlendMode::Dissolve => Self::Dissolve,
+            BlendMode::Darken => Self::Darken,
+            BlendMode::Multiply => Self::Multiply,
+            BlendMode::ColorBurn => Self::ColorBurn,
+            BlendMode::LinearBurn => Self::LinearBurn,
+            BlendMode::DarkerColor => Self::DarkerColor,
+            BlendMode::Lighten => Self::Lighten,
+            BlendMode::Screen => Self::Screen,
+            BlendMode::ColorDodge => Self::ColorDodge,
+            BlendMode::LinearDodge => Self::LinearDodge,
+            BlendMode::LighterColor => Self::LighterColor,
+            BlendMode::Overlay => Self::Overlay,
+            BlendMode::SoftLight => Self::SoftLight,
+            BlendMode::HardLight => Self::HardLight,
+            BlendMode::VividLight => Self::VividLight,
+            BlendMode::LinearLight => Self::LinearLight,
+            BlendMode::PinLight => Self::PinLight,
+            BlendMode::HardMix => Self::HardMix,
+            BlendMode::Difference => Self::Difference,
+            BlendMode::Exclusion => Self::Exclusion,
+            BlendMode::Subtract => Self::Subtract,
+            BlendMode::Divide => Self::Divide,
+            BlendMode::Hue => Self::Hue,
+            BlendMode::Saturation => Self::Saturation,
+            BlendMode::Color => Self::Color,
+            BlendMode::Luminosity => Self::Luminosity,
+        }
+    }
+}
+
+impl From<BlendModeId> for BlendMode {
+    fn from(mode: BlendModeId) -> Self {
+        match mode {
+            BlendModeId::Normal => Self::Normal,
+            BlendModeId::Dissolve => Self::Dissolve,
+            BlendModeId::Darken => Self::Darken,
+            BlendModeId::Multiply => Self::Multiply,
+            BlendModeId::ColorBurn => Self::ColorBurn,
+            BlendModeId::LinearBurn => Self::LinearBurn,
+            BlendModeId::DarkerColor => Self::DarkerColor,
+            BlendModeId::Lighten => Self::Lighten,
+            BlendModeId::Screen => Self::Screen,
+            BlendModeId::ColorDodge => Self::ColorDodge,
+            BlendModeId::LinearDodge => Self::LinearDodge,
+            BlendModeId::LighterColor => Self::LighterColor,
+            BlendModeId::Overlay => Self::Overlay,
+            BlendModeId::SoftLight => Self::SoftLight,
+            BlendModeId::HardLight => Self::HardLight,
+            BlendModeId::VividLight => Self::VividLight,
+            BlendModeId::LinearLight => Self::LinearLight,
+            BlendModeId::PinLight => Self::PinLight,
+            BlendModeId::HardMix => Self::HardMix,
+            BlendModeId::Difference => Self::Difference,
+            BlendModeId::Exclusion => Self::Exclusion,
+            BlendModeId::Subtract => Self::Subtract,
+            BlendModeId::Divide => Self::Divide,
+            BlendModeId::Hue => Self::Hue,
+            BlendModeId::Saturation => Self::Saturation,
+            BlendModeId::Color => Self::Color,
+            BlendModeId::Luminosity => Self::Luminosity,
+        }
+    }
+}
+
+/// One channel of a levels adjustment.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LevelsChannelDto {
+    /// Input black point.
+    pub input_black: f32,
+    /// Input white point.
+    pub input_white: f32,
+    /// Midtone gamma.
+    pub gamma: f32,
+    /// Output black.
+    pub output_black: f32,
+    /// Output white.
+    pub output_white: f32,
+}
+
+impl From<LevelsChannel> for LevelsChannelDto {
+    fn from(c: LevelsChannel) -> Self {
+        Self {
+            input_black: c.input_black,
+            input_white: c.input_white,
+            gamma: c.gamma,
+            output_black: c.output_black,
+            output_white: c.output_white,
+        }
+    }
+}
+
+impl From<LevelsChannelDto> for LevelsChannel {
+    fn from(c: LevelsChannelDto) -> Self {
+        Self {
+            input_black: c.input_black,
+            input_white: c.input_white,
+            gamma: c.gamma,
+            output_black: c.output_black,
+            output_white: c.output_white,
+        }
+    }
+}
+
+/// One control point of a curve. Both coordinates are in `0.0..=1.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CurvePointDto {
+    /// Input value.
+    pub x: f32,
+    /// Output value.
+    pub y: f32,
+}
+
+fn points_to_dto(points: &[CurvePoint]) -> Vec<CurvePointDto> {
+    points
+        .iter()
+        .map(|p| CurvePointDto { x: p.x, y: p.y })
+        .collect()
+}
+
+fn points_from_dto(points: Vec<CurvePointDto>) -> Vec<CurvePoint> {
+    points
+        .into_iter()
+        .map(|p| CurvePoint::new(p.x, p.y))
+        .collect()
+}
+
+/// The setting of an adjustment layer. The editor crate validates the
+/// values when the setting is applied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[allow(missing_docs, reason = "the fields are the fields of the editor types")]
+pub enum AdjustmentDto {
+    /// Brightness and contrast.
+    BrightnessContrast { brightness: f32, contrast: f32 },
+    /// Levels.
+    Levels {
+        master: LevelsChannelDto,
+        red: LevelsChannelDto,
+        green: LevelsChannelDto,
+        blue: LevelsChannelDto,
+    },
+    /// Curves.
+    Curves {
+        master: Vec<CurvePointDto>,
+        red: Vec<CurvePointDto>,
+        green: Vec<CurvePointDto>,
+        blue: Vec<CurvePointDto>,
+    },
+    /// Hue, saturation, and lightness.
+    HueSaturation {
+        hue: f32,
+        saturation: f32,
+        lightness: f32,
+    },
+}
+
+impl AdjustmentDto {
+    /// The default name of a new layer with this adjustment.
+    pub const fn layer_name(&self) -> &'static str {
+        match self {
+            Self::BrightnessContrast { .. } => "Brightness/Contrast",
+            Self::Levels { .. } => "Levels",
+            Self::Curves { .. } => "Curves",
+            Self::HueSaturation { .. } => "Hue/Saturation",
+        }
+    }
+}
+
+impl From<&Adjustment> for AdjustmentDto {
+    fn from(adjustment: &Adjustment) -> Self {
+        match adjustment {
+            Adjustment::BrightnessContrast(a) => Self::BrightnessContrast {
+                brightness: a.brightness,
+                contrast: a.contrast,
+            },
+            Adjustment::Levels(a) => Self::Levels {
+                master: a.master.into(),
+                red: a.red.into(),
+                green: a.green.into(),
+                blue: a.blue.into(),
+            },
+            Adjustment::Curves(a) => Self::Curves {
+                master: points_to_dto(&a.master),
+                red: points_to_dto(&a.red),
+                green: points_to_dto(&a.green),
+                blue: points_to_dto(&a.blue),
+            },
+            Adjustment::HueSaturation(a) => Self::HueSaturation {
+                hue: a.hue,
+                saturation: a.saturation,
+                lightness: a.lightness,
+            },
+        }
+    }
+}
+
+impl From<AdjustmentDto> for Adjustment {
+    fn from(dto: AdjustmentDto) -> Self {
+        match dto {
+            AdjustmentDto::BrightnessContrast {
+                brightness,
+                contrast,
+            } => Self::BrightnessContrast(BrightnessContrast {
+                brightness,
+                contrast,
+            }),
+            AdjustmentDto::Levels {
+                master,
+                red,
+                green,
+                blue,
+            } => Self::Levels(Levels {
+                master: master.into(),
+                red: red.into(),
+                green: green.into(),
+                blue: blue.into(),
+            }),
+            AdjustmentDto::Curves {
+                master,
+                red,
+                green,
+                blue,
+            } => Self::Curves(Curves {
+                master: points_from_dto(master),
+                red: points_from_dto(red),
+                green: points_from_dto(green),
+                blue: points_from_dto(blue),
+            }),
+            AdjustmentDto::HueSaturation {
+                hue,
+                saturation,
+                lightness,
+            } => Self::HueSaturation(HueSaturation {
+                hue,
+                saturation,
+                lightness,
+            }),
+        }
+    }
+}
+
+/// The kind of a layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LayerKindId {
+    /// A raster layer.
+    Pixel,
+    /// An adjustment layer.
+    Adjustment,
+    /// A group.
+    Group,
+}
+
+/// One layer of the tree that the UI shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerInfo {
+    /// The layer ID ([`expose_editor::LayerId::get`]).
+    pub id: u64,
+    /// The layer name.
+    pub name: String,
+    /// The layer kind.
+    pub kind: LayerKindId,
+    /// `true` if the layer is shown.
+    pub visible: bool,
+    /// The opacity, `0.0..=1.0`.
+    pub opacity: f32,
+    /// The fill opacity, `0.0..=1.0`.
+    pub fill_opacity: f32,
+    /// The blend mode.
+    pub blend_mode: BlendModeId,
+    /// `true` if the layer has a mask.
+    pub has_mask: bool,
+    /// The setting of an adjustment layer; `null` for other kinds.
+    pub adjustment: Option<AdjustmentDto>,
+    /// For a group: `true` if it is isolated, `false` if it passes
+    /// through. `null` for other kinds.
+    pub isolated: Option<bool>,
+    /// For a group: the children, bottom first. `null` for other kinds.
+    pub children: Option<Vec<LayerInfo>>,
+}
+
+impl From<&Layer> for LayerInfo {
+    fn from(layer: &Layer) -> Self {
+        let (kind, adjustment, isolated, children) = match layer.kind() {
+            LayerKind::Pixel(_) => (LayerKindId::Pixel, None, None, None),
+            LayerKind::Adjustment(a) => (LayerKindId::Adjustment, Some(a.into()), None, None),
+            LayerKind::Group(g) => (
+                LayerKindId::Group,
+                None,
+                Some(g.isolation() == GroupIsolation::Isolated),
+                Some(layer_tree(g.children())),
+            ),
+        };
+        Self {
+            id: layer.id().get(),
+            name: layer.name().to_owned(),
+            kind,
+            visible: layer.visible(),
+            opacity: layer.opacity(),
+            fill_opacity: layer.fill_opacity(),
+            blend_mode: layer.blend_mode().into(),
+            has_mask: layer.mask().is_some(),
+            adjustment,
+            isolated,
+            children,
+        }
+    }
+}
+
+/// Converts a layer list (bottom first) to the transport form. The order
+/// stays bottom first.
+pub fn layer_tree(layers: &[Layer]) -> Vec<LayerInfo> {
+    layers.iter().map(LayerInfo::from).collect()
+}
+
+/// The state of an open document that the UI shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentInfo {
+    /// The document ID.
+    pub document_id: DocumentId,
+    /// The canvas width in pixels.
+    pub width: u32,
+    /// The canvas height in pixels.
+    pub height: u32,
+    /// The root layers, bottom first.
+    pub layers: Vec<LayerInfo>,
+    /// `true` if an undo is possible.
+    pub can_undo: bool,
+    /// `true` if a redo is possible.
+    pub can_redo: bool,
+    /// The document revision ([`Document::revision`]). It changes at each
+    /// edit, undo, and redo. The value is a stamp from a process counter
+    /// that increases by one, so it stays far below 2^53, and a JSON number
+    /// in the UI holds it exactly.
+    pub revision: u64,
+}
+
+impl DocumentInfo {
+    /// Makes the info of `document` with the ID `id`.
+    pub fn new(id: DocumentId, document: &Document, can_undo: bool, can_redo: bool) -> Self {
+        Self {
+            document_id: id,
+            width: document.width(),
+            height: document.height(),
+            layers: layer_tree(document.layers()),
+            can_undo,
+            can_redo,
+            revision: document.revision(),
+        }
+    }
+}
+
+/// One edit from the UI. Layer IDs are the values of [`LayerInfo::id`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[allow(missing_docs, reason = "the field names explain the fields")]
+pub enum EditDto {
+    /// Shows or hides a layer.
+    SetVisible { layer_id: u64, visible: bool },
+    /// Sets the opacity.
+    SetOpacity { layer_id: u64, opacity: f32 },
+    /// Sets the fill opacity.
+    SetFillOpacity { layer_id: u64, fill_opacity: f32 },
+    /// Sets the blend mode.
+    SetBlendMode { layer_id: u64, mode: BlendModeId },
+    /// Renames a layer.
+    Rename { layer_id: u64, name: String },
+    /// Moves a layer. `parent_id` `null` is the root list. `index` is in
+    /// the bottom-first child list, after the layer is removed.
+    Move {
+        layer_id: u64,
+        parent_id: Option<u64>,
+        index: usize,
+    },
+    /// Deletes a layer (and its children).
+    Delete { layer_id: u64 },
+    /// Copies a layer and puts the copy directly above it.
+    Duplicate { layer_id: u64 },
+    /// Adds an adjustment layer directly above `above_layer_id` (in the
+    /// same parent), or at the top of the root list for `null`.
+    AddAdjustment {
+        adjustment: AdjustmentDto,
+        above_layer_id: Option<u64>,
+    },
+    /// Replaces the setting of an adjustment layer.
+    SetAdjustment {
+        layer_id: u64,
+        adjustment: AdjustmentDto,
+    },
+}
+
+impl EditDto {
+    /// The name of the history step of this edit.
+    pub const fn step_name(&self) -> &'static str {
+        match self {
+            Self::SetVisible { .. } => "Layer Visibility",
+            Self::SetOpacity { .. } => "Layer Opacity",
+            Self::SetFillOpacity { .. } => "Fill Opacity",
+            Self::SetBlendMode { .. } => "Blend Mode",
+            Self::Rename { .. } => "Rename Layer",
+            Self::Move { .. } => "Move Layer",
+            Self::Delete { .. } => "Delete Layer",
+            Self::Duplicate { .. } => "Duplicate Layer",
+            Self::AddAdjustment { .. } => "New Adjustment Layer",
+            Self::SetAdjustment { .. } => "Adjustment Settings",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Test code: a failed setup is a test failure.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use expose_editor::{DocumentSpec, LayerContent, Placement};
+    use serde_json::json;
+
+    use super::*;
+
+    /// The blend mode names of the UI type `BlendModeId`, in the order of
+    /// [`BlendMode::ALL`].
+    const UI_NAMES: [&str; 27] = [
+        "normal",
+        "dissolve",
+        "darken",
+        "multiply",
+        "colorBurn",
+        "linearBurn",
+        "darkerColor",
+        "lighten",
+        "screen",
+        "colorDodge",
+        "linearDodge",
+        "lighterColor",
+        "overlay",
+        "softLight",
+        "hardLight",
+        "vividLight",
+        "linearLight",
+        "pinLight",
+        "hardMix",
+        "difference",
+        "exclusion",
+        "subtract",
+        "divide",
+        "hue",
+        "saturation",
+        "color",
+        "luminosity",
+    ];
+
+    #[test]
+    fn all_blend_modes_round_trip_with_ui_names() {
+        for (mode, name) in BlendMode::ALL.into_iter().zip(UI_NAMES) {
+            let id = BlendModeId::from(mode);
+            assert_eq!(BlendMode::from(id), mode);
+            assert_eq!(serde_json::to_value(id).unwrap(), json!(name));
+            let parsed: BlendModeId = serde_json::from_value(json!(name)).unwrap();
+            assert_eq!(parsed, id);
+        }
+        assert!(serde_json::from_value::<BlendModeId>(json!("ColorBurn")).is_err());
+    }
+
+    fn levels_channel(k: f32) -> LevelsChannelDto {
+        LevelsChannelDto {
+            input_black: 0.1 * k,
+            input_white: 0.9,
+            gamma: 1.0 + k,
+            output_black: 0.05,
+            output_white: 1.0 - 0.1 * k,
+        }
+    }
+
+    fn sample_adjustments() -> Vec<AdjustmentDto> {
+        let curve = |y: f32| {
+            vec![
+                CurvePointDto { x: 0.0, y: 0.0 },
+                CurvePointDto { x: 0.5, y },
+                CurvePointDto { x: 1.0, y: 1.0 },
+            ]
+        };
+        vec![
+            AdjustmentDto::BrightnessContrast {
+                brightness: 0.25,
+                contrast: -0.5,
+            },
+            AdjustmentDto::Levels {
+                master: levels_channel(0.0),
+                red: levels_channel(1.0),
+                green: levels_channel(2.0),
+                blue: levels_channel(3.0),
+            },
+            AdjustmentDto::Curves {
+                master: curve(0.6),
+                red: curve(0.4),
+                green: curve(0.5),
+                blue: curve(0.7),
+            },
+            AdjustmentDto::HueSaturation {
+                hue: 30.0,
+                saturation: -0.25,
+                lightness: 0.5,
+            },
+        ]
+    }
+
+    #[test]
+    fn adjustments_round_trip_through_editor_types() {
+        for dto in sample_adjustments() {
+            let adjustment = Adjustment::from(dto.clone());
+            adjustment.validate().unwrap();
+            assert_eq!(AdjustmentDto::from(&adjustment), dto);
+            let text = serde_json::to_string(&dto).unwrap();
+            assert_eq!(serde_json::from_str::<AdjustmentDto>(&text).unwrap(), dto);
+        }
+    }
+
+    #[test]
+    fn adjustment_json_uses_ui_names() {
+        let value = serde_json::to_value(AdjustmentDto::BrightnessContrast {
+            brightness: 0.5,
+            contrast: 0.0,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({ "type": "brightnessContrast", "brightness": 0.5, "contrast": 0.0 })
+        );
+        let levels = serde_json::to_value(&sample_adjustments()[1]).unwrap();
+        assert_eq!(levels["type"], "levels");
+        assert_eq!(levels["master"]["inputBlack"], 0.0);
+        assert_eq!(levels["red"]["outputWhite"], 0.9_f32);
+        let hs: AdjustmentDto = serde_json::from_value(
+            json!({ "type": "hueSaturation", "hue": 10, "saturation": 0, "lightness": 0 }),
+        )
+        .unwrap();
+        assert_eq!(
+            hs,
+            AdjustmentDto::HueSaturation {
+                hue: 10.0,
+                saturation: 0.0,
+                lightness: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn edits_parse_from_ui_json() {
+        let cases = [
+            (
+                json!({ "type": "setFillOpacity", "layerId": 3, "fillOpacity": 0.5 }),
+                EditDto::SetFillOpacity {
+                    layer_id: 3,
+                    fill_opacity: 0.5,
+                },
+            ),
+            (
+                json!({ "type": "setBlendMode", "layerId": 1, "mode": "linearDodge" }),
+                EditDto::SetBlendMode {
+                    layer_id: 1,
+                    mode: BlendModeId::LinearDodge,
+                },
+            ),
+            (
+                json!({ "type": "move", "layerId": 2, "parentId": null, "index": 0 }),
+                EditDto::Move {
+                    layer_id: 2,
+                    parent_id: None,
+                    index: 0,
+                },
+            ),
+            (
+                json!({
+                    "type": "addAdjustment",
+                    "adjustment": { "type": "brightnessContrast", "brightness": 0, "contrast": 0 },
+                    "aboveLayerId": 7
+                }),
+                EditDto::AddAdjustment {
+                    adjustment: AdjustmentDto::BrightnessContrast {
+                        brightness: 0.0,
+                        contrast: 0.0,
+                    },
+                    above_layer_id: Some(7),
+                },
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(serde_json::from_value::<EditDto>(value).unwrap(), expected);
+        }
+        assert!(
+            serde_json::from_value::<EditDto>(json!({ "type": "paint", "layerId": 1 })).is_err()
+        );
+    }
+
+    #[test]
+    fn tree_is_bottom_first_with_group_children() {
+        let mut doc = Document::new(DocumentSpec::new(4, 4)).unwrap();
+        let background = doc.layer_ids()[0];
+        let (group, _) = doc
+            .add_layer(
+                "Group",
+                LayerContent::Group(GroupIsolation::Isolated),
+                Placement::root(1),
+            )
+            .unwrap();
+        let (adjust, _) = doc
+            .add_layer(
+                "Hue",
+                LayerContent::Adjustment(Adjustment::HueSaturation(HueSaturation::default())),
+                Placement::new(Some(group), 0),
+            )
+            .unwrap();
+        doc.set_blend_mode(adjust, BlendMode::Screen).unwrap();
+        let info = DocumentInfo::new(9, &doc, true, false);
+        assert_eq!(info.document_id, 9);
+        assert_eq!((info.width, info.height), (4, 4));
+        assert_eq!(info.revision, doc.revision());
+        assert_eq!(info.layers.len(), 2);
+        assert_eq!(info.layers[0].id, background.get());
+        assert_eq!(info.layers[0].kind, LayerKindId::Pixel);
+        assert_eq!(info.layers[0].name, "Background");
+        assert_eq!(info.layers[0].children, None);
+        assert_eq!(info.layers[1].kind, LayerKindId::Group);
+        assert_eq!(info.layers[1].isolated, Some(true));
+        let children = info.layers[1].children.as_ref().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, adjust.get());
+        assert_eq!(children[0].blend_mode, BlendModeId::Screen);
+        assert!(matches!(
+            children[0].adjustment,
+            Some(AdjustmentDto::HueSaturation { .. })
+        ));
+
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["documentId"], 9);
+        assert_eq!(value["canUndo"], true);
+        assert_eq!(value["canRedo"], false);
+        let bottom = &value["layers"][0];
+        assert_eq!(bottom["kind"], "pixel");
+        assert_eq!(bottom["fillOpacity"], 1.0);
+        assert_eq!(bottom["blendMode"], "normal");
+        assert_eq!(bottom["hasMask"], false);
+        assert!(bottom["adjustment"].is_null());
+        assert!(bottom["isolated"].is_null());
+        assert!(bottom["children"].is_null());
+    }
+}

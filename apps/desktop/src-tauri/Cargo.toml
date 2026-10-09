@@ -30,7 +30,9 @@ expose-core.workspace = true
 # CPU develop pipeline for thumbnails of edited photos; GPU preview and
 # display encode for the develop view.
 expose-develop.workspace = true
-# GPU context for the develop preview (the preview engine owns it).
+# Layered documents, history, and the GPU compositor for the editor.
+expose-editor.workspace = true
+# GPU context for the develop preview and the editor (each engine owns one).
 expose-gpu.workspace = true
 # MIT OR Apache-2.0. Runs the `async` GPU API on the preview render thread.
 pollster = "0.4"
