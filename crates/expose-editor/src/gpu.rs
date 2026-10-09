@@ -7,8 +7,9 @@
 //!
 //! # Design
 //!
-//! - The compositor uses the `expose-gpu` kernel API only. All buffers are
-//!   `rgba32float` textures of the region size with **premultiplied** alpha.
+//! - The compositor uses the `expose-gpu` kernel API only. All composite
+//!   buffers are `rgba32float` textures of the region size with
+//!   **premultiplied** alpha.
 //! - Each layer is **one kernel dispatch**. The kernel reads the current
 //!   buffer (the backdrop), the layer data, and the mask, and writes a new
 //!   buffer. A kernel output cannot be one of its inputs, so the
@@ -18,18 +19,75 @@
 //! - The blend space encode and decode (sRGB transfer curve) occur per
 //!   pixel in the kernel. Perceptual blending (the default) thus needs no
 //!   extra passes.
-//! - Each pixel layer is uploaded once for each call. Only the part that is
-//!   inside the region is uploaded. A full layer is uploaded without a CPU
-//!   copy. A later cache of layer textures (for example, keyed by
-//!   [`LayerId`](crate::LayerId) and a content version) can replace the
-//!   upload step: the kernel gets the canvas position and the size of the
-//!   layer texture as parameters, so a full-layer texture also works.
-//! - Masks are uploaded as `rgba32float` with **four mask values in each
+//! - Layer pixels and masks come from the layer texture cache (see below).
+//!   The kernel gets the canvas position and the size of each texture as
+//!   parameters, so a texture can be larger than the region.
+//! - Masks are stored as `rgba32float` with **four mask values in each
 //!   texel** (texel `x / 4`, channel `x % 4`). This uses the memory of a
-//!   one-channel `f32` texture. Only the part inside the region is uploaded.
+//!   one-channel `f32` texture.
 //! - Curves use a table of [`CURVE_TABLE_SIZE`] samples for each channel
 //!   (the color curve, then the master curve), with linear interpolation.
-//!   The other adjustments use the exact formulas.
+//!   The other adjustments use the exact formulas. The table (64 KiB) is
+//!   uploaded at each composite; it is not cached.
+//! - Free region-size buffers stay in a pool in the compositor, so that the
+//!   next call with the same region size does not make new textures.
+//!
+//! # Layer texture cache
+//!
+//! The compositor keeps one texture for the pixels and one for the mask of
+//! each layer, keyed by [`LayerId`]. Each texture records the content
+//! version ([`Layer::pixel_version`], [`Layer::mask_version`]) and the part
+//! of the buffer that it holds.
+//!
+//! - The cached part is the part of the layer (or mask) that is inside the
+//!   canvas. Thus a move inside the canvas does not upload. A move of a
+//!   layer that is partly outside the canvas changes its canvas part and
+//!   uploads it again. If the canvas part is larger than the device texture
+//!   limit, only the part inside the region is cached.
+//! - A property change (opacity, blend mode, visibility, mask enable) does
+//!   not upload. A pixel write, a mask write, or a new mask uploads that
+//!   texture again (the full canvas part, once).
+//! - At each composite, the cache drops the entries of layers that are no
+//!   longer in the document, and the textures with an old version. A
+//!   deleted layer that comes back by undo is uploaded again.
+//! - Content versions are unique in the process (see [`crate::version`]),
+//!   so one compositor can serve many documents and clones.
+//!
+//! # View rendering
+//!
+//! [`GpuCompositor::render_view`] keeps the composite of the full canvas
+//! and a pyramid of 2 x 2 means of it on the GPU. It composites again only
+//! when [`Document::revision`] changes. A pan or a zoom then runs one
+//! kernel of the view size: nearest neighbor for zoom 1 or more, an area
+//! mean for zoom less than 1 (from the pyramid level on which one output
+//! pixel covers 1 to 2 texels). The output has straight alpha.
+//!
+//! Limit: the pyramid levels have the canvas size divided by `2^k`,
+//! rounded up. At the right and bottom canvas edge, the last texel of a
+//! level can include up to `2^k - 1` canvas pixels of transparent area.
+//! Output pixels at that edge can thus be slightly more transparent than
+//! the exact area mean.
+//!
+//! # Memory
+//!
+//! All cached textures are `rgba32float` (16 bytes for each pixel), so that
+//! the GPU result agrees with the CPU reference. For a canvas of `N`
+//! pixels, the compositor keeps about:
+//!
+//! - for each pixel layer: 16 bytes for each pixel of its canvas part
+//!   (`16 N` for a canvas-size layer);
+//! - for each mask: 4 bytes for each pixel of its canvas part;
+//! - free composite buffers: `16 N` each, normally one or two (one more
+//!   for each level of nested groups);
+//! - with [`GpuCompositor::render_view`]: the composite (`16 N`), the
+//!   pyramid (about `16 N / 3`), and the view output (16 bytes for each
+//!   output pixel).
+//!
+//! Example: 4096 x 4096 (`16 N` = 256 MiB) with 6 canvas-size layers, 2
+//! smaller layers, and one mask: about 2.3 GiB.
+//! [`GpuCompositor::cache_memory_bytes`] reports the current value, and
+//! [`GpuCompositor::clear_cache`] frees all of it (for example, when the
+//! editor closes a document).
 //!
 //! # Differences from the CPU reference
 //!
@@ -46,6 +104,8 @@
 //!   the branches of some blend modes) can give a different result when a
 //!   value is within float error of the step.
 
+use std::collections::HashMap;
+
 use bytemuck::{Pod, Zeroable};
 use expose_core::buffer::{Rect, WorkingImage};
 use expose_gpu::{CHANNELS, GpuContext, GpuImage, ImageFormat, Kernel};
@@ -54,7 +114,7 @@ use crate::adjust::{Prepared, PreparedAdjustment};
 use crate::blend::{BlendMode, BlendSpace};
 use crate::document::Document;
 use crate::error::{EditorError, EditorResult};
-use crate::layer::{GroupIsolation, Layer, LayerKind, Mask, PixelLayer};
+use crate::layer::{GroupIsolation, Layer, LayerId, LayerKind, MaskImage};
 
 /// The number of samples in the curve table of a curves adjustment. The
 /// sample `i` is at `x = i / 4096`, so the usual curve points (for example
@@ -98,6 +158,18 @@ const CLEAR_KERNEL: Kernel = Kernel {
         include_str!("shaders/common.wgsl"),
         include_str!("shaders/clear.wgsl")
     ),
+};
+
+/// Makes the next level of the view pyramid (2 x 2 mean).
+const MIP_KERNEL: Kernel = Kernel {
+    name: "expose-editor/mip-down",
+    source: include_str!("shaders/mip_down.wgsl"),
+};
+
+/// Renders a view from one level of the view pyramid.
+const VIEW_KERNEL: Kernel = Kernel {
+    name: "expose-editor/view",
+    source: include_str!("shaders/view.wgsl"),
 };
 
 /// Adjustment kinds in the kernel (`params.flags.w`).
@@ -196,15 +268,178 @@ fn check_region(document: &Document, region: Rect) -> EditorResult<()> {
     Ok(())
 }
 
+/// The smallest permitted [`ViewSpec::scale`] (1/65536).
+pub const MIN_VIEW_SCALE: f64 = 1.0 / 65_536.0;
+
+/// The largest permitted [`ViewSpec::scale`] (65536).
+pub const MAX_VIEW_SCALE: f64 = 65_536.0;
+
+/// The largest permitted absolute value of [`ViewSpec::origin_x`] and
+/// [`ViewSpec::origin_y`], in canvas pixels. It keeps the integer part of
+/// the origin in the `i32` range of the kernel.
+pub const MAX_VIEW_ORIGIN: f64 = 1.0e9;
+
+/// A view of the canvas: the part of the composite that an editor canvas
+/// shows, at a zoom level. See [`GpuCompositor::render_view`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewSpec {
+    /// Canvas x coordinate at the left edge of the output.
+    pub origin_x: f64,
+    /// Canvas y coordinate at the top edge of the output.
+    pub origin_y: f64,
+    /// Output pixels for each canvas pixel. 1 is 100 %, 0.5 is 50 %.
+    /// Must be finite and in [`MIN_VIEW_SCALE`]..=[`MAX_VIEW_SCALE`].
+    pub scale: f64,
+    /// Output width in pixels, `1..=` the device texture limit.
+    pub width: u32,
+    /// Output height in pixels, `1..=` the device texture limit.
+    pub height: u32,
+}
+
+/// The parameter block of the view kernel. It agrees with `ViewParams` in
+/// `shaders/view.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct ViewParams {
+    /// Integer part of the origin in level texels (x, y), level size.
+    base: [i32; 4],
+    /// Fraction of the origin (x, y), texels for each output pixel, mode
+    /// (0 = nearest, 1 = area mean).
+    frac: [f32; 4],
+}
+
+/// Checks a view specification.
+fn check_view(view: &ViewSpec, max_dim: u32) -> EditorResult<()> {
+    if !view.scale.is_finite() || view.scale < MIN_VIEW_SCALE || view.scale > MAX_VIEW_SCALE {
+        return Err(EditorError::InvalidView(
+            "scale must be finite and in MIN_VIEW_SCALE..=MAX_VIEW_SCALE",
+        ));
+    }
+    if !view.origin_x.is_finite()
+        || !view.origin_y.is_finite()
+        || view.origin_x.abs() > MAX_VIEW_ORIGIN
+        || view.origin_y.abs() > MAX_VIEW_ORIGIN
+    {
+        return Err(EditorError::InvalidView(
+            "origin must be finite and at most MAX_VIEW_ORIGIN from 0",
+        ));
+    }
+    if view.width == 0 || view.height == 0 {
+        return Err(EditorError::InvalidView("output size must not be 0"));
+    }
+    if view.width > max_dim || view.height > max_dim {
+        return Err(EditorError::InvalidView(
+            "output size is larger than the device texture limit",
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the pyramid level for a view scale: 0 for a scale of 1 or more,
+/// else the largest `k` with `scale * 2^k <= 1`. At level `k`, one output
+/// pixel then covers `1 / (scale * 2^k)` texels, which is in `1..2`.
+fn view_level(scale: f64) -> usize {
+    let mut level = 0;
+    let mut covered = scale;
+    // `scale >= MIN_VIEW_SCALE = 2^-16`, so the loop stops after at most
+    // 16 steps.
+    while covered * 2.0 <= 1.0 {
+        covered *= 2.0;
+        level += 1;
+    }
+    level
+}
+
+/// Builds the view kernel parameters for a source level of `size` texels.
+/// `level_scale` is `2^level` (canvas pixels for each texel).
+fn view_params(
+    view: &ViewSpec,
+    level_scale: f64,
+    size: (u32, u32),
+    nearest: bool,
+) -> EditorResult<ViewParams> {
+    let ox = view.origin_x / level_scale;
+    let oy = view.origin_y / level_scale;
+    let (bx, by) = (ox.floor(), oy.floor());
+    // `check_view` limits the origin to MAX_VIEW_ORIGIN (1e9 < 2^31), and
+    // `level_scale >= 1`, so the integer parts fit in i32. The fractions
+    // are in 0..1 and the step is at most 2^16 (scale >= 2^-16), so the
+    // f32 values are finite.
+    #[allow(clippy::cast_possible_truncation)]
+    let params = ViewParams {
+        base: [bx as i32, by as i32, to_i32(size.0)?, to_i32(size.1)?],
+        frac: [
+            (ox - bx) as f32,
+            (oy - by) as f32,
+            (1.0 / (view.scale * level_scale)) as f32,
+            if nearest { 0.0 } else { 1.0 },
+        ],
+    };
+    Ok(params)
+}
+
+/// One cached texture: a part of the pixels of a layer, or of its mask.
+#[derive(Debug)]
+struct CachedPart {
+    /// The content version of the values ([`Layer::pixel_version`] or
+    /// [`Layer::mask_version`]).
+    version: u64,
+    /// The uploaded part, in layer (or mask) pixel coordinates.
+    rect: Rect,
+    /// The values (masks: four values in each texel).
+    image: GpuImage,
+}
+
+/// The cached textures of one layer.
+#[derive(Debug, Default)]
+struct LayerEntry {
+    pixels: Option<CachedPart>,
+    mask: Option<CachedPart>,
+}
+
+/// The layer texture cache. See the module documentation.
+#[derive(Debug, Default)]
+struct LayerCache {
+    entries: HashMap<LayerId, LayerEntry>,
+    /// The number of pixel and mask uploads since the compositor was made.
+    uploads: u64,
+}
+
+/// The cached composite of the full canvas and its view pyramid.
+#[derive(Debug)]
+struct ViewCache {
+    /// The document revision of the composite.
+    revision: u64,
+    /// The premultiplied composite of the full canvas.
+    composite: GpuImage,
+    /// The pyramid: `mips[0]` is the composite halved (sizes rounded up),
+    /// `mips[k + 1]` is `mips[k]` halved. The last level is 1 x 1.
+    mips: Vec<GpuImage>,
+}
+
 /// The GPU compositor.
 ///
 /// Make one compositor for each [`GpuContext`] and use it for all
-/// composites. The compositor holds a small placeholder texture. The kernel
-/// pipelines are compiled on the first use and stay in the context cache.
+/// composites. The compositor keeps GPU memory between calls: the layer
+/// texture cache, free composite buffers, and the cached view composite
+/// (see the module documentation). [`GpuCompositor::clear_cache`] frees
+/// it. The kernel pipelines are compiled on the first use and stay in the
+/// context cache.
 #[derive(Debug)]
 pub struct GpuCompositor {
     /// A 1 x 1 texture for kernel inputs that a step does not use.
     placeholder: GpuImage,
+    /// Layer textures.
+    cache: LayerCache,
+    /// Free composite buffers. All have the size of the last composite
+    /// region.
+    pool: Vec<GpuImage>,
+    /// The composite of the full canvas for [`GpuCompositor::render_view`].
+    view: Option<ViewCache>,
+    /// The output of the last [`GpuCompositor::render_view`].
+    view_output: Option<GpuImage>,
+    /// The number of view composites since the compositor was made.
+    view_builds: u64,
 }
 
 impl GpuCompositor {
@@ -212,12 +447,71 @@ impl GpuCompositor {
     pub async fn new(ctx: &GpuContext) -> EditorResult<Self> {
         Ok(Self {
             placeholder: GpuImage::new(ctx, 1, 1, FORMAT).await?,
+            cache: LayerCache::default(),
+            pool: Vec::new(),
+            view: None,
+            view_output: None,
+            view_builds: 0,
         })
+    }
+
+    /// Frees all cached GPU memory: layer textures, free buffers, the view
+    /// composite and its pyramid, and the view output. The next call
+    /// uploads and composites again.
+    pub fn clear_cache(&mut self) {
+        self.cache.entries.clear();
+        self.pool.clear();
+        self.view = None;
+        self.view_output = None;
+    }
+
+    /// Returns the number of layer and mask uploads since the compositor
+    /// was made. Use it to check the cache (for example, a change of the
+    /// opacity must not upload).
+    pub const fn layer_uploads(&self) -> u64 {
+        self.cache.uploads
+    }
+
+    /// Returns the number of full-canvas composites that
+    /// [`GpuCompositor::render_view`] made since the compositor was made.
+    /// Use it to check the cache (for example, a pan must not composite).
+    pub const fn view_composites(&self) -> u64 {
+        self.view_builds
+    }
+
+    /// Returns the approximate GPU memory that the compositor keeps
+    /// between calls, in bytes (all textures, the placeholder included).
+    pub fn cache_memory_bytes(&self) -> u64 {
+        let bytes = |image: &GpuImage| {
+            u64::from(image.width())
+                * u64::from(image.height())
+                * u64::from(image.format().bytes_per_pixel())
+        };
+        let parts = self.cache.entries.values().flat_map(|e| {
+            e.pixels
+                .iter()
+                .chain(e.mask.iter())
+                .map(|part| bytes(&part.image))
+        });
+        let view = self
+            .view
+            .iter()
+            .flat_map(|v| std::iter::once(&v.composite).chain(v.mips.iter()))
+            .map(bytes);
+        bytes(&self.placeholder)
+            + parts.sum::<u64>()
+            + self.pool.iter().map(bytes).sum::<u64>()
+            + view.sum::<u64>()
+            + self.view_output.iter().map(bytes).sum::<u64>()
     }
 
     /// Composites the visible layers of `document` in `region` (canvas
     /// coordinates) on the GPU. Returns a premultiplied `rgba32float` image
     /// of the region size.
+    ///
+    /// The layer texture cache supplies the layer pixels and masks: only
+    /// layers with changed values are uploaded. The function does not use
+    /// or change the view composite of [`GpuCompositor::render_view`].
     ///
     /// The function submits the work and returns. A read-back of the
     /// result waits for the GPU.
@@ -230,31 +524,46 @@ impl GpuCompositor {
     /// - [`EditorError::Gpu`] if a GPU operation fails (for example, the
     ///   region is larger than the device texture limit).
     pub async fn composite_gpu(
-        &self,
+        &mut self,
         ctx: &GpuContext,
         document: &Document,
         region: Rect,
     ) -> EditorResult<GpuImage> {
         check_region(document, region)?;
+        self.cache.prune(document);
+        // The pool keeps buffers of one size only.
+        self.pool
+            .retain(|b| b.width() == region.width && b.height() == region.height);
+        let region_param = rect_param(region)?;
+        let mut clear_params = Params::zeroed();
+        clear_params.region = region_param;
         let mut run = Run {
-            ctx,
+            bufs: Bufs {
+                ctx,
+                width: region.width,
+                height: region.height,
+                free: &mut self.pool,
+                clear_params,
+            },
+            cache: &mut self.cache,
             placeholder: &self.placeholder,
             region,
-            region_param: rect_param(region)?,
+            region_param,
+            canvas: document.bounds(),
+            max_dim: ctx.limits().max_texture_dimension_2d,
             space: document.blend_space(),
-            pool: Vec::new(),
         };
-        let start = run.take_clear().await?;
+        let start = run.bufs.take_clear(run.placeholder).await?;
         let result = run
             .composite_list(document.layers(), Buf::Owned(start))
             .await?;
-        run.into_image(result).await
+        run.bufs.into_image(result).await
     }
 
     /// Composites like [`Self::composite_gpu`] and reads the result back
     /// to a premultiplied [`WorkingImage`].
     pub async fn composite_gpu_image(
-        &self,
+        &mut self,
         ctx: &GpuContext,
         document: &Document,
         region: Rect,
@@ -271,6 +580,135 @@ impl GpuCompositor {
             pixels,
         )?)
     }
+
+    /// Renders a view of the composite of `document` (zoom and pan) for an
+    /// editor canvas.
+    ///
+    /// Returns an `rgba32float` image of `view.width x view.height` with
+    /// **straight** alpha (linear Rec. 2020), for a display encoder that
+    /// expects straight alpha. Output pixels outside the canvas are
+    /// transparent (alpha 0). The image belongs to the compositor; the next
+    /// call writes to it again.
+    ///
+    /// - The compositor keeps the composite of the full canvas on the GPU.
+    ///   It composites again only if [`Document::revision`] changed since
+    ///   the last call (or the document is a different one). A pan or a
+    ///   zoom thus runs one kernel of the view size.
+    /// - Zoom 1 or more (`scale >= 1`): nearest neighbor, so that canvas
+    ///   pixels show as sharp squares.
+    /// - Zoom less than 1: the area mean of the canvas pixels under each
+    ///   output pixel (no aliasing). The compositor keeps a pyramid of
+    ///   2 x 2 means of the composite and reads the level on which an
+    ///   output pixel covers 1 to 2 texels. The mean is in premultiplied
+    ///   space, so transparent pixels do not darken the colors.
+    ///
+    /// # Errors
+    ///
+    /// - [`EditorError::InvalidView`] if the scale or the origin is not
+    ///   valid, or the output size is 0 or larger than the device texture
+    ///   limit.
+    /// - The errors of [`Self::composite_gpu`] (for example, a canvas that
+    ///   is larger than the device texture limit gives
+    ///   [`EditorError::Gpu`]).
+    pub async fn render_view(
+        &mut self,
+        ctx: &GpuContext,
+        document: &Document,
+        view: &ViewSpec,
+    ) -> EditorResult<&GpuImage> {
+        check_view(view, ctx.limits().max_texture_dimension_2d)?;
+        let cache = self.take_view(ctx, document).await?;
+
+        let wanted = view_level(view.scale);
+        let level = wanted.min(cache.mips.len());
+        let source = match level.checked_sub(1).and_then(|i| cache.mips.get(i)) {
+            Some(mip) => mip,
+            None => &cache.composite,
+        };
+        // `level` is at most the pyramid depth (at most 15 for
+        // MAX_DIMENSION), so the cast is exact.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let level_scale = 2.0_f64.powi(level as i32);
+        let params = view_params(
+            view,
+            level_scale,
+            (source.width(), source.height()),
+            view.scale >= 1.0,
+        );
+
+        let out = match self.view_output.take() {
+            Some(image) if image.width() == view.width && image.height() == view.height => image,
+            _ => GpuImage::new(ctx, view.width, view.height, FORMAT).await?,
+        };
+        let out = self.view_output.insert(out);
+        let result = match params {
+            Ok(params) => ctx
+                .run_kernel_multi(&VIEW_KERNEL, &params, &[source], out)
+                .await
+                .map_err(EditorError::from),
+            Err(error) => Err(error),
+        };
+        self.view = Some(cache);
+        result?;
+        Ok(out)
+    }
+
+    /// Takes the view composite out of `self.view`, and composites again
+    /// if the document revision or the canvas size changed.
+    async fn take_view(
+        &mut self,
+        ctx: &GpuContext,
+        document: &Document,
+    ) -> EditorResult<ViewCache> {
+        let bounds = document.bounds();
+        let mut mips = Vec::new();
+        if let Some(cache) = self.view.take() {
+            let same_size = cache.composite.width() == bounds.width
+                && cache.composite.height() == bounds.height;
+            if same_size && cache.revision == document.revision() {
+                return Ok(cache);
+            }
+            if same_size {
+                // The new composite replaces the old one, so the old buffer
+                // can take the new composite. The pyramid textures stay.
+                self.pool.push(cache.composite);
+                mips = cache.mips;
+            }
+        }
+        self.view_builds += 1;
+        let composite = self.composite_gpu(ctx, document, bounds).await?;
+        build_pyramid(ctx, document.revision(), composite, mips).await
+    }
+}
+
+/// Fills the view pyramid of `composite`. `mips` are the textures of an
+/// earlier pyramid of the same canvas size, or empty (then the function
+/// makes new textures).
+async fn build_pyramid(
+    ctx: &GpuContext,
+    revision: u64,
+    composite: GpuImage,
+    mut mips: Vec<GpuImage>,
+) -> EditorResult<ViewCache> {
+    if mips.is_empty() {
+        let (mut w, mut h) = (composite.width(), composite.height());
+        while w > 1 || h > 1 {
+            w = w.div_ceil(2);
+            h = h.div_ceil(2);
+            mips.push(GpuImage::new(ctx, w, h, FORMAT).await?);
+        }
+    }
+    let mut source = &composite;
+    for mip in &mips {
+        ctx.run_kernel_multi(&MIP_KERNEL, &(), &[source], mip)
+            .await?;
+        source = mip;
+    }
+    Ok(ViewCache {
+        revision,
+        composite,
+        mips,
+    })
 }
 
 /// A compositor buffer: owned by the current step, or the backdrop of a
@@ -289,50 +727,46 @@ impl Buf<'_> {
     }
 }
 
-/// The state of one composite call.
-struct Run<'c> {
+/// The region-size buffers of one composite call. Free buffers go back to
+/// the pool of the compositor, so the next call can use them again.
+struct Bufs<'c> {
     ctx: &'c GpuContext,
-    placeholder: &'c GpuImage,
-    region: Rect,
-    region_param: [i32; 4],
-    space: BlendSpace,
-    /// Free region-size buffers.
-    pool: Vec<GpuImage>,
+    width: u32,
+    height: u32,
+    /// Free region-size buffers (the pool of the compositor).
+    free: &'c mut Vec<GpuImage>,
+    /// The parameters of the clear kernel.
+    clear_params: Params,
 }
 
-impl Run<'_> {
+impl Bufs<'_> {
     /// Takes a region-size buffer with any content.
     async fn take(&mut self) -> EditorResult<GpuImage> {
-        match self.pool.pop() {
+        match self.free.pop() {
             Some(image) => Ok(image),
-            None => {
-                Ok(GpuImage::new(self.ctx, self.region.width, self.region.height, FORMAT).await?)
-            }
+            None => Ok(GpuImage::new(self.ctx, self.width, self.height, FORMAT).await?),
         }
     }
 
     /// Takes a transparent region-size buffer.
-    async fn take_clear(&mut self) -> EditorResult<GpuImage> {
-        match self.pool.pop() {
+    async fn take_clear(&mut self, placeholder: &GpuImage) -> EditorResult<GpuImage> {
+        match self.free.pop() {
             Some(image) => {
-                let p = self.placeholder;
-                let params = self.params();
+                let p = placeholder;
                 self.ctx
-                    .run_kernel_multi(&CLEAR_KERNEL, &params, &[p, p, p], &image)
+                    .run_kernel_multi(&CLEAR_KERNEL, &self.clear_params, &[p, p, p], &image)
                     .await?;
                 Ok(image)
             }
             // A new image is zero-filled.
-            None => {
-                Ok(GpuImage::new(self.ctx, self.region.width, self.region.height, FORMAT).await?)
-            }
+            None => Ok(GpuImage::new(self.ctx, self.width, self.height, FORMAT).await?),
         }
     }
 
     /// Puts an owned buffer back in the pool.
     fn recycle(&mut self, buf: Buf<'_>) {
         if let Buf::Owned(image) = buf {
-            self.pool.push(image);
+            self.free.push(image);
         }
     }
 
@@ -348,22 +782,6 @@ impl Run<'_> {
                 Ok(out)
             }
         }
-    }
-
-    /// The parameters that are the same for all steps.
-    fn params(&self) -> Params {
-        let mut params = Params::zeroed();
-        params.region = self.region_param;
-        params.flags[1] = space_id(self.space);
-        params
-    }
-
-    /// The parameters of a layer step without the mask.
-    fn layer_params(&self, layer: &Layer, base: f32) -> Params {
-        let mut params = self.params();
-        params.flags[0] = mode_id(layer.blend_mode());
-        params.coef[0] = base;
-        params
     }
 
     /// Runs one step: `kernel` reads `cur`, `mask`, and `aux` and writes a
@@ -384,6 +802,351 @@ impl Run<'_> {
         self.recycle(old);
         Ok(())
     }
+}
+
+/// Converts a rectangle in canvas coordinates to the coordinates of a
+/// buffer at `offset`. The caller must make sure that `rect` is inside the
+/// buffer (for example, an intersection with it).
+fn to_local(rect: Rect, offset: (i32, i32)) -> EditorResult<Rect> {
+    let x = u32::try_from(i64::from(rect.x) - i64::from(offset.0))
+        .map_err(|_| EditorError::OffsetOverflow)?;
+    let y = u32::try_from(i64::from(rect.y) - i64::from(offset.1))
+        .map_err(|_| EditorError::OffsetOverflow)?;
+    Ok(Rect::new(x, y, rect.width, rect.height))
+}
+
+/// Returns the kernel rectangle (canvas position and size) of a part
+/// `rect` of a buffer at `offset`.
+fn canvas_param(rect: Rect, offset: (i32, i32)) -> EditorResult<[i32; 4]> {
+    let x = offset
+        .0
+        .checked_add(to_i32(rect.x)?)
+        .ok_or(EditorError::OffsetOverflow)?;
+    let y = offset
+        .1
+        .checked_add(to_i32(rect.y)?)
+        .ok_or(EditorError::OffsetOverflow)?;
+    Ok([x, y, to_i32(rect.width)?, to_i32(rect.height)?])
+}
+
+impl LayerCache {
+    /// Drops the entries of layers that are no longer in `document`, and
+    /// the textures whose values changed.
+    fn prune(&mut self, document: &Document) {
+        // Layer ID -> (pixel version if a pixel layer, mask version if the
+        // layer has a mask).
+        let mut live: HashMap<LayerId, (Option<u64>, Option<u64>)> = HashMap::new();
+        for layer in document.layers() {
+            layer.visit(&mut |l| {
+                let pixels = l.as_pixel().map(|_| l.pixel_version());
+                let mask = l.mask().map(|_| l.mask_version());
+                live.insert(l.id(), (pixels, mask));
+            });
+        }
+        self.entries.retain(|id, entry| {
+            let Some(&(pixels, mask)) = live.get(id) else {
+                return false;
+            };
+            if entry.pixels.as_ref().map(|p| p.version) != pixels {
+                entry.pixels = None;
+            }
+            if entry.mask.as_ref().map(|m| m.version) != mask {
+                entry.mask = None;
+            }
+            entry.pixels.is_some() || entry.mask.is_some()
+        });
+    }
+
+    /// Returns the textures of one layer step, and uploads the values that
+    /// are not in the cache or are out of date.
+    ///
+    /// - `source`: the pixels of a pixel layer, or `None` for other layers
+    ///   and for a pixel layer outside the region (then the function also
+    ///   does not get the mask).
+    /// - `mask`: the values of an enabled mask, or `None` if the layer has
+    ///   no enabled mask or the mask buffer is outside the region.
+    async fn textures<'s>(
+        &'s mut self,
+        ctx: &GpuContext,
+        layer: &Layer,
+        area: Area,
+    ) -> EditorResult<StepTextures<'s>> {
+        let Self { entries, uploads } = self;
+        let entry = entries.entry(layer.id()).or_default();
+        let source = match layer.as_pixel() {
+            Some(p) => {
+                let img = p.image();
+                let (ox, oy) = p.offset();
+                let Some(needed) =
+                    area.region
+                        .intersection_signed(ox, oy, img.width(), img.height())
+                else {
+                    return Ok(StepTextures {
+                        source: None,
+                        mask: None,
+                    });
+                };
+                let wanted = Wanted {
+                    version: layer.pixel_version(),
+                    offset: (ox, oy),
+                    needed,
+                };
+                let part = ensure_part(
+                    ctx,
+                    &mut entry.pixels,
+                    uploads,
+                    wanted,
+                    PartData::Pixels(img),
+                    area,
+                )
+                .await?;
+                Some(part)
+            }
+            None => None,
+        };
+        let mask = match layer.mask().filter(|m| m.enabled) {
+            Some(m) => {
+                let img = &m.image;
+                let (ox, oy) = m.offset;
+                match area
+                    .region
+                    .intersection_signed(ox, oy, img.width(), img.height())
+                {
+                    Some(needed) => {
+                        let wanted = Wanted {
+                            version: layer.mask_version(),
+                            offset: (ox, oy),
+                            needed,
+                        };
+                        let part = ensure_part(
+                            ctx,
+                            &mut entry.mask,
+                            uploads,
+                            wanted,
+                            PartData::Mask(img),
+                            area,
+                        )
+                        .await?;
+                        Some(part)
+                    }
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        Ok(StepTextures { source, mask })
+    }
+}
+
+/// The area of one composite call, for the layer cache.
+#[derive(Debug, Clone, Copy)]
+struct Area {
+    /// The composite region.
+    region: Rect,
+    /// The canvas rectangle. The cache keeps the parts of layers and masks
+    /// that are inside it.
+    canvas: Rect,
+    /// The device texture limit.
+    max_dim: u32,
+}
+
+/// The values of a cached part.
+#[derive(Clone, Copy)]
+enum PartData<'a> {
+    Pixels(&'a WorkingImage),
+    Mask(&'a MaskImage),
+}
+
+impl PartData<'_> {
+    fn size(self) -> (u32, u32) {
+        match self {
+            Self::Pixels(img) => (img.width(), img.height()),
+            Self::Mask(img) => (img.width(), img.height()),
+        }
+    }
+
+    /// The texture width of a part `width` values wide.
+    const fn texel_width(self, width: u32) -> u32 {
+        match self {
+            Self::Pixels(_) => width,
+            Self::Mask(_) => width.div_ceil(4),
+        }
+    }
+
+    async fn upload(self, ctx: &GpuContext, rect: Rect) -> EditorResult<GpuImage> {
+        match self {
+            Self::Pixels(img) => upload_pixels(ctx, img, rect).await,
+            Self::Mask(img) => upload_mask(ctx, img, rect).await,
+        }
+    }
+}
+
+/// What a step needs of one cached part.
+#[derive(Debug, Clone, Copy)]
+struct Wanted {
+    /// The content version of the values.
+    version: u64,
+    /// The canvas position of the buffer.
+    offset: (i32, i32),
+    /// The part of the buffer that the step reads, in canvas coordinates.
+    needed: Rect,
+}
+
+/// The textures of one layer step (see [`LayerCache::textures`]).
+struct StepTextures<'a> {
+    source: Option<&'a CachedPart>,
+    mask: Option<&'a CachedPart>,
+}
+
+/// Returns the cached part in `slot` if it has the wanted version and
+/// covers the needed part. Else uploads a new part and stores it in
+/// `slot`.
+///
+/// A new part is the part of the buffer inside the canvas, so that a later
+/// call with a different region can use it again. If that part is larger
+/// than the device texture limit, the new part is only the needed part.
+async fn ensure_part<'e>(
+    ctx: &GpuContext,
+    slot: &'e mut Option<CachedPart>,
+    uploads: &mut u64,
+    wanted: Wanted,
+    data: PartData<'_>,
+    area: Area,
+) -> EditorResult<&'e CachedPart> {
+    let local = to_local(wanted.needed, wanted.offset)?;
+    let part = match slot.take() {
+        Some(part) if part.version == wanted.version && part.rect.contains_rect(&local) => part,
+        // An old part is dropped here, before the new texture is made.
+        _ => {
+            let (w, h) = data.size();
+            let (ox, oy) = wanted.offset;
+            // `needed` is inside the region, which is inside the canvas,
+            // so the canvas part exists and contains `needed`. If it did
+            // not exist, `needed` is a correct (smaller) choice.
+            let cover = area
+                .canvas
+                .intersection_signed(ox, oy, w, h)
+                .unwrap_or(wanted.needed);
+            let fits =
+                data.texel_width(cover.width) <= area.max_dim && cover.height <= area.max_dim;
+            let chosen = if fits { cover } else { wanted.needed };
+            let rect = to_local(chosen, wanted.offset)?;
+            let image = data.upload(ctx, rect).await?;
+            *uploads += 1;
+            CachedPart {
+                version: wanted.version,
+                rect,
+                image,
+            }
+        }
+    };
+    Ok(slot.insert(part))
+}
+
+/// Sets the mask parameters of a layer step. Returns the mask texture, or
+/// `None` if the kernel does not read it.
+fn set_mask_params<'t>(
+    layer: &Layer,
+    part: Option<&'t CachedPart>,
+    params: &mut Params,
+) -> EditorResult<Option<&'t GpuImage>> {
+    let Some(m) = layer.mask().filter(|m| m.enabled) else {
+        // A disabled mask has the value 1 everywhere: the coverage is the
+        // base value.
+        params.flags[2] = 0;
+        return Ok(None);
+    };
+    params.flags[2] = 1;
+    params.coef[1] = m.fill.value();
+    if let Some(part) = part {
+        params.mask = canvas_param(part.rect, m.offset)?;
+        Ok(Some(&part.image))
+    } else {
+        // The region is fully outside the mask buffer: the fill value
+        // applies everywhere.
+        params.mask = [0; 4];
+        Ok(None)
+    }
+}
+
+/// Uploads the part `rect` (layer pixel coordinates, inside the image) of
+/// a layer image.
+async fn upload_pixels(ctx: &GpuContext, img: &WorkingImage, rect: Rect) -> EditorResult<GpuImage> {
+    if rect == img.bounds() {
+        // The full layer: no CPU copy.
+        let image =
+            GpuImage::from_rgba_f32(ctx, rect.width, rect.height, FORMAT, img.as_slice()).await?;
+        return Ok(image);
+    }
+    let (x0, y0) = (rect.x as usize, rect.y as usize);
+    let (w, h) = (rect.width as usize, rect.height as usize);
+    let src_row = img.width() as usize * CHANNELS;
+    let all = img.as_slice();
+    let mut data = Vec::with_capacity(w * h * CHANNELS);
+    for row in y0..y0 + h {
+        let start = row * src_row + x0 * CHANNELS;
+        data.extend_from_slice(&all[start..start + w * CHANNELS]);
+    }
+    Ok(GpuImage::from_rgba_f32(ctx, rect.width, rect.height, FORMAT, &data).await?)
+}
+
+/// Uploads the part `rect` (mask pixel coordinates, inside the mask) of a
+/// mask image, four values in each texel.
+async fn upload_mask(ctx: &GpuContext, img: &MaskImage, rect: Rect) -> EditorResult<GpuImage> {
+    let (x0, y0) = (rect.x as usize, rect.y as usize);
+    let (w, h) = (rect.width as usize, rect.height as usize);
+    let texel_width = rect.width.div_ceil(4);
+    let row_len = texel_width as usize * CHANNELS;
+    let src_row = img.width() as usize;
+    let all = img.data();
+    let mut data = vec![0.0_f32; row_len * h];
+    for (row, dst) in data.chunks_exact_mut(row_len).enumerate() {
+        let start = (y0 + row) * src_row + x0;
+        dst[..w].copy_from_slice(&all[start..start + w]);
+    }
+    Ok(GpuImage::from_rgba_f32(ctx, texel_width, rect.height, FORMAT, &data).await?)
+}
+
+/// The state of one composite call.
+struct Run<'c> {
+    bufs: Bufs<'c>,
+    cache: &'c mut LayerCache,
+    placeholder: &'c GpuImage,
+    region: Rect,
+    region_param: [i32; 4],
+    /// The canvas rectangle. The cache keeps the parts of layers and masks
+    /// that are inside it.
+    canvas: Rect,
+    /// The device texture limit.
+    max_dim: u32,
+    space: BlendSpace,
+}
+
+impl Run<'_> {
+    /// The parameters that are the same for all steps.
+    fn params(&self) -> Params {
+        let mut params = Params::zeroed();
+        params.region = self.region_param;
+        params.flags[1] = space_id(self.space);
+        params
+    }
+
+    /// The parameters of a layer step without the mask.
+    fn layer_params(&self, layer: &Layer, base: f32) -> Params {
+        let mut params = self.params();
+        params.flags[0] = mode_id(layer.blend_mode());
+        params.coef[0] = base;
+        params
+    }
+
+    /// The area of this call for the layer cache.
+    const fn area(&self) -> Area {
+        Area {
+            region: self.region,
+            canvas: self.canvas,
+            max_dim: self.max_dim,
+        }
+    }
 
     /// Composites `layers` onto `cur` and returns the new buffer.
     async fn composite_list<'a>(
@@ -392,6 +1155,8 @@ impl Run<'_> {
         mut cur: Buf<'a>,
     ) -> EditorResult<Buf<'a>> {
         let placeholder = self.placeholder;
+        let ctx = self.bufs.ctx;
+        let area = self.area();
         for layer in layers {
             if !layer.visible() {
                 continue;
@@ -403,151 +1168,68 @@ impl Run<'_> {
             let mut params = self.layer_params(layer, base);
             match layer.kind() {
                 LayerKind::Pixel(p) => {
-                    let Some(source) = self.upload_layer(p, &mut params).await? else {
+                    let tex = self.cache.textures(ctx, layer, area).await?;
+                    // No source: the layer is outside the region.
+                    let Some(source) = tex.source else {
                         continue;
                     };
-                    let mask = self.upload_mask(layer.mask(), &mut params).await?;
-                    let mask = mask.as_ref().unwrap_or(placeholder);
-                    self.step(&mut cur, &BLEND_KERNEL, &params, mask, &source)
+                    params.source = canvas_param(source.rect, p.offset())?;
+                    let mask = set_mask_params(layer, tex.mask, &mut params)?;
+                    let mask = mask.unwrap_or(placeholder);
+                    self.bufs
+                        .step(&mut cur, &BLEND_KERNEL, &params, mask, &source.image)
                         .await?;
                 }
                 LayerKind::Adjustment(a) => {
                     let prepared = a.prepare()?;
                     let table = self.adjust_params(&prepared, &mut params).await?;
-                    let mask = self.upload_mask(layer.mask(), &mut params).await?;
-                    let mask = mask.as_ref().unwrap_or(placeholder);
                     let table = table.as_ref().unwrap_or(placeholder);
-                    self.step(&mut cur, &ADJUST_KERNEL, &params, mask, table)
+                    let tex = self.cache.textures(ctx, layer, area).await?;
+                    let mask = set_mask_params(layer, tex.mask, &mut params)?;
+                    let mask = mask.unwrap_or(placeholder);
+                    self.bufs
+                        .step(&mut cur, &ADJUST_KERNEL, &params, mask, table)
                         .await?;
                 }
-                LayerKind::Group(g) => {
-                    let mask = self.upload_mask(layer.mask(), &mut params).await?;
-                    let mask = mask.as_ref().unwrap_or(placeholder);
-                    match g.isolation() {
-                        GroupIsolation::PassThrough => {
-                            let out = self.take().await?;
-                            let after = Box::pin(
-                                self.composite_list(g.children(), Buf::Borrowed(cur.get())),
-                            )
-                            .await?;
-                            self.ctx
-                                .run_kernel_multi(
-                                    &PASS_MIX_KERNEL,
-                                    &params,
-                                    &[cur.get(), mask, after.get()],
-                                    &out,
-                                )
+                LayerKind::Group(g) => match g.isolation() {
+                    GroupIsolation::PassThrough => {
+                        let after =
+                            Box::pin(self.composite_list(g.children(), Buf::Borrowed(cur.get())))
                                 .await?;
-                            self.recycle(after);
-                            let old = std::mem::replace(&mut cur, Buf::Owned(out));
-                            self.recycle(old);
-                        }
-                        GroupIsolation::Isolated => {
-                            let start = self.take_clear().await?;
-                            let group =
-                                Box::pin(self.composite_list(g.children(), Buf::Owned(start)))
-                                    .await?;
-                            params.source = self.region_param;
-                            self.step(&mut cur, &BLEND_KERNEL, &params, mask, group.get())
-                                .await?;
-                            self.recycle(group);
-                        }
+                        // The mask textures are read after the children,
+                        // because the children also use the cache.
+                        let tex = self.cache.textures(ctx, layer, area).await?;
+                        let mask = set_mask_params(layer, tex.mask, &mut params)?;
+                        let mask = mask.unwrap_or(placeholder);
+                        let out = self.bufs.take().await?;
+                        ctx.run_kernel_multi(
+                            &PASS_MIX_KERNEL,
+                            &params,
+                            &[cur.get(), mask, after.get()],
+                            &out,
+                        )
+                        .await?;
+                        self.bufs.recycle(after);
+                        let old = std::mem::replace(&mut cur, Buf::Owned(out));
+                        self.bufs.recycle(old);
                     }
-                }
+                    GroupIsolation::Isolated => {
+                        let start = self.bufs.take_clear(placeholder).await?;
+                        let group =
+                            Box::pin(self.composite_list(g.children(), Buf::Owned(start))).await?;
+                        params.source = self.region_param;
+                        let tex = self.cache.textures(ctx, layer, area).await?;
+                        let mask = set_mask_params(layer, tex.mask, &mut params)?;
+                        let mask = mask.unwrap_or(placeholder);
+                        self.bufs
+                            .step(&mut cur, &BLEND_KERNEL, &params, mask, group.get())
+                            .await?;
+                        self.bufs.recycle(group);
+                    }
+                },
             }
         }
         Ok(cur)
-    }
-
-    /// Uploads the part of a pixel layer that is inside the region and sets
-    /// `params.source`. Returns `None` if the layer is outside the region.
-    async fn upload_layer(
-        &self,
-        p: &PixelLayer,
-        params: &mut Params,
-    ) -> EditorResult<Option<GpuImage>> {
-        let img = p.image();
-        let (ox, oy) = p.offset();
-        let Some(ov) = self
-            .region
-            .intersection_signed(ox, oy, img.width(), img.height())
-        else {
-            return Ok(None);
-        };
-        params.source = rect_param(ov)?;
-        if ov.width == img.width() && ov.height == img.height() {
-            // The full layer is inside the region: no CPU copy.
-            let image =
-                GpuImage::from_rgba_f32(self.ctx, ov.width, ov.height, FORMAT, img.as_slice())
-                    .await?;
-            return Ok(Some(image));
-        }
-        // The overlap is inside the layer, so these values are not
-        // negative and fit in usize.
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let (x0, y0) = (
-            (i64::from(ov.x) - i64::from(ox)) as usize,
-            (i64::from(ov.y) - i64::from(oy)) as usize,
-        );
-        let (w, h) = (ov.width as usize, ov.height as usize);
-        let src_row = img.width() as usize * CHANNELS;
-        let all = img.as_slice();
-        let mut data = Vec::with_capacity(w * h * CHANNELS);
-        for row in y0..y0 + h {
-            let start = row * src_row + x0 * CHANNELS;
-            data.extend_from_slice(&all[start..start + w * CHANNELS]);
-        }
-        let image = GpuImage::from_rgba_f32(self.ctx, ov.width, ov.height, FORMAT, &data).await?;
-        Ok(Some(image))
-    }
-
-    /// Sets the mask parameters and uploads the part of an enabled mask that
-    /// is inside the region (four values in each texel). Returns `None` if
-    /// there is nothing to upload.
-    async fn upload_mask(
-        &self,
-        mask: Option<&Mask>,
-        params: &mut Params,
-    ) -> EditorResult<Option<GpuImage>> {
-        let Some(m) = mask.filter(|m| m.enabled) else {
-            // A disabled mask has the value 1 everywhere: the coverage is
-            // the base value.
-            params.flags[2] = 0;
-            return Ok(None);
-        };
-        params.flags[2] = 1;
-        params.coef[1] = m.fill.value();
-        let img = &m.image;
-        let Some(ov) =
-            self.region
-                .intersection_signed(m.offset.0, m.offset.1, img.width(), img.height())
-        else {
-            // The region is fully outside the mask buffer: the fill value
-            // applies everywhere.
-            params.mask = [0; 4];
-            return Ok(None);
-        };
-        params.mask = rect_param(ov)?;
-        // The overlap is inside the mask, so these values are not negative
-        // and fit in usize.
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let (x0, y0) = (
-            (i64::from(ov.x) - i64::from(m.offset.0)) as usize,
-            (i64::from(ov.y) - i64::from(m.offset.1)) as usize,
-        );
-        let (w, h) = (ov.width as usize, ov.height as usize);
-        let texel_width = ov.width.div_ceil(4);
-        let row_len = texel_width as usize * CHANNELS;
-        let src_row = img.width() as usize;
-        let all = img.data();
-        let mut data = vec![0.0_f32; row_len * h];
-        for (row, dst) in data.chunks_exact_mut(row_len).enumerate() {
-            let start = (y0 + row) * src_row + x0;
-            dst[..w].copy_from_slice(&all[start..start + w]);
-        }
-        let image =
-            GpuImage::from_rgba_f32(self.ctx, texel_width, ov.height, FORMAT, &data).await?;
-        Ok(Some(image))
     }
 
     /// Sets the adjustment parameters. For curves, uploads and returns the
@@ -590,7 +1272,8 @@ impl Run<'_> {
                     data.push(0.0);
                 }
                 let table =
-                    GpuImage::from_rgba_f32(self.ctx, CURVE_TABLE_SIZE, 1, FORMAT, &data).await?;
+                    GpuImage::from_rgba_f32(self.bufs.ctx, CURVE_TABLE_SIZE, 1, FORMAT, &data)
+                        .await?;
                 Ok(Some(table))
             }
             Prepared::HueSaturation {
@@ -611,8 +1294,10 @@ impl Run<'_> {
 
 #[cfg(test)]
 mod tests {
-    // Test code: a failed setup is a test failure.
+    // Test code: a failed setup is a test failure. Some tests compare
+    // exact values (copies of one texel, transparent black).
     #![allow(
+        clippy::float_cmp,
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::cast_precision_loss,
@@ -629,7 +1314,8 @@ mod tests {
     use crate::adjust::{Adjustment, BrightnessContrast, Curves, HueSaturation, Levels};
     use crate::composite::composite;
     use crate::document::DocumentSpec;
-    use crate::layer::{LayerContent, LayerId, MaskFill, MaskImage, Placement};
+    use crate::history::History;
+    use crate::layer::{LayerContent, Mask, MaskFill, PixelLayer, Placement};
 
     /// The tolerance for each sample: `|gpu - cpu| <= TOL * max(1, |cpu|)`.
     ///
@@ -836,7 +1522,7 @@ mod tests {
     /// Else all samples must be inside it.
     fn compare(
         ctx: &GpuContext,
-        comp: &GpuCompositor,
+        comp: &mut GpuCompositor,
         doc: &Document,
         region: Rect,
         steps: bool,
@@ -890,7 +1576,7 @@ mod tests {
     #[test]
     fn invalid_region_is_rejected() {
         let Some(ctx) = context() else { return };
-        let comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
         let doc = empty_doc(8, 8, BlendSpace::Perceptual);
         for region in [Rect::new(0, 0, 0, 4), Rect::new(4, 4, 5, 2)] {
             let result = pollster::block_on(comp.composite_gpu(&ctx, &doc, region));
@@ -904,7 +1590,7 @@ mod tests {
     #[test]
     fn empty_document_is_transparent() {
         let Some(ctx) = context() else { return };
-        let comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
         let doc = empty_doc(9, 7, BlendSpace::Perceptual);
         let image = pollster::block_on(comp.composite_gpu_image(&ctx, &doc, doc.bounds())).unwrap();
         assert!(image.as_slice().iter().all(|&v| v == 0.0));
@@ -916,7 +1602,7 @@ mod tests {
     #[test]
     fn all_blend_modes_match_cpu() {
         let Some(ctx) = context() else { return };
-        let comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
         let mut rng = Rng(0x1234_5678_9ABC_DEF0);
         let mut worst = 0.0_f32;
         for space in [BlendSpace::Linear, BlendSpace::Perceptual] {
@@ -976,7 +1662,7 @@ mod tests {
                     } else {
                         TOL
                     };
-                    worst = worst.max(compare(&ctx, &comp, &doc, region, steps, tol, &what));
+                    worst = worst.max(compare(&ctx, &mut comp, &doc, region, steps, tol, &what));
                 }
             }
         }
@@ -987,7 +1673,7 @@ mod tests {
     #[test]
     fn adjustments_match_cpu() {
         let Some(ctx) = context() else { return };
-        let comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
         let mut rng = Rng(0x0BAD_CAFE_1234_5678);
         let mut worst = 0.0_f32;
         let modes = [
@@ -1006,7 +1692,15 @@ mod tests {
                     doc.set_blend_mode(a, mode).unwrap();
                     doc.set_opacity(a, 0.8).unwrap();
                     let what = format!("{space:?} {mode:?} {adj:?}");
-                    worst = worst.max(compare(&ctx, &comp, &doc, doc.bounds(), false, TOL, &what));
+                    worst = worst.max(compare(
+                        &ctx,
+                        &mut comp,
+                        &doc,
+                        doc.bounds(),
+                        false,
+                        TOL,
+                        &what,
+                    ));
                 }
             }
         }
@@ -1018,7 +1712,7 @@ mod tests {
     #[test]
     fn special_cases_match_cpu() {
         let Some(ctx) = context() else { return };
-        let comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
         let mut rng = Rng(0x5EED_5EED_5EED_5EED);
         let mut worst = 0.0_f32;
         for space in [BlendSpace::Linear, BlendSpace::Perceptual] {
@@ -1115,7 +1809,7 @@ mod tests {
                 Rect::new(63, 47, 1, 1),
             ] {
                 let what = format!("special cases {space:?} {region:?}");
-                worst = worst.max(compare(&ctx, &comp, &doc, region, false, TOL, &what));
+                worst = worst.max(compare(&ctx, &mut comp, &doc, region, false, TOL, &what));
             }
         }
         eprintln!("special_cases_match_cpu: largest scaled error {worst:e}");
@@ -1126,7 +1820,7 @@ mod tests {
     #[test]
     fn region_is_crop_of_full_composite() {
         let Some(ctx) = context() else { return };
-        let comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
         let mut rng = Rng(42);
         let mut doc = empty_doc(32, 24, BlendSpace::Perceptual);
         add_pixel(&mut doc, &mut rng, None, (32, 24), (0, 0));
@@ -1147,6 +1841,371 @@ mod tests {
         }
     }
 
+    /// The layer cache gives the same result as the CPU after each kind of
+    /// change, and uploads only the values that changed.
+    #[test]
+    fn layer_cache_matches_cpu_and_skips_uploads() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(11);
+        let mut doc = empty_doc(40, 30, BlendSpace::Perceptual);
+        let a = add_pixel(&mut doc, &mut rng, None, (40, 30), (0, 0));
+        // `b` is fully inside the canvas; `c` is partly outside it.
+        let b = add_pixel(&mut doc, &mut rng, None, (20, 16), (5, 4));
+        set_mask(&mut doc, &mut rng, b, (18, 12), (6, 5), MaskFill::Black);
+        let c = add_pixel(&mut doc, &mut rng, None, (30, 20), (25, -6));
+        doc.set_blend_mode(c, BlendMode::Multiply).unwrap();
+        let g = add(
+            &mut doc,
+            None,
+            LayerContent::Group(GroupIsolation::Isolated),
+        );
+        let d = add_pixel(&mut doc, &mut rng, Some(g), (16, 16), (12, 10));
+        set_mask(&mut doc, &mut rng, g, (40, 30), (0, 0), MaskFill::White);
+        add(
+            &mut doc,
+            None,
+            LayerContent::Adjustment(Adjustment::Curves(curves())),
+        );
+
+        let check = |comp: &mut GpuCompositor, doc: &Document, what: &str| {
+            compare(&ctx, comp, doc, doc.bounds(), false, TOL, what);
+            compare(&ctx, comp, doc, Rect::new(3, 2, 17, 13), false, TOL, what);
+        };
+
+        // a, b, mask of b, c, d, mask of g. The region composite uses the
+        // cached canvas parts.
+        check(&mut comp, &doc, "initial");
+        let mut uploads = comp.layer_uploads();
+        assert_eq!(uploads, 6);
+
+        // Property changes do not upload.
+        doc.set_opacity(a, 0.6).unwrap();
+        doc.set_blend_mode(b, BlendMode::Screen).unwrap();
+        doc.set_fill_opacity(c, 0.7).unwrap();
+        doc.set_visible(d, false).unwrap();
+        doc.set_mask_enabled(b, false).unwrap();
+        check(&mut comp, &doc, "props");
+        doc.set_visible(d, true).unwrap();
+        doc.set_mask_enabled(b, true).unwrap();
+        check(&mut comp, &doc, "props back");
+        assert_eq!(comp.layer_uploads(), uploads);
+
+        // A pixel write uploads the layer once; a mask write the mask once.
+        doc.write_pixels(b, Rect::new(2, 3, 4, 2), &[[0.3, 0.2, 0.1, 0.5]; 8])
+            .unwrap();
+        check(&mut comp, &doc, "pixel write");
+        uploads += 1;
+        assert_eq!(comp.layer_uploads(), uploads);
+        doc.write_mask(g, Rect::new(10, 10, 5, 5), &[0.25; 25])
+            .unwrap();
+        check(&mut comp, &doc, "mask write");
+        uploads += 1;
+        assert_eq!(comp.layer_uploads(), uploads);
+
+        // A move inside the canvas does not upload. A move of a layer that
+        // is partly outside the canvas changes its canvas part: one upload.
+        doc.translate_layer(b, 3, -2).unwrap();
+        check(&mut comp, &doc, "move inside");
+        assert_eq!(comp.layer_uploads(), uploads);
+        doc.translate_layer(c, -3, 2).unwrap();
+        check(&mut comp, &doc, "move at edge");
+        uploads += 1;
+        assert_eq!(comp.layer_uploads(), uploads);
+
+        // Delete drops the entry; undo of the delete uploads again.
+        let mut history = History::default();
+        let e = doc.delete_layer(d).unwrap();
+        history.push("Delete", vec![e]);
+        check(&mut comp, &doc, "delete");
+        assert_eq!(comp.layer_uploads(), uploads);
+        history.undo(&mut doc).unwrap();
+        check(&mut comp, &doc, "undo delete");
+        uploads += 1;
+        assert_eq!(comp.layer_uploads(), uploads);
+
+        // Undo of a pixel write gives new values: one upload.
+        let e = doc
+            .write_pixels(a, Rect::new(0, 0, 2, 2), &[[0.0, 0.0, 0.0, 1.0]; 4])
+            .unwrap();
+        history.push("Write", vec![e]);
+        history.undo(&mut doc).unwrap();
+        check(&mut comp, &doc, "undo write");
+        uploads += 1;
+        assert_eq!(comp.layer_uploads(), uploads);
+
+        // Mask removal does not upload.
+        doc.set_mask(b, None).unwrap();
+        check(&mut comp, &doc, "mask removed");
+        assert_eq!(comp.layer_uploads(), uploads);
+
+        // `clear_cache` frees all textures except the placeholder.
+        assert!(comp.cache_memory_bytes() > 40 * 30 * 16);
+        comp.clear_cache();
+        assert_eq!(comp.cache_memory_bytes(), 16);
+        check(&mut comp, &doc, "after clear");
+        // a, b, c, d, mask of g.
+        assert_eq!(comp.layer_uploads(), uploads + 5);
+    }
+
+    fn view(origin_x: f64, origin_y: f64, scale: f64, width: u32, height: u32) -> ViewSpec {
+        ViewSpec {
+            origin_x,
+            origin_y,
+            scale,
+            width,
+            height,
+        }
+    }
+
+    /// Renders a view and reads it back.
+    fn read_view(
+        ctx: &GpuContext,
+        comp: &mut GpuCompositor,
+        doc: &Document,
+        spec: ViewSpec,
+    ) -> Vec<[f32; 4]> {
+        let image = pollster::block_on(comp.render_view(ctx, doc, &spec)).unwrap();
+        assert_eq!((image.width(), image.height()), (spec.width, spec.height));
+        let data = pollster::block_on(image.read_rgba_f32(ctx)).unwrap();
+        data.chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2], p[3]])
+            .collect()
+    }
+
+    /// Checks a straight view pixel against a premultiplied CPU pixel.
+    fn assert_view_pixel(got: [f32; 4], cpu: [f32; 4], what: &str) {
+        let a = got[3];
+        let premultiplied = [got[0] * a, got[1] * a, got[2] * a, a];
+        for (g, c) in premultiplied.iter().zip(cpu) {
+            assert!(
+                (g - c).abs() <= TOL * c.abs().max(1.0),
+                "{what}: {got:?} (premultiplied {premultiplied:?}) against {cpu:?}"
+            );
+        }
+        if a > 0.1 {
+            // The color is straight (not premultiplied).
+            for (g, c) in got.iter().zip(cpu).take(3) {
+                assert!(
+                    (g - c / cpu[3]).abs() <= 1e-3 * (c / cpu[3]).abs().max(1.0),
+                    "{what}"
+                );
+            }
+        }
+    }
+
+    /// A document with one canvas-size pixel layer.
+    fn flat_doc(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [f32; 4]) -> Document {
+        let mut doc = empty_doc(width, height, BlendSpace::Perceptual);
+        let pixels = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|(x, y)| pixel(x, y))
+            .collect();
+        let image = WorkingImage::from_pixels(width, height, pixels).unwrap();
+        add(
+            &mut doc,
+            None,
+            LayerContent::Pixel(PixelLayer::new(image, (0, 0)).unwrap()),
+        );
+        doc
+    }
+
+    #[test]
+    fn render_view_at_scale_one_is_the_straight_crop() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(5);
+        let mut doc = empty_doc(24, 20, BlendSpace::Perceptual);
+        add_pixel(&mut doc, &mut rng, None, (24, 20), (0, 0));
+        let top = add_pixel(&mut doc, &mut rng, None, (10, 10), (8, 4));
+        doc.set_opacity(top, 0.7).unwrap();
+        doc.set_blend_mode(top, BlendMode::Overlay).unwrap();
+        let cpu = composite(&doc, doc.bounds()).unwrap();
+        // The left 3 columns and the bottom 5 rows are outside the canvas.
+        let out = read_view(&ctx, &mut comp, &doc, view(-3.0, 5.0, 1.0, 30, 20));
+        for y in 0..20_i64 {
+            for x in 0..30_i64 {
+                let got = out[(y * 30 + x) as usize];
+                let (cx, cy) = (x - 3, y + 5);
+                if (0..24).contains(&cx) && (0..20).contains(&cy) {
+                    let c = cpu.pixel(cx as u32, cy as u32).unwrap();
+                    assert_view_pixel(got, c, &format!("({x}, {y})"));
+                } else {
+                    assert_eq!(got, [0.0; 4], "({x}, {y}) is outside the canvas");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn render_view_nearest_neighbor_when_zoomed_in() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(9);
+        let mut doc = empty_doc(8, 8, BlendSpace::Perceptual);
+        add_pixel(&mut doc, &mut rng, None, (8, 8), (0, 0));
+        let cpu = composite(&doc, doc.bounds()).unwrap();
+        // Origin (2, 1), zoom 4: each canvas pixel is a 4 x 4 block.
+        let out = read_view(&ctx, &mut comp, &doc, view(2.0, 1.0, 4.0, 16, 16));
+        for y in 0..16_u32 {
+            for x in 0..16_u32 {
+                let got = out[(y * 16 + x) as usize];
+                let c = cpu.pixel(2 + x / 4, 1 + y / 4).unwrap();
+                assert_view_pixel(got, c, &format!("({x}, {y})"));
+                assert_eq!(got, out[((y - y % 4) * 16 + x - x % 4) as usize]);
+            }
+        }
+        // A fractional origin moves the block edges: output pixel 0 and 1
+        // show canvas column 2, pixel 2 shows column 3.
+        let out = read_view(&ctx, &mut comp, &doc, view(2.5, 1.0, 4.0, 4, 1));
+        assert_eq!(out[0], out[1]);
+        assert_view_pixel(out[1], cpu.pixel(2, 1).unwrap(), "fraction 1");
+        assert_view_pixel(out[2], cpu.pixel(3, 1).unwrap(), "fraction 2");
+    }
+
+    #[test]
+    fn render_view_downscale_keeps_a_flat_color() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        for (color, alpha) in [([0.2, 0.5, 0.9], 1.0), ([0.8, 0.1, 1.5], 0.5)] {
+            let premultiplied = [color[0] * alpha, color[1] * alpha, color[2] * alpha, alpha];
+            let doc = flat_doc(64, 48, |_, _| premultiplied);
+            for scale in [0.9, 0.5, 0.3, 0.25, 0.1] {
+                // Keep the output pixels inside the canvas.
+                let w = (64.0 * scale) as u32 - 1;
+                let h = (48.0 * scale) as u32 - 1;
+                let out = read_view(&ctx, &mut comp, &doc, view(0.0, 0.0, scale, w, h));
+                for (i, p) in out.iter().enumerate() {
+                    let want = [color[0], color[1], color[2], alpha];
+                    for (g, e) in p.iter().zip(want) {
+                        assert!(
+                            (g - e).abs() <= 1e-4,
+                            "scale {scale}, pixel {i}: {p:?} against {want:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn render_view_downscale_of_a_checkerboard_is_gray() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let doc = flat_doc(64, 64, |x, y| {
+            if (x + y) % 2 == 0 {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                [0.0, 0.0, 0.0, 1.0]
+            }
+        });
+        let cases = [
+            (0.0, 0.0, 0.5, 1e-5),
+            (1.0, 0.0, 0.5, 1e-5),
+            (0.5, 0.25, 0.5, 1e-4),
+            (0.0, 0.0, 0.37, 1e-4),
+            (3.0, 1.0, 0.25, 1e-4),
+            // Level 0 with a footprint of 4/3 pixels: an area mean, not
+            // exact gray, but never a black or white sample.
+            (0.0, 0.0, 0.75, 0.15),
+        ];
+        for (ox, oy, scale, tol) in cases {
+            let size = (64.0 * scale) as u32 - 2;
+            let out = read_view(&ctx, &mut comp, &doc, view(ox, oy, scale, size, size));
+            for (i, p) in out.iter().enumerate() {
+                assert!((p[3] - 1.0).abs() <= 1e-5, "{scale}: alpha {p:?}");
+                for v in &p[..3] {
+                    assert!(
+                        (v - 0.5).abs() <= tol,
+                        "origin ({ox}, {oy}), scale {scale}, pixel {i}: {p:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn render_view_composites_only_after_a_change() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(3);
+        let mut doc = empty_doc(32, 32, BlendSpace::Perceptual);
+        add_pixel(&mut doc, &mut rng, None, (32, 32), (0, 0));
+        let top = add_pixel(&mut doc, &mut rng, None, (16, 16), (4, 4));
+
+        read_view(&ctx, &mut comp, &doc, view(0.0, 0.0, 1.0, 32, 32));
+        assert_eq!(comp.view_composites(), 1);
+        // Pan and zoom only: no composite.
+        read_view(&ctx, &mut comp, &doc, view(-5.5, 3.0, 1.0, 20, 10));
+        read_view(&ctx, &mut comp, &doc, view(0.0, 0.0, 0.3, 9, 9));
+        read_view(&ctx, &mut comp, &doc, view(1.0, 2.0, 8.0, 64, 64));
+        assert_eq!(comp.view_composites(), 1);
+        // A clone has the same revision.
+        let copy = doc.clone();
+        read_view(&ctx, &mut comp, &copy, view(0.0, 0.0, 1.0, 32, 32));
+        assert_eq!(comp.view_composites(), 1);
+
+        // A change composites again, without an upload.
+        let uploads = comp.layer_uploads();
+        doc.set_opacity(top, 0.3).unwrap();
+        let out = read_view(&ctx, &mut comp, &doc, view(0.0, 0.0, 1.0, 32, 32));
+        assert_eq!(comp.view_composites(), 2);
+        assert_eq!(comp.layer_uploads(), uploads);
+        let cpu = composite(&doc, doc.bounds()).unwrap();
+        for (i, got) in out.iter().enumerate() {
+            let (x, y) = (i as u32 % 32, i as u32 / 32);
+            assert_view_pixel(*got, cpu.pixel(x, y).unwrap(), "after change");
+        }
+
+        // A different document size makes a new pyramid.
+        let small = flat_doc(5, 3, |_, _| [0.5, 0.5, 0.5, 1.0]);
+        let out = read_view(&ctx, &mut comp, &small, view(0.0, 0.0, 0.5, 2, 1));
+        assert_eq!(comp.view_composites(), 3);
+        assert!((out[0][0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn render_view_rejects_invalid_views() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let doc = empty_doc(8, 8, BlendSpace::Perceptual);
+        let max = ctx.limits().max_texture_dimension_2d;
+        let bad = [
+            view(0.0, 0.0, 0.0, 8, 8),
+            view(0.0, 0.0, -1.0, 8, 8),
+            view(0.0, 0.0, f64::NAN, 8, 8),
+            view(0.0, 0.0, f64::INFINITY, 8, 8),
+            view(0.0, 0.0, MIN_VIEW_SCALE / 2.0, 8, 8),
+            view(0.0, 0.0, MAX_VIEW_SCALE * 2.0, 8, 8),
+            view(f64::NAN, 0.0, 1.0, 8, 8),
+            view(0.0, -2.0e9, 1.0, 8, 8),
+            view(0.0, 0.0, 1.0, 0, 8),
+            view(0.0, 0.0, 1.0, 8, max + 1),
+        ];
+        for spec in bad {
+            let result = pollster::block_on(comp.render_view(&ctx, &doc, &spec));
+            assert!(
+                matches!(result, Err(EditorError::InvalidView(_))),
+                "{spec:?}"
+            );
+        }
+        assert_eq!(comp.view_composites(), 0);
+        // The smallest and the largest scales are valid.
+        read_view(&ctx, &mut comp, &doc, view(0.0, 0.0, MIN_VIEW_SCALE, 1, 1));
+        read_view(&ctx, &mut comp, &doc, view(0.0, 0.0, MAX_VIEW_SCALE, 2, 2));
+    }
+
+    #[test]
+    fn view_level_selects_a_footprint_below_two_texels() {
+        assert_eq!(view_level(4.0), 0);
+        assert_eq!(view_level(1.0), 0);
+        assert_eq!(view_level(0.75), 0);
+        assert_eq!(view_level(0.5), 1);
+        assert_eq!(view_level(0.3), 1);
+        assert_eq!(view_level(0.25), 2);
+        assert_eq!(view_level(MIN_VIEW_SCALE), 16);
+    }
+
     /// Benchmark: a 4096 x 4096 document with 10 layers in the perceptual
     /// space, CPU against GPU. Run with
     /// `cargo test -p expose-editor --release -- --ignored --nocapture bench_`.
@@ -1156,7 +2215,7 @@ mod tests {
         use std::time::Instant;
 
         let Some(ctx) = context() else { return };
-        let comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
         let mut rng = Rng(7);
         let size = 4096;
         let mut doc = empty_doc(size, size, BlendSpace::Perceptual);
@@ -1205,52 +2264,85 @@ mod tests {
         let cpu = composite(&doc, region).unwrap();
         let cpu_ms = t.elapsed().as_secs_f64() * 1e3;
 
-        // The first call compiles the pipelines.
-        let first = Instant::now();
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+
+        // The first call compiles the pipelines and uploads all layers.
+        let t = Instant::now();
         drop(pollster::block_on(comp.composite_gpu(&ctx, &doc, region)).unwrap());
         ctx.wait_idle().unwrap();
-        let first_ms = first.elapsed().as_secs_f64() * 1e3;
+        let first_ms = ms(t);
+        let uploads = comp.layer_uploads();
 
-        let mut gpu_ms = f64::MAX;
-        for _ in 0..3 {
+        // Warm: an opacity change before each call. The cache has all
+        // layers, so this is the kernel time only.
+        let top = doc.layers()[5].id();
+        let mut warm_ms = f64::MAX;
+        for i in 0..3 {
+            doc.set_opacity(top, 0.5 + 0.1 * i as f32).unwrap();
             let t = Instant::now();
             drop(pollster::block_on(comp.composite_gpu(&ctx, &doc, region)).unwrap());
             ctx.wait_idle().unwrap();
-            gpu_ms = gpu_ms.min(t.elapsed().as_secs_f64() * 1e3);
+            warm_ms = warm_ms.min(ms(t));
         }
+        assert_eq!(comp.layer_uploads(), uploads, "a property change uploaded");
 
-        // The upload part of the GPU time.
+        // A cold upload of all layers, for comparison.
+        comp.clear_cache();
         let t = Instant::now();
-        let mut uploads = Vec::new();
-        for layer in doc.layers() {
-            if let LayerKind::Pixel(p) = layer.kind() {
-                let img = p.image();
-                uploads.push(
-                    pollster::block_on(GpuImage::from_rgba_f32(
-                        &ctx,
-                        img.width(),
-                        img.height(),
-                        FORMAT,
-                        img.as_slice(),
-                    ))
-                    .unwrap(),
-                );
+        drop(pollster::block_on(comp.composite_gpu(&ctx, &doc, region)).unwrap());
+        ctx.wait_idle().unwrap();
+        let cold_ms = ms(t);
+
+        // View: the first call composites and builds the pyramid; a pan
+        // runs the view kernel only.
+        let spec = |x: f64, scale: f64| ViewSpec {
+            origin_x: x,
+            origin_y: 100.0,
+            scale,
+            width: 2560,
+            height: 1600,
+        };
+        doc.set_opacity(top, 0.9).unwrap();
+        let t = Instant::now();
+        pollster::block_on(comp.render_view(&ctx, &doc, &spec(0.0, 0.5))).unwrap();
+        ctx.wait_idle().unwrap();
+        let view_first_ms = ms(t);
+        let mut pan_ms = [f64::MAX; 3];
+        for (slot, scale) in pan_ms.iter_mut().zip([1.0, 0.5, 0.3]) {
+            for i in 0..5 {
+                let t = Instant::now();
+                pollster::block_on(comp.render_view(&ctx, &doc, &spec(f64::from(i) * 7.5, scale)))
+                    .unwrap();
+                ctx.wait_idle().unwrap();
+                *slot = slot.min(ms(t));
             }
         }
-        ctx.wait_idle().unwrap();
-        let upload_ms = t.elapsed().as_secs_f64() * 1e3;
-        drop(uploads);
+        assert_eq!(comp.view_composites(), 1, "a pan composited");
+        // A slider step: an opacity change, then a view (composite, pyramid,
+        // and view kernel; no upload, no buffer allocation).
+        let mut change_ms = f64::MAX;
+        for i in 0..3 {
+            doc.set_opacity(top, 0.4 + 0.1 * i as f32).unwrap();
+            let t = Instant::now();
+            pollster::block_on(comp.render_view(&ctx, &doc, &spec(0.0, 0.3))).unwrap();
+            ctx.wait_idle().unwrap();
+            change_ms = change_ms.min(ms(t));
+        }
+        let memory_mib = comp.cache_memory_bytes() as f64 / (1024.0 * 1024.0);
 
         let t = Instant::now();
         let gpu = pollster::block_on(comp.composite_gpu_image(&ctx, &doc, region)).unwrap();
-        let readback_ms = t.elapsed().as_secs_f64() * 1e3 - gpu_ms;
+        let readback_ms = ms(t) - warm_ms;
         assert_eq!(gpu.width(), cpu.width());
 
         eprintln!(
             "bench 4096x4096, 10 layers, perceptual: CPU {cpu_ms:.1} ms; GPU first call \
-             {first_ms:.1} ms, GPU {gpu_ms:.1} ms (of which layer upload about \
-             {upload_ms:.1} ms, kernels about {:.1} ms); read-back about {readback_ms:.1} ms",
-            gpu_ms - upload_ms
+             {first_ms:.1} ms ({uploads} uploads); warm after an opacity change \
+             {warm_ms:.1} ms; cold (all uploads) {cold_ms:.1} ms; render_view 2560x1600: \
+             first {view_first_ms:.1} ms, pan at scale 1 / 0.5 / 0.3: {:.2} / {:.2} / \
+             {:.2} ms, after an opacity change {change_ms:.1} ms; cache {memory_mib:.0} MiB; \
+             read-back about {readback_ms:.1} ms",
+            pan_ms[0], pan_ms[1], pan_ms[2]
         );
     }
 }
