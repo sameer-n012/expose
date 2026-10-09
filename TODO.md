@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 Editor, first version (ADR 0013):
 
-- [ ] **editor-view** (O, `feat/editor-view`) — document revision and layer content versions, layer texture cache, cached full composite, `render_view` (zoom/pan view kernel), `History` gesture merge.
+- [x] **editor-view** (O, merged, ADR 0014) — document revision and layer content versions, layer texture cache, cached full composite, `render_view` (zoom/pan view kernel; pan 1–2 ms at 4096²), `History::push_merge`.
 - [x] **editor-ui** (S, merged) — Editor module: canvas with zoom/pan, layers panel, adjustment layers, undo/redo, `Mod+E` "Edit in Editor"; built against the command contract in ADR 0013 with mocked `invoke` (the commands do not exist until editor-shell). UI notes for editor-shell: `aboveLayerId` can be inside a group (insert above it in its parent); the UI ignores the frame `seq`; pixels outside the canvas must be transparent. Later: layer thumbnails, drag-and-drop reorder, moves into/out of groups.
 
 ## Next (suggested order)
@@ -23,7 +23,7 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
-- [ ] **editor-gpu-followups** — a test for curve end points between curve table samples.
+- [ ] **editor-gpu-followups** — a test for curve end points between curve table samples; slider steps take about 61 ms at 4096² (composite only the changed area, or cache the composite below the changed layer); GPU memory about 2.3 GiB for a 4096² 10-layer document (`rgba16float` layer textures or sparse tiles); upload the curve table only when it changes; `cargo doc` warns on ambiguous links to `crate::composite` (function and module).
 
 ### Follow-ups from merged work
 
