@@ -20,6 +20,8 @@
 //!   binary frame format.
 //! - [`preview_protocol`]: the `preview` URI scheme, the alternative frame
 //!   transport (used by the transport benchmark).
+//! - [`editor`]: the editor engine (open layered documents, history, GPU
+//!   render thread of the canvas view) and the transport types.
 //! - [`export`]: photo export (the job queue, the worker thread, and the
 //!   events).
 //! - [`commands`]: the `#[tauri::command]` wrappers.
@@ -33,6 +35,7 @@
 
 pub mod capture;
 pub mod commands;
+pub mod editor;
 pub mod error;
 pub mod export;
 pub mod preview;
@@ -45,6 +48,7 @@ pub mod thumbnails;
 
 use tauri::Manager;
 
+use crate::editor::EditorEngine;
 use crate::export::ExportManager;
 use crate::preview::PreviewEngine;
 use crate::state::CatalogState;
@@ -102,6 +106,17 @@ pub fn run() -> tauri::Result<()> {
                     tracing::error!(%error, "cannot start the preview render thread");
                 }
             }
+            // The editor thread starts now; its GPU context is made at the
+            // first document open. Without the engine, the editor commands
+            // return an internal error.
+            match EditorEngine::start() {
+                Ok(engine) => {
+                    app.manage(engine);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "cannot start the editor render thread");
+                }
+            }
             // Without the export worker, the export commands return an
             // internal error.
             match ExportManager::start() {
@@ -135,6 +150,12 @@ pub fn run() -> tauri::Result<()> {
             commands::catalog::get_develop_settings,
             commands::catalog::set_develop_settings,
             commands::dialog::pick_folder,
+            commands::editor::editor_open,
+            commands::editor::editor_render,
+            commands::editor::editor_edit,
+            commands::editor::editor_undo,
+            commands::editor::editor_redo,
+            commands::editor::editor_close,
             commands::export::export_start,
             commands::export::export_cancel,
             commands::preview::preview_open,
