@@ -18,6 +18,7 @@ export const PANEL_SECTIONS: Readonly<Record<ModuleId, Readonly<Record<Side, rea
   },
   editor: {
     left: ['Tools'],
-    right: ['Color', 'Properties', 'Layers', 'History'],
+    // The Layers and Properties panels (AppShell) show above these.
+    right: ['Color', 'History'],
   },
 };

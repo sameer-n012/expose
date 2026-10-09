@@ -32,7 +32,12 @@
   import type { ModuleStore } from '../../lib/stores/modules.svelte';
   import type { ToastStore } from '../../lib/stores/toasts.svelte';
   import FolderPanel from '../library/FolderPanel.svelte';
-  import CanvasPlaceholder from '../modules/CanvasPlaceholder.svelte';
+  import { EditorStore } from '../../lib/stores/editor.svelte';
+  import { EDITOR_ACTION, editInEditorAction, editorActions } from '../../lib/editor/editorActions';
+  import AdjustmentPanel from '../editor/AdjustmentPanel.svelte';
+  import EditInEditorButton from '../editor/EditInEditorButton.svelte';
+  import EditorView from '../editor/EditorView.svelte';
+  import LayersPanel from '../editor/LayersPanel.svelte';
   import LibraryView from '../modules/LibraryView.svelte';
   import { PANEL_SECTIONS } from '../modules/panelSections';
   import Filmstrip from './Filmstrip.svelte';
@@ -71,6 +76,19 @@
 
   // The shortcut needs the shell, because the shell knows the active photo.
   $effect(() => registry.register(exportAction(exportPhotos)));
+
+  // The shell owns the editor store, too.
+  const editor = untrack(() => new EditorStore({ library, modules, toasts }));
+
+  /** Opens the active photo (Develop) or the focused photo (else) in the Editor. */
+  function editInEditor(): void {
+    const photo = modules.active === 'develop' ? develop.target : editor.candidate;
+    void editor.editInEditor(photo ?? editor.candidate);
+  }
+
+  $effect(() => registry.register(editInEditorAction(editInEditor)));
+  // Undo, redo, and zoom work in the Editor module only.
+  $effect(() => registerActions(registry, editorActions(editor)));
 
   // The crop tool: `R` always; Enter, Esc, O, and X only while it is active.
   $effect(() => registry.register(cropToggleAction(develop)));
@@ -156,6 +174,17 @@
           <DetailPanel {develop} />
           <PanelSections sections={PANEL_SECTIONS.develop.right} />
           <ResetAllPanel {develop} />
+          <div class="edit-footer">
+            <EditInEditorButton
+              onedit={editInEditor}
+              disabled={develop.target === null}
+              shortcut={shortcutFor(EDITOR_ACTION.edit)}
+            />
+          </div>
+        {:else if id === 'editor' && side === 'right'}
+          <LayersPanel {editor} />
+          <AdjustmentPanel {editor} />
+          <PanelSections sections={PANEL_SECTIONS.editor.right} />
         {:else}
           <PanelSections sections={PANEL_SECTIONS[id][side]} />
         {/if}
@@ -190,11 +219,11 @@
           data-testid="module-{id}"
         >
           {#if id === 'library'}
-            <LibraryView {modules} {library} onexport={exportPhotos} />
+            <LibraryView {modules} {library} onexport={exportPhotos} onedit={editInEditor} />
           {:else if id === 'develop'}
             <DevelopView {develop} />
           {:else}
-            <CanvasPlaceholder title="Editor" hint="The document canvas appears here." />
+            <EditorView {editor} {toasts} />
           {/if}
         </section>
       {/each}
@@ -251,6 +280,9 @@
   .edge-left,
   .edge-right {
     width: var(--space-3);
+  }
+  .edit-footer {
+    padding: 0 var(--space-4) var(--space-3);
   }
   .edge-topbar,
   .edge-filmstrip {
