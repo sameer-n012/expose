@@ -8,6 +8,7 @@ use expose_core::buffer::{Rect, WorkingImage};
 use crate::blend::BlendSpace;
 use crate::error::{EditorError, EditorResult, check_range};
 use crate::layer::{Layer, LayerId, LayerKind, LayerProps, Locks, PixelLayer, Placement};
+use crate::version::next_stamp;
 
 /// The largest permitted width or height of a document, a layer, or a
 /// mask, in pixels.
@@ -152,7 +153,11 @@ impl DocumentSpec {
 /// The canvas covers the pixels `(0, 0)..(width, height)`. Layers can
 /// extend outside the canvas. The root layer list has index 0 at the
 /// bottom.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Equality compares the settings and the layer tree. It ignores the
+/// revision and the layer content versions (they are change stamps, not
+/// content).
+#[derive(Debug, Clone)]
 pub struct Document {
     width: u32,
     height: u32,
@@ -162,6 +167,21 @@ pub struct Document {
     pub(crate) blend_space: BlendSpace,
     pub(crate) layers: Vec<Layer>,
     next_id: u64,
+    /// Stamp of the last change (see [`crate::version`]).
+    revision: u64,
+}
+
+impl PartialEq for Document {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.resolution_ppi == other.resolution_ppi
+            && self.color_mode == other.color_mode
+            && self.bit_depth == other.bit_depth
+            && self.blend_space == other.blend_space
+            && self.layers == other.layers
+            && self.next_id == other.next_id
+    }
 }
 
 impl Document {
@@ -202,6 +222,7 @@ impl Document {
             blend_space: spec.blend_space,
             layers: Vec::new(),
             next_id: 1,
+            revision: next_stamp(),
         };
         let id = doc.alloc_id();
         doc.layers.push(Layer::new(
@@ -219,7 +240,25 @@ impl Document {
             ..spec
         })?;
         doc.layers.clear();
+        doc.touch();
         Ok(doc)
+    }
+
+    /// Returns the revision: a stamp that changes at each change of the
+    /// document (each operation, undo, and redo).
+    ///
+    /// Stamps are unique in the process (see [`crate::version`]): two
+    /// documents with the same revision are the same document state (for
+    /// example, a clone). A failed operation does not change the document
+    /// or the revision. A history step that fails and rolls back changes
+    /// the revision, but the content is the same as before.
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Gives the document a new revision.
+    pub(crate) fn touch(&mut self) {
+        self.revision = next_stamp();
     }
 
     /// Returns the canvas width in pixels.

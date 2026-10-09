@@ -13,8 +13,16 @@
 //! - [`adjust`]: adjustment layer parameters and their apply functions.
 //! - [`composite`]: the CPU reference compositor.
 //! - [`gpu`]: the GPU compositor ([`GpuCompositor`]). It gives the same
-//!   result as the CPU reference, within float tolerance.
-//! - [`history`]: undo and redo.
+//!   result as the CPU reference, within float tolerance. It keeps a cache
+//!   of layer textures, and renders zoomed and panned views of a cached
+//!   full composite for the editor canvas
+//!   ([`GpuCompositor::render_view`], [`ViewSpec`]).
+//! - [`history`]: undo and redo. [`History::push_merge`] makes one undo
+//!   step from a gesture (for example, a slider drag).
+//! - [`version`]: change stamps. [`Document::revision`] changes at each
+//!   change of the document; [`Layer::pixel_version`] and
+//!   [`Layer::mask_version`] change when the values of a layer change.
+//!   Caches use them to find out of date data.
 //!
 //! # Pixel format
 //!
@@ -61,6 +69,7 @@ pub mod gpu;
 pub mod history;
 pub mod layer;
 pub mod ops;
+pub mod version;
 
 pub use adjust::{
     Adjustment, BrightnessContrast, Curves, HueSaturation, Levels, LevelsChannel, MonotoneCubic,
@@ -72,7 +81,9 @@ pub use document::{
     Background, BitDepth, ColorMode, Document, DocumentSpec, MAX_DIMENSION, MAX_PIXELS,
 };
 pub use error::{EditorError, EditorResult, SharedGpuError};
-pub use gpu::{CURVE_TABLE_SIZE, GpuCompositor};
+pub use gpu::{
+    CURVE_TABLE_SIZE, GpuCompositor, MAX_VIEW_ORIGIN, MAX_VIEW_SCALE, MIN_VIEW_SCALE, ViewSpec,
+};
 pub use history::{History, HistoryEntry};
 pub use layer::{
     Group, GroupIsolation, Layer, LayerContent, LayerId, LayerKind, LayerProps, LockKind, Locks,

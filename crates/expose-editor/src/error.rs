@@ -139,6 +139,11 @@ pub enum EditorError {
     /// The history has a value that is not valid (for example, zero steps).
     #[error("invalid history setting: {0}")]
     InvalidHistory(&'static str),
+
+    /// A view specification is not valid (for example, a scale that is not
+    /// a positive finite number, or an output size of 0).
+    #[error("invalid view: {0}")]
+    InvalidView(&'static str),
 }
 
 /// Result type with [`EditorError`].

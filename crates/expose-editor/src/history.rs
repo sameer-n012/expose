@@ -11,6 +11,9 @@
 //!   redo branch). If the number of entries is then more than the maximum,
 //!   the oldest entries are removed (their changes can no longer be
 //!   undone).
+//! - [`History::push_merge`] records a step that can merge with the last
+//!   step. It makes one undo step from one gesture (for example, a slider
+//!   drag that changes the opacity many times).
 //! - An entry holds the [`Edit`] values that the operations returned.
 //!   Undo applies them in reverse order and keeps their inverses for redo.
 //!   Thus each entry holds only one set of edits at any time.
@@ -68,6 +71,10 @@ pub struct History {
     /// Number of applied entries.
     cursor: usize,
     max_steps: usize,
+    /// The merge key of the last entry, if the last change of the history
+    /// was a [`History::push_merge`] with this key. Any other change of the
+    /// history clears it.
+    merge_key: Option<u64>,
 }
 
 impl Default for History {
@@ -76,6 +83,7 @@ impl Default for History {
             entries: VecDeque::new(),
             cursor: 0,
             max_steps: DEFAULT_MAX_STEPS,
+            merge_key: None,
         }
     }
 }
@@ -104,11 +112,47 @@ impl History {
     ///
     /// This drops the redo branch and, if necessary, the oldest entries.
     pub fn push(&mut self, name: impl Into<String>, edits: Vec<Edit>) {
+        self.merge_key = None;
+        self.push_entry(name.into(), edits);
+    }
+
+    /// Records a step that can merge with the step before it. Use it for
+    /// gestures that make many small changes (for example, a slider drag):
+    /// one gesture becomes one undo step.
+    ///
+    /// - If the last change of the history was a `push_merge` with the same
+    ///   `key`, the function adds `edits` to the last entry. The entry keeps
+    ///   its name. An undo of the entry then restores the state before the
+    ///   first edit of the gesture.
+    /// - Else the function records a new step like [`History::push`] and
+    ///   keeps `key` for the next call.
+    ///
+    /// [`History::push`], undo, redo, [`History::jump_to`], and
+    /// [`History::clear`] end the merge. Use a new key for each gesture
+    /// (for example, a counter), so that two gestures of the same kind do
+    /// not merge.
+    pub fn push_merge(&mut self, name: impl Into<String>, edits: Vec<Edit>, key: u64) {
+        if self.merge_key == Some(key) && self.cursor == self.entries.len() {
+            if let Some(last) = self.entries.back_mut() {
+                // Undo edits are in operation order (see `HistoryEntry`), so
+                // the new edits go at the end.
+                last.edits.extend(edits);
+                return;
+            }
+        }
+        self.push_entry(name.into(), edits);
+        self.merge_key = Some(key);
+    }
+
+    /// Ends the current merge: the next [`History::push_merge`] records a
+    /// new step, also with the same key.
+    pub fn end_merge(&mut self) {
+        self.merge_key = None;
+    }
+
+    fn push_entry(&mut self, name: String, edits: Vec<Edit>) {
         self.entries.truncate(self.cursor);
-        self.entries.push_back(HistoryEntry {
-            name: name.into(),
-            edits,
-        });
+        self.entries.push_back(HistoryEntry { name, edits });
         self.cursor = self.entries.len();
         self.evict();
     }
@@ -150,11 +194,13 @@ impl History {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.cursor = 0;
+        self.merge_key = None;
     }
 
     /// Undoes the last applied entry. Returns `false` if there is nothing
     /// to undo.
     pub fn undo(&mut self, doc: &mut Document) -> EditorResult<bool> {
+        self.merge_key = None;
         if self.cursor == 0 {
             return Ok(false);
         }
@@ -167,6 +213,7 @@ impl History {
     /// Redoes the next undone entry. Returns `false` if there is nothing to
     /// redo.
     pub fn redo(&mut self, doc: &mut Document) -> EditorResult<bool> {
+        self.merge_key = None;
         if self.cursor >= self.entries.len() {
             return Ok(false);
         }
@@ -181,6 +228,7 @@ impl History {
     /// Returns [`EditorError::IndexOutOfRange`] if `step` is more than the
     /// number of entries.
     pub fn jump_to(&mut self, doc: &mut Document, step: usize) -> EditorResult<()> {
+        self.merge_key = None;
         if step > self.entries.len() {
             return Err(EditorError::IndexOutOfRange {
                 index: step,

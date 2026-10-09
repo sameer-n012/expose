@@ -16,6 +16,7 @@ use crate::adjust::Adjustment;
 use crate::blend::BlendMode;
 use crate::document::check_size;
 use crate::error::{EditorError, EditorResult};
+use crate::version::next_stamp;
 
 /// A stable layer identifier.
 ///
@@ -408,22 +409,71 @@ impl LayerProps {
 }
 
 /// One layer in the layer tree.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Equality compares the ID, the properties, the mask, and the content. It
+/// ignores the content versions (they are change stamps, not content).
+#[derive(Debug, Clone)]
 pub struct Layer {
     id: LayerId,
     props: LayerProps,
     mask: Option<Mask>,
     kind: LayerKind,
+    /// Stamp of the last change of the pixel values (see
+    /// [`crate::version`]).
+    pixel_version: u64,
+    /// Stamp of the last change of the mask values or of the mask itself.
+    mask_version: u64,
+}
+
+impl PartialEq for Layer {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.props == other.props
+            && self.mask == other.mask
+            && self.kind == other.kind
+    }
 }
 
 impl Layer {
     pub(crate) fn new(id: LayerId, props: LayerProps, kind: LayerKind) -> Self {
+        let stamp = next_stamp();
         Self {
             id,
             props,
             mask: None,
             kind,
+            pixel_version: stamp,
+            mask_version: stamp,
         }
+    }
+
+    /// Returns the pixel version: a stamp that changes when the pixel
+    /// values of this layer change (pixel writes, and their undo and redo).
+    ///
+    /// A move of the layer does not change it: the values are the same.
+    /// Property changes (opacity, blend mode, visibility) do not change
+    /// it. Stamps are unique in the process (see [`crate::version`]), so
+    /// equal versions of one layer ID mean equal pixel values. For layers
+    /// that are not pixel layers, the value has no use.
+    pub const fn pixel_version(&self) -> u64 {
+        self.pixel_version
+    }
+
+    /// Returns the mask version: a stamp that changes when the mask values
+    /// change, or when the mask is added, replaced, or removed. A move, an
+    /// enable or disable, and property changes do not change it.
+    pub const fn mask_version(&self) -> u64 {
+        self.mask_version
+    }
+
+    /// Gives the pixel values a new version.
+    pub(crate) fn touch_pixels(&mut self) {
+        self.pixel_version = next_stamp();
+    }
+
+    /// Gives the mask a new version.
+    pub(crate) fn touch_mask(&mut self) {
+        self.mask_version = next_stamp();
     }
 
     /// Returns the ID.
