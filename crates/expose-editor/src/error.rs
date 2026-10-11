@@ -7,6 +7,7 @@ use expose_core::CoreError;
 use expose_gpu::GpuError;
 use thiserror::Error;
 
+use crate::file::FileError;
 use crate::layer::{LayerId, LockKind};
 
 /// All errors that `expose-editor` can return.
@@ -144,6 +145,10 @@ pub enum EditorError {
     /// a positive finite number, or an output size of 0).
     #[error("invalid view: {0}")]
     InvalidView(&'static str),
+
+    /// A document file cannot be read or written (see [`crate::file`]).
+    #[error("document file: {0}")]
+    File(#[from] FileError),
 }
 
 /// Result type with [`EditorError`].

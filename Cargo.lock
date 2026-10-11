@@ -1007,9 +1007,13 @@ name = "expose-editor"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "crc32fast",
  "expose-core",
  "expose-gpu",
+ "miniz_oxide 0.9.1",
  "pollster",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

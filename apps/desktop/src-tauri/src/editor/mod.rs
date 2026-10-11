@@ -86,7 +86,11 @@ fn editor_error_kind(error: &EditorError) -> ErrorKind {
     match error {
         EditorError::LayerNotFound(_) => ErrorKind::NotFound,
         EditorError::Gpu(_) | EditorError::InvalidHistory(_) => ErrorKind::Internal,
-        EditorError::Core(_)
+        EditorError::File(expose_editor::FileError::Io { .. }) => ErrorKind::Io,
+        // Any other file error means the document file is damaged or not
+        // supported.
+        EditorError::File(_)
+        | EditorError::Core(_)
         | EditorError::TooLarge { .. }
         | EditorError::OutOfRange { .. }
         | EditorError::NonFinite { .. }
