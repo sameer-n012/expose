@@ -33,6 +33,13 @@ A new table records, for an editor output photo: the photo ID of the TIFF, the `
 - Layout: magic and format version, a JSON manifest (document spec, layer tree, layer properties, adjustments, mask metadata, blob table), then binary blobs. Each blob: pixel or mask `f32` little-endian data, byte-shuffled (all byte 0s, then all byte 1s, ...), then deflate (`miniz_oxide`), with a CRC-32. Lossless: a round trip gives the same document.
 - A reader rejects an unknown major version, checks all sizes against the editor limits before it allocates, and checks the CRCs. Unknown JSON fields are ignored, so minor versions can add fields.
 
+### Format details (editor-file)
+
+- Header (20 bytes, little-endian): magic `89 'EXDOC' 0D 0A`, major `u16` (1), minor `u16` (0), manifest length `u64` (at most 64 MiB). Byte layout: `crates/expose-editor/src/file/mod.rs`.
+- The CRC-32 covers the stored (compressed) bytes. Deflate level 1. The reader rejects a raw length larger than the deflate limit for the compressed length, so a small file cannot force a large allocation.
+- Group nesting in a file is limited to 32 levels. The writer refuses deeper documents.
+- 6000 × 4000 single layer (release): noise 134.5 MB, write 1.9 s, read 1.3 s; smooth 70.6 MB, write 0.6 s, read 0.6 s.
+
 ## Consequences
 
 - The `.tif` duplicates the composite in a second file; this is the cost of a photo that all other modules can use without the editor.

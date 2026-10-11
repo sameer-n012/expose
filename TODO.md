@@ -13,15 +13,19 @@ Editor, first version (ADR 0013):
 - [x] **editor-view** (O, merged, ADR 0014) — document revision and layer content versions, layer texture cache, cached full composite, `render_view` (zoom/pan view kernel; pan 1–2 ms at 4096²), `History::push_merge`.
 - [x] **editor-ui** (S, merged) — Editor module: canvas with zoom/pan, layers panel, adjustment layers, undo/redo, `Mod+E` "Edit in Editor"; built against the command contract in ADR 0013 with mocked `invoke` (the commands do not exist until editor-shell). UI notes for editor-shell: `aboveLayerId` can be inside a group (insert above it in its parent); the UI ignores the frame `seq`; pixels outside the canvas must be transparent. Later: layer thumbnails, drag-and-drop reorder, moves into/out of groups.
 - [x] **editor-shell** (O, merged) — `EditorEngine` (own render thread and `GpuContext`, one waiting render per document, `superseded` for older ones) and `editor_open/render/edit/undo/redo/close` in `src-tauri/src/editor/` + `commands/editor.rs`; history 50 steps; view side limit 8192.
-- [ ] **editor-check** (operator) — check the Editor in the real webview: `Mod+E` on a photo, zoom/pan, layer edits, adjustment sliders, undo/redo.
+- [x] **editor-check** (operator, 2026-10-10) — the Editor works in the real webview.
+
+Editor save (ADR 0015):
+
+- [x] **catalog-editor-link** (S, PR #48) — `editor_outputs` table (schema 2), `set_editor_output`, `editor_output`, `editor_output_for_document`, `find_photo_by_path`, `is_editor_output_path`; `Photo.isEditorOutput`.
+- [x] **editor-file** (O, merged) — `.exdoc` read/write (`expose_editor::file`), `Document::from_layer`, `Document::layer_by_number`; `new_empty` no longer allocates a canvas buffer.
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **editor-followups** (S) — `Document::new_empty` allocates a full-size transparent canvas that `editor_open` drops at once (about 380 MB extra peak at 24 MP; add a constructor from a pixel layer); public lookup of a layer by number (the shell searches `layer_ids()`); the UI must ignore `notFound` from renders in flight after `editor_close`.
-2. [ ] **editor-save** — decision first (operator): native layered file format and/or save back to the library.
-3. [ ] **editor-tools** — brush, selection, masks in the UI, levels/curves editors.
+1. [ ] **editor-save-shell** (O) — `editor_save` (write `.exdoc` + flattened 16-bit TIFF next to the original, import the TIFF, record the link, overwrite only recorded editor outputs, refresh the thumbnail), `editor_open` of a linked photo opens its `.exdoc`, `Mod+S` + unsaved-changes state in the UI. Also: use `Document::from_layer` and `layer_by_number` in the shell; the UI must ignore `notFound` from renders in flight after `editor_close`.
+2. [ ] **editor-tools** — brush, selection, masks in the UI, levels/curves editors.
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
