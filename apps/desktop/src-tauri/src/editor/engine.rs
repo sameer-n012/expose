@@ -11,7 +11,8 @@
 //!
 //! # Order and coalescing
 //!
-//! Jobs (open, edit, undo, redo, close) run in order. Waiting frame
+//! Jobs (open, edit, undo, redo, save snapshot, save end, close) run in
+//! order. Waiting frame
 //! requests run after all waiting jobs, so a frame always shows the newest
 //! edits. The engine keeps at most one waiting frame request for each
 //! document: a newer request for the same document replaces it, and the
@@ -39,6 +40,7 @@ use expose_gpu::{GpuContext, GpuContextOptions};
 
 use super::EditorEngineError;
 use super::dto::{DocumentId, DocumentInfo, EditDto};
+use super::save::{DocumentOrigin, SaveSnapshot, SavedFiles};
 use super::session::EditSession;
 use crate::preview::frame::{FRAME_HEADER_BYTES, FrameHeader, FrameTimings, rgba8_body_len};
 
@@ -63,8 +65,20 @@ pub struct RenderRequest {
 enum Job {
     Open {
         document: Box<Document>,
+        origin: DocumentOrigin,
         space: DisplaySpace,
         reply: Reply<DocumentInfo>,
+    },
+    /// Takes the snapshot of a save and marks the document as saving.
+    Snapshot {
+        document: DocumentId,
+        reply: Reply<SaveSnapshot>,
+    },
+    /// Ends a save. `saved` is `None` if the save failed.
+    FinishSave {
+        document: DocumentId,
+        saved: Option<(u64, SavedFiles)>,
+        reply: Option<Reply<DocumentInfo>>,
     },
     Edit {
         document: DocumentId,
@@ -149,7 +163,8 @@ impl EditorEngine {
     }
 
     /// Opens `document` (frames in the display space `space`) and waits
-    /// for the result. The open is not an undo step.
+    /// for the result. The open is not an undo step. `origin` tells the
+    /// save where the document came from.
     ///
     /// # Errors
     ///
@@ -158,15 +173,70 @@ impl EditorEngine {
     pub async fn open_async(
         &self,
         document: Document,
+        origin: DocumentOrigin,
         space: DisplaySpace,
     ) -> Result<DocumentInfo, EditorEngineError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.push_job(Job::Open {
             document: Box::new(document),
+            origin,
             space,
             reply: reply_to(sender),
         });
         receive(receiver).await
+    }
+
+    /// Starts a save: composites the full canvas on the GPU, copies the
+    /// document, and marks the document as saving. Each successful call
+    /// must be followed by [`Self::finish_save_async`] or
+    /// [`Self::cancel_save`] (see [`SaveGuard`]).
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`],
+    /// [`EditorEngineError::SaveInProgress`], and the compositor errors.
+    pub async fn snapshot_async(
+        &self,
+        document: DocumentId,
+    ) -> Result<SaveSnapshot, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::Snapshot {
+            document,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
+    /// Ends a save that wrote the document at `revision` to `files`, and
+    /// returns the new document info (not dirty if no edit came after the
+    /// snapshot).
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`] if the document closed
+    /// during the save.
+    pub async fn finish_save_async(
+        &self,
+        document: DocumentId,
+        revision: u64,
+        files: SavedFiles,
+    ) -> Result<DocumentInfo, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::FinishSave {
+            document,
+            saved: Some((revision, files)),
+            reply: Some(reply_to(sender)),
+        });
+        receive(receiver).await
+    }
+
+    /// Ends a save that failed. The document stays dirty.
+    pub fn cancel_save(&self, document: DocumentId) {
+        self.push_job(Job::FinishSave {
+            document,
+            saved: None,
+            reply: None,
+        });
     }
 
     /// Applies an edit (see [`EditSession::edit`]) and waits for the new
@@ -302,6 +372,51 @@ impl Drop for EditorEngine {
     }
 }
 
+/// Ends a save on drop with [`EditorEngine::cancel_save`], unless
+/// [`SaveGuard::finish`] ran. Thus a failed or dropped save command does
+/// not leave the document in the saving state.
+pub struct SaveGuard<'a> {
+    engine: &'a EditorEngine,
+    document: DocumentId,
+    armed: bool,
+}
+
+impl<'a> SaveGuard<'a> {
+    /// Guards the save of `document` that [`EditorEngine::snapshot_async`]
+    /// started.
+    pub const fn new(engine: &'a EditorEngine, document: DocumentId) -> Self {
+        Self {
+            engine,
+            document,
+            armed: true,
+        }
+    }
+
+    /// Ends the save with success (see [`EditorEngine::finish_save_async`]).
+    ///
+    /// # Errors
+    ///
+    /// See [`EditorEngine::finish_save_async`].
+    pub async fn finish(
+        mut self,
+        revision: u64,
+        files: SavedFiles,
+    ) -> Result<DocumentInfo, EditorEngineError> {
+        self.armed = false;
+        self.engine
+            .finish_save_async(self.document, revision, files)
+            .await
+    }
+}
+
+impl Drop for SaveGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.engine.cancel_save(self.document);
+        }
+    }
+}
+
 fn stopped() -> EditorEngineError {
     EditorEngineError::Stopped("the engine is shutting down".into())
 }
@@ -332,6 +447,12 @@ fn fail_job(job: Job, error: &EditorEngineError) {
         | Job::Edit { reply, .. }
         | Job::Undo { reply, .. }
         | Job::Redo { reply, .. } => reply(Err(error())),
+        Job::Snapshot { reply, .. } => reply(Err(error())),
+        Job::FinishSave { reply, .. } => {
+            if let Some(reply) = reply {
+                reply(Err(error()));
+            }
+        }
         Job::Close(_) => {}
     }
 }
@@ -378,6 +499,8 @@ struct OpenDoc {
     /// size changes.
     display: Option<DisplayEncoder>,
     next_seq: u32,
+    /// `true` from the snapshot of a save to its end.
+    saving: bool,
 }
 
 /// The state of the render thread.
@@ -410,12 +533,13 @@ impl Renderer {
     fn open(
         &mut self,
         document: Document,
+        origin: DocumentOrigin,
         space: DisplaySpace,
     ) -> Result<DocumentInfo, EditorEngineError> {
         // Make the GPU context now, so that a machine with no GPU gets the
         // error at the open and not at the first frame.
         ensure_gpu(&mut self.gpu)?;
-        let session = EditSession::new(document)?;
+        let session = EditSession::with_origin(document, origin)?;
         self.next_id += 1;
         let id = self.next_id;
         let info = session.info(id);
@@ -426,6 +550,7 @@ impl Renderer {
                 space,
                 display: None,
                 next_seq: 0,
+                saving: false,
             },
         );
         tracing::debug!(
@@ -442,6 +567,54 @@ impl Renderer {
             .get_mut(&id)
             .map(|doc| &mut doc.session)
             .ok_or(EditorEngineError::DocumentNotFound(id))
+    }
+
+    /// See [`EditorEngine::snapshot_async`]. The GPU composite reuses the
+    /// cached layer textures of the view render.
+    fn snapshot(&mut self, id: DocumentId) -> Result<SaveSnapshot, EditorEngineError> {
+        let started = Instant::now();
+        let Self { gpu, documents, .. } = self;
+        let doc = documents
+            .get_mut(&id)
+            .ok_or(EditorEngineError::DocumentNotFound(id))?;
+        if doc.saving {
+            return Err(EditorEngineError::SaveInProgress(id));
+        }
+        let Gpu { ctx, compositor } = ensure_gpu(gpu)?;
+        let document = doc.session.document();
+        let composite =
+            pollster::block_on(compositor.composite_gpu_image(ctx, document, document.bounds()))?;
+        doc.saving = true;
+        tracing::debug!(
+            document = id,
+            ms = started.elapsed().as_millis(),
+            "editor save snapshot taken"
+        );
+        Ok(SaveSnapshot {
+            // A copy of the layers (about 16 bytes per pixel of each pixel
+            // layer). It lets the file write run off this thread, so frames
+            // keep coming during the save.
+            document: document.clone(),
+            composite,
+            revision: document.revision(),
+            origin: doc.session.origin().clone(),
+        })
+    }
+
+    fn finish_save(
+        &mut self,
+        id: DocumentId,
+        saved: Option<(u64, SavedFiles)>,
+    ) -> Result<DocumentInfo, EditorEngineError> {
+        let doc = self
+            .documents
+            .get_mut(&id)
+            .ok_or(EditorEngineError::DocumentNotFound(id))?;
+        doc.saving = false;
+        if let Some((revision, files)) = saved {
+            doc.session.mark_saved(revision, files);
+        }
+        Ok(doc.session.info(id))
     }
 
     fn close(&mut self, id: DocumentId) {
@@ -518,11 +691,28 @@ impl Renderer {
             Job::Close(id) => self.close(id),
             Job::Open {
                 document,
+                origin,
                 space,
                 reply,
             } => {
-                let result = guarded(self, |r| r.open(*document, space));
+                let result = guarded(self, |r| r.open(*document, origin, space));
                 reply(result);
+            }
+            Job::Snapshot { document, reply } => {
+                let result = guarded(self, |r| r.snapshot(document));
+                reply(result);
+            }
+            Job::FinishSave {
+                document,
+                saved,
+                reply,
+            } => {
+                let result = self.finish_save(document, saved);
+                match reply {
+                    Some(reply) => reply(result),
+                    // A cancel of a closed document is not an error.
+                    None => drop(result),
+                }
             }
             Job::Edit {
                 document,
@@ -636,7 +826,11 @@ mod tests {
         let engine = EditorEngine::start().unwrap();
         let image = WorkingImage::new_filled(width, height, color).unwrap();
         let document = build_document(image).unwrap();
-        match pollster::block_on(engine.open_async(document, DisplaySpace::Srgb)) {
+        match pollster::block_on(engine.open_async(
+            document,
+            DocumentOrigin::default(),
+            DisplaySpace::Srgb,
+        )) {
             Ok(info) => Some((engine, info)),
             Err(EditorEngineError::GpuUnavailable(error)) => {
                 eprintln!("SKIPPED: no GPU ({error})");
@@ -778,6 +972,55 @@ mod tests {
             closed,
             Err(EditorEngineError::DocumentNotFound(_))
         ));
+    }
+
+    #[test]
+    fn save_snapshot_and_finish_track_dirty_state() {
+        let Some((engine, info)) = engine_with_document(4, 3, [0.5, 0.25, 0.125, 0.5]) else {
+            return;
+        };
+        let id = info.document_id;
+        assert!(!info.dirty);
+        let edited = pollster::block_on(engine.edit_async(
+            id,
+            EditDto::SetOpacity {
+                layer_id: info.layers[0].id,
+                opacity: 0.5,
+            },
+            None,
+        ))
+        .unwrap();
+        assert!(edited.dirty);
+        let snapshot = pollster::block_on(engine.snapshot_async(id)).unwrap();
+        assert_eq!(snapshot.revision, edited.revision);
+        assert_eq!(
+            (snapshot.composite.width(), snapshot.composite.height()),
+            (4, 3)
+        );
+        // Premultiplied: alpha 0.5 * opacity 0.5, color 0.5 * 0.25.
+        let p = snapshot.composite.pixels()[0];
+        assert!((p[3] - 0.25).abs() < 1e-3, "{p:?}");
+        assert!((p[0] - 0.125).abs() < 1e-3, "{p:?}");
+        // A second save while the first runs is refused.
+        assert!(matches!(
+            pollster::block_on(engine.snapshot_async(id)),
+            Err(EditorEngineError::SaveInProgress(_))
+        ));
+        let files = SavedFiles {
+            photo_id: expose_catalog::PhotoId(3),
+            document_path: "/p/a-edit.exdoc".into(),
+            image_path: "/p/a-edit.tif".into(),
+        };
+        let saved =
+            pollster::block_on(SaveGuard::new(&engine, id).finish(snapshot.revision, files))
+                .unwrap();
+        assert!(!saved.dirty);
+        assert_eq!(saved.saved_photo_id, Some(expose_catalog::PhotoId(3)));
+        // A dropped guard ends the save, so a new save can start.
+        let again = pollster::block_on(engine.snapshot_async(id)).unwrap();
+        drop(SaveGuard::new(&engine, id));
+        drop(again);
+        assert!(pollster::block_on(engine.snapshot_async(id)).is_ok());
     }
 
     /// An engine with no thread, so that requests stay in the queue.

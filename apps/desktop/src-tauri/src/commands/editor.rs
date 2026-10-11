@@ -1,5 +1,5 @@
 //! Editor commands: open a library photo as a layered document, render the
-//! canvas view, edit, undo, redo, and close (ADR 0013).
+//! canvas view, edit, undo, redo, save, and close (ADR 0013, ADR 0015).
 //!
 //! `editor_render` returns the same binary `EXF1` frame as
 //! `preview_render` (see [`crate::preview::frame`]), so the UI reuses its
@@ -11,16 +11,20 @@ use std::time::Instant;
 use expose_catalog::{CatalogStore, PhotoId};
 use expose_core::develop::DevelopSettings;
 use expose_develop::{Pipeline, SourceInfo};
-use expose_editor::ViewSpec;
+use expose_editor::{Document, ViewSpec};
 use tauri::ipc::Response;
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 
 use super::preview::DisplaySpaceArg;
 use super::{run_blocking, with_catalog};
+use crate::editor::save::{read_linked_document, save_snapshot};
 use crate::editor::{
-    DocumentId, DocumentInfo, EditDto, EditorEngine, RenderRequest, build_document,
+    DocumentId, DocumentInfo, DocumentOrigin, EditDto, EditorEngine, RenderRequest, SaveGuard,
+    SaveResult, SavedFiles, build_document,
 };
 use crate::error::{CommandError, ErrorKind};
+use crate::state::CatalogState;
+use crate::thumbnails::{ThumbnailInput, ThumbnailService};
 
 /// Parses stored develop settings. A stored document that does not parse
 /// or validate is an error (as for export): the editor must not show the
@@ -42,15 +46,65 @@ fn parse_settings(stored: Option<serde_json::Value>) -> Result<DevelopSettings, 
     Ok(settings)
 }
 
-/// Opens a photo of the library as a document with one pixel layer
-/// "Background": the photo after the full develop at source size (the
-/// same develop as export).
+/// What `editor_open` reads for a photo.
+#[derive(Debug, Clone, PartialEq)]
+enum OpenSource {
+    /// The photo is the flattened image of a save: read the layered file.
+    Linked {
+        /// The layered document file.
+        document_path: PathBuf,
+        /// The origin of the document (the link).
+        origin: DocumentOrigin,
+    },
+    /// A normal photo: decode and develop it.
+    Photo {
+        /// The photo file.
+        path: PathBuf,
+        /// The stored develop settings, if any.
+        stored: Option<serde_json::Value>,
+    },
+}
+
+/// Reads from the catalog what an open of `photo_id` needs.
+fn open_source<S: CatalogStore + ?Sized>(
+    store: &S,
+    photo_id: PhotoId,
+) -> Result<OpenSource, CommandError> {
+    let path = store
+        .photo_path(photo_id)?
+        .ok_or_else(|| CommandError::new(ErrorKind::NotFound, "the photo does not exist"))?;
+    if let Some(link) = store.editor_output(photo_id)? {
+        return Ok(OpenSource::Linked {
+            document_path: link.document_path.clone(),
+            origin: DocumentOrigin {
+                source_photo_id: link.source_photo_id,
+                saved: Some(SavedFiles {
+                    photo_id,
+                    document_path: link.document_path,
+                    image_path: path,
+                }),
+            },
+        });
+    }
+    let stored = store.get_develop_settings(photo_id)?.map(|s| s.settings);
+    Ok(OpenSource::Photo { path, stored })
+}
+
+/// Opens a photo of the library as a document.
+///
+/// - A photo that is the flattened image of an editor save opens its
+///   layered `.exdoc` file. A missing or damaged file is an error; the
+///   command does not open the flattened photo in its place.
+/// - Any other photo opens as a document with one pixel layer
+///   "Background": the photo after the full develop at source size (the
+///   same develop as export).
 ///
 /// `displaySpace` (`null` gives sRGB) is the color space of the frames.
 ///
-/// Errors: `notFound` (photo or file), `internal` (decode, develop, or
-/// stored settings), `invalidInput` (the photo is larger than the editor
-/// limits), `unavailable` (no GPU).
+/// Errors: `notFound` (photo, file, or layered file), `internal` (decode,
+/// develop, or stored settings), `invalidInput` (the photo is larger than
+/// the editor limits, or the layered file is damaged), `unavailable` (no
+/// GPU).
 #[tauri::command]
 pub async fn editor_open<R: Runtime>(
     app: AppHandle<R>,
@@ -58,18 +112,44 @@ pub async fn editor_open<R: Runtime>(
     photo_id: PhotoId,
     display_space: Option<DisplaySpaceArg>,
 ) -> Result<DocumentInfo, CommandError> {
-    // Hold the catalog lock only to read the path and the settings.
-    let (path, stored): (PathBuf, Option<serde_json::Value>) = with_catalog(app, move |state| {
-        let store = state.lock()?;
-        let path = store
-            .photo_path(photo_id)?
-            .ok_or_else(|| CommandError::new(ErrorKind::NotFound, "the photo does not exist"))?;
-        let stored = store.get_develop_settings(photo_id)?.map(|s| s.settings);
-        Ok((path, stored))
-    })
-    .await?;
+    // Hold the catalog lock only to read the path, the link, and the
+    // settings.
+    let source = with_catalog(app, move |state| open_source(&*state.lock()?, photo_id)).await?;
     let started = Instant::now();
-    let document = run_blocking(move || {
+    let (document, origin) = match source {
+        OpenSource::Linked {
+            document_path,
+            origin,
+        } => {
+            let document = run_blocking(move || read_linked_document(&document_path)).await?;
+            (document, origin)
+        }
+        OpenSource::Photo { path, stored } => {
+            let document = develop_document(path, stored).await?;
+            let origin = DocumentOrigin {
+                source_photo_id: Some(photo_id),
+                saved: None,
+            };
+            (document, origin)
+        }
+    };
+    tracing::debug!(
+        photo = photo_id.0,
+        ms = started.elapsed().as_millis(),
+        "editor document read"
+    );
+    Ok(engine
+        .open_async(document, origin, display_space.unwrap_or_default().into())
+        .await?)
+}
+
+/// Decodes and develops a photo, and makes a document of it (on a
+/// blocking thread).
+async fn develop_document(
+    path: PathBuf,
+    stored: Option<serde_json::Value>,
+) -> Result<Document, CommandError> {
+    run_blocking(move || {
         let settings = parse_settings(stored)?;
         let decoded = expose_raw::decode_path(&path).map_err(|error| {
             let kind = if path.exists() {
@@ -93,15 +173,89 @@ pub async fn editor_open<R: Runtime>(
         }
         Ok(build_document(image)?)
     })
-    .await?;
-    tracing::debug!(
-        photo = photo_id.0,
+    .await
+}
+
+/// Saves a document (ADR 0015): writes the layered `.exdoc` file and a
+/// flattened 16-bit TIFF next to the source photo, imports the TIFF into
+/// the library, and records the link. A later save of the same document
+/// replaces the same two files and refreshes the thumbnail.
+///
+/// The GPU composite runs on the render thread; the encode and the file
+/// writes run on a blocking thread, so frames keep coming.
+///
+/// Errors: `notFound` (document or source photo), `invalidInput` (the save
+/// would overwrite a file that Expose did not create, or a save runs
+/// already), `io` (for example, a read-only folder), `unavailable` (no
+/// GPU), `database`, `internal`.
+#[tauri::command]
+pub async fn editor_save<R: Runtime>(
+    app: AppHandle<R>,
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+) -> Result<SaveResult, CommandError> {
+    let started = Instant::now();
+    let snapshot = engine.snapshot_async(document_id).await?;
+    let guard = SaveGuard::new(engine.inner(), document_id);
+    let revision = snapshot.revision;
+    let outcome = with_catalog(app.clone(), move |state| save_snapshot(state, snapshot)).await?;
+    let info = guard.finish(revision, outcome.files.clone()).await?;
+    warm_thumbnail(&app, outcome.files.photo_id);
+    tracing::info!(
+        document = document_id,
+        photo = outcome.files.photo_id.0,
+        created = outcome.created,
         ms = started.elapsed().as_millis(),
-        "editor document decoded and developed"
+        "editor document saved"
     );
-    Ok(engine
-        .open_async(document, display_space.unwrap_or_default().into())
-        .await?)
+    Ok(SaveResult {
+        photo_id: outcome.files.photo_id,
+        document_path: outcome.files.document_path.display().to_string(),
+        image_path: outcome.files.image_path.display().to_string(),
+        created: outcome.created,
+        info,
+    })
+}
+
+/// Makes the thumbnail of the saved image in the background, so that the
+/// library shows the new content soon. The cache key includes the file
+/// size and time, so a new file always gives a new thumbnail; the old
+/// cache file is removed when the new one is made. A failure is logged.
+fn warm_thumbnail<R: Runtime>(app: &AppHandle<R>, photo_id: PhotoId) {
+    let app = app.clone();
+    // The join handle is not needed: the task only logs its result.
+    drop(tauri::async_runtime::spawn_blocking(move || {
+        let (Some(service), Some(state)) = (
+            app.try_state::<ThumbnailService>(),
+            app.try_state::<CatalogState>(),
+        ) else {
+            return;
+        };
+        let input = (|| {
+            let (path, stored) = {
+                let store = state.lock()?;
+                let path = store.photo_path(photo_id)?.ok_or_else(|| {
+                    CommandError::new(ErrorKind::NotFound, "the photo does not exist")
+                })?;
+                (path, store.get_develop_settings(photo_id)?)
+            };
+            ThumbnailInput::from_catalog(photo_id, path, stored.as_ref())
+                .map_err(|error| CommandError::internal(error.to_string()))
+        })();
+        match input {
+            Ok(input) => service.request(
+                input,
+                Box::new(move |result| {
+                    if let Err(error) = result {
+                        tracing::warn!(photo = photo_id.0, %error, "cannot make the thumbnail of a saved image");
+                    }
+                }),
+            ),
+            Err(error) => {
+                tracing::warn!(photo = photo_id.0, %error, "cannot make the thumbnail of a saved image");
+            }
+        }
+    }));
 }
 
 /// Renders a view of a document and returns the frame body (`EXF1` header
@@ -189,8 +343,9 @@ pub async fn editor_redo(
     Ok(engine.redo_async(document_id).await?)
 }
 
-/// Closes a document and frees its memory. The edits are lost (the editor
-/// cannot save yet). Closing an unknown document does nothing.
+/// Closes a document and frees its memory. Edits after the last save are
+/// lost (the UI asks the user first). Closing an unknown document does
+/// nothing.
 ///
 /// This command only queues the close, so it can run on the main thread.
 #[tauri::command]
@@ -204,6 +359,9 @@ pub fn editor_close(engine: State<'_, EditorEngine>, document_id: DocumentId) {
 
 #[cfg(test)]
 mod tests {
+    // Test code: a failed setup is a test failure.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use serde_json::json;
 
     use super::*;
@@ -222,6 +380,94 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    /// A catalog with `a.jpg` and its saved `a-edit.tif` (linked to
+    /// `a-edit.exdoc`) in a temporary folder.
+    fn linked_catalog() -> (
+        tempfile::TempDir,
+        expose_catalog::SqliteStore,
+        PhotoId,
+        PhotoId,
+    ) {
+        use expose_catalog::{AddOutcome, EditorOutput, NewPhoto};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = expose_catalog::SqliteStore::open_in_memory().unwrap();
+        let folder = store.add_folder(dir.path()).unwrap();
+        let photo = |name: &str| NewPhoto {
+            file_name: name.into(),
+            file_size: 1,
+            file_modified_ms: 1,
+        };
+        let ids: Vec<PhotoId> = store
+            .add_photos(folder.id, &[photo("a.jpg"), photo("a-edit.tif")])
+            .unwrap()
+            .into_iter()
+            .map(|o| match o {
+                AddOutcome::Added(id) | AddOutcome::AlreadyKnown(id) => id,
+            })
+            .collect();
+        store
+            .set_editor_output(&EditorOutput {
+                photo_id: ids[1],
+                document_path: dir.path().join("a-edit.exdoc"),
+                source_photo_id: Some(ids[0]),
+            })
+            .unwrap();
+        (dir, store, ids[0], ids[1])
+    }
+
+    #[test]
+    fn open_of_a_linked_photo_reads_the_layered_file() {
+        let (dir, store, source, output) = linked_catalog();
+        // A plain photo: decode and develop.
+        let plain = open_source(&store, source).unwrap();
+        assert_eq!(
+            plain,
+            OpenSource::Photo {
+                path: dir.path().join("a.jpg"),
+                stored: None
+            }
+        );
+        // The saved photo: the layered file, with the link as the origin.
+        let OpenSource::Linked {
+            document_path,
+            origin,
+        } = open_source(&store, output).unwrap()
+        else {
+            panic!("the saved photo does not open its layered file");
+        };
+        assert_eq!(document_path, dir.path().join("a-edit.exdoc"));
+        assert_eq!(origin.source_photo_id, Some(source));
+        assert_eq!(
+            origin.saved,
+            Some(SavedFiles {
+                photo_id: output,
+                document_path: document_path.clone(),
+                image_path: dir.path().join("a-edit.tif"),
+            })
+        );
+        // Round trip of the layers through the file.
+        let mut doc = build_document(
+            expose_core::buffer::WorkingImage::new_filled(3, 2, [0.1, 0.2, 0.3, 1.0]).unwrap(),
+        )
+        .unwrap();
+        let id = doc.layers()[0].id();
+        doc.duplicate_layer(id).unwrap();
+        doc.set_opacity(id, 0.4).unwrap();
+        crate::editor::save::write_atomic(&document_path, |out| {
+            expose_editor::write_document(&doc, out)
+                .map_err(|e| CommandError::internal(e.to_string()))
+        })
+        .unwrap();
+        assert_eq!(read_linked_document(&document_path).unwrap(), doc);
+        // A missing layered file is an error, not the flattened photo.
+        std::fs::remove_file(&document_path).unwrap();
+        let error = read_linked_document(&document_path).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::NotFound);
+        // An unknown photo.
+        let error = open_source(&store, PhotoId(999)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::NotFound);
     }
 
     #[test]

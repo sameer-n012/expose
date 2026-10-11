@@ -4,6 +4,7 @@
 //! The UI types are in `ui/src/lib/editor/api.ts`. Keep the two in sync.
 //! All names are camelCase. Enums are tagged with the field `type`.
 
+use expose_catalog::PhotoId;
 use expose_core::develop::CurvePoint;
 use expose_editor::{
     Adjustment, BlendMode, BrightnessContrast, Curves, Document, GroupIsolation, HueSaturation,
@@ -398,10 +399,18 @@ pub struct DocumentInfo {
     /// that increases by one, so it stays far below 2^53, and a JSON number
     /// in the UI holds it exactly.
     pub revision: u64,
+    /// `true` if the revision is not the revision of the last save (or of
+    /// the open, if the document has no save in this session).
+    pub dirty: bool,
+    /// The library photo of the flattened image of the last save, or
+    /// `None` if the document has no saved files yet.
+    pub saved_photo_id: Option<PhotoId>,
 }
 
 impl DocumentInfo {
-    /// Makes the info of `document` with the ID `id`.
+    /// Makes the info of `document` with the ID `id`. The info is not
+    /// dirty and has no saved photo; [`crate::editor::EditSession::info`]
+    /// sets these two fields.
     pub fn new(id: DocumentId, document: &Document, can_undo: bool, can_redo: bool) -> Self {
         Self {
             document_id: id,
@@ -411,8 +420,27 @@ impl DocumentInfo {
             can_undo,
             can_redo,
             revision: document.revision(),
+            dirty: false,
+            saved_photo_id: None,
         }
     }
+}
+
+/// The result of `editor_save`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveResult {
+    /// The library photo of the flattened image.
+    pub photo_id: PhotoId,
+    /// The absolute path of the layered document file.
+    pub document_path: String,
+    /// The absolute path of the flattened image file.
+    pub image_path: String,
+    /// `true` if this save made the two files and the library photo;
+    /// `false` if it replaced the files of an earlier save.
+    pub created: bool,
+    /// The document info after the save.
+    pub info: DocumentInfo,
 }
 
 /// One edit from the UI. Layer IDs are the values of [`LayerInfo::id`].
@@ -704,6 +732,8 @@ mod tests {
         assert_eq!(value["documentId"], 9);
         assert_eq!(value["canUndo"], true);
         assert_eq!(value["canRedo"], false);
+        assert_eq!(value["dirty"], false);
+        assert!(value["savedPhotoId"].is_null());
         let bottom = &value["layers"][0];
         assert_eq!(bottom["kind"], "pixel");
         assert_eq!(bottom["fillOpacity"], 1.0);

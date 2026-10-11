@@ -156,6 +156,7 @@ pub fn run() -> tauri::Result<()> {
             commands::editor::editor_undo,
             commands::editor::editor_redo,
             commands::editor::editor_close,
+            commands::editor::editor_save,
             commands::export::export_start,
             commands::export::export_cancel,
             commands::preview::preview_open,

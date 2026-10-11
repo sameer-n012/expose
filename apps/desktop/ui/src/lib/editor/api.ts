@@ -85,6 +85,24 @@ export interface DocumentInfo {
   canRedo: boolean;
   /** Changes at every document change. */
   revision: number;
+  /** True if the document changed after the last save (or the open). */
+  dirty: boolean;
+  /** The library photo of the last save, or null if the document has no saved files. */
+  savedPhotoId: number | null;
+}
+
+/** The result of `editor_save`. */
+export interface SaveResult {
+  /** The library photo of the flattened image. */
+  photoId: number;
+  /** The absolute path of the layered `.exdoc` file. */
+  documentPath: string;
+  /** The absolute path of the flattened TIFF. */
+  imagePath: string;
+  /** True if this save made the files and the library photo. */
+  created: boolean;
+  /** The document info after the save. */
+  info: DocumentInfo;
 }
 
 export type EditDto =
@@ -120,6 +138,7 @@ export interface EditorApi {
   edit(documentId: number, edit: EditDto, gesture: number | null): Promise<DocumentInfo>;
   undo(documentId: number): Promise<DocumentInfo>;
   redo(documentId: number): Promise<DocumentInfo>;
+  save(documentId: number): Promise<SaveResult>;
   close(documentId: number): Promise<void>;
 }
 
@@ -130,6 +149,7 @@ export const editorApi: EditorApi = {
   edit: (documentId, edit, gesture) => invoke<DocumentInfo>('editor_edit', { documentId, edit, gesture }),
   undo: (documentId) => invoke<DocumentInfo>('editor_undo', { documentId }),
   redo: (documentId) => invoke<DocumentInfo>('editor_redo', { documentId }),
+  save: (documentId) => invoke<SaveResult>('editor_save', { documentId }),
   close: async (documentId) => {
     await invoke<null>('editor_close', { documentId });
   },

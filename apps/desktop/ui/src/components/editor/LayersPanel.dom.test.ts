@@ -27,7 +27,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 const bc = { type: 'brightnessContrast', brightness: 0, contrast: 0 } as const;
 
 function doc(layers: LayerInfo[], revision = 0): DocumentInfo {
-  return { documentId: 1, width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, revision };
+  return { documentId: 1, width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, revision, dirty: revision > 0, savedPhotoId: null };
 }
 
 async function makeStore(layers: LayerInfo[]) {
@@ -38,6 +38,13 @@ async function makeStore(layers: LayerInfo[]) {
     edit: vi.fn(async (_id: number, _edit: EditDto, _gesture: number | null) => doc(layers, ++revision)),
     undo: vi.fn(async () => doc(layers, ++revision)),
     redo: vi.fn(async () => doc(layers, ++revision)),
+    save: vi.fn(async () => ({
+      photoId: 9,
+      documentPath: '/p/a-edit.exdoc',
+      imagePath: '/p/a-edit.tif',
+      created: true,
+      info: { ...doc(layers, revision), dirty: false, savedPhotoId: 9 },
+    })),
     close: vi.fn(async () => undefined),
   } satisfies EditorApi;
   const store = new EditorStore({
@@ -132,6 +139,23 @@ describe('LayersPanel', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
     await flush();
     expect(api.undo).toHaveBeenCalledWith(1);
+  });
+});
+
+describe('LayersPanel save', () => {
+  it('shows the unsaved marker after an edit and saves on the Save button', async () => {
+    const { store, api } = await makeStore([layer(1)]);
+    render(LayersPanel, { editor: store });
+    expect(screen.getByTestId('editor-save-state').textContent?.trim()).toBe('Not saved');
+    await fireEvent.click(screen.getByRole('button', { name: 'Hide Layer 1' }));
+    await flush();
+    const state = screen.getByTestId('editor-save-state');
+    expect(state.textContent).toContain('•');
+    expect(state.textContent).toContain('Unsaved changes');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await flush();
+    expect(api.save).toHaveBeenCalledWith(1);
+    expect(screen.getByTestId('editor-save-state').textContent?.trim()).toBe('Saved');
   });
 });
 

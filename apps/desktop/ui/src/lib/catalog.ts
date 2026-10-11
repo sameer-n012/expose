@@ -69,6 +69,8 @@ export interface Photo {
   rating: number;
   flag: Flag;
   colorLabel: ColorLabel;
+  /** True if the photo is the flattened image of an Editor save. */
+  isEditorOutput: boolean;
 }
 
 export interface PhotoQuery {

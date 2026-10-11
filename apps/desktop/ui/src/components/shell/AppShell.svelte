@@ -38,6 +38,9 @@
   import EditInEditorButton from '../editor/EditInEditorButton.svelte';
   import EditorView from '../editor/EditorView.svelte';
   import LayersPanel from '../editor/LayersPanel.svelte';
+  import LeaveDialog from '../editor/LeaveDialog.svelte';
+  import { guardWindowClose, tauriCloseListener } from '../../lib/editor/closeGuard';
+  import { bumpThumbnailRevision } from '../../lib/library/thumbnailRevisions.svelte';
   import LibraryView from '../modules/LibraryView.svelte';
   import { PANEL_SECTIONS } from '../modules/panelSections';
   import Filmstrip from './Filmstrip.svelte';
@@ -77,8 +80,32 @@
   // The shortcut needs the shell, because the shell knows the active photo.
   $effect(() => registry.register(exportAction(exportPhotos)));
 
-  // The shell owns the editor store, too.
-  const editor = untrack(() => new EditorStore({ library, modules, toasts }));
+  // The shell owns the editor store, too. After a save, the library shows
+  // the new photo and loads the new thumbnail.
+  const editor = untrack(
+    () =>
+      new EditorStore({
+        library,
+        modules,
+        toasts,
+        onSaved: (result) => {
+          bumpThumbnailRevision(result.photoId);
+          void library.refresh();
+        },
+      }),
+  );
+
+  // While the document has unsaved changes, a window close asks first.
+  $effect(() => {
+    if (!editor.dirty) {
+      return;
+    }
+    return guardWindowClose(
+      tauriCloseListener,
+      () => editor.confirmLeave(),
+      (error) => console.warn('The window close guard is not available.', error),
+    );
+  });
 
   /** Opens the active photo (Develop) or the focused photo (else) in the Editor. */
   function editInEditor(): void {
@@ -87,7 +114,7 @@
   }
 
   $effect(() => registry.register(editInEditorAction(editInEditor)));
-  // Undo, redo, and zoom work in the Editor module only.
+  // Save, undo, redo, and zoom work in the Editor module only.
   $effect(() => registerActions(registry, editorActions(editor)));
 
   // The crop tool: `R` always; Enter, Esc, O, and X only while it is active.
@@ -239,6 +266,9 @@
 
 {#if exporter.isOpen}
   <ExportDialog store={exporter} />
+{/if}
+{#if editor.leavePrompt !== null}
+  <LeaveDialog {editor} />
 {/if}
 <ExportProgress store={exporter} />
 <ToastHost store={toasts} />

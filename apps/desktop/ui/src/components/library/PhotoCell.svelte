@@ -1,6 +1,6 @@
 <!--
   One cell of the library grid: thumbnail (or placeholder), file name,
-  rating, flag, color label, and capture date.
+  rating, flag, color label, Editor badge, and capture date.
   A photo that is not loaded yet shows an empty skeleton cell.
 -->
 <script lang="ts">
@@ -60,6 +60,11 @@
       {/if}
       {#if photo.colorLabel !== 'none'}
         <span class="label {photo.colorLabel}" title="Label: {photo.colorLabel}" data-testid="color-label"></span>
+      {/if}
+      {#if photo.isEditorOutput}
+        <span class="badge" title="Saved from the Editor. Edit in Editor opens its layers." data-testid="editor-badge">
+          Layers
+        </span>
       {/if}
     </span>
     <span class="info">
@@ -127,6 +132,17 @@
     height: 12px;
     border-radius: 50%;
     border: 1px solid var(--color-bg-app);
+  }
+  .badge {
+    position: absolute;
+    bottom: var(--space-2);
+    left: var(--space-2);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-app);
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    line-height: 1.5;
   }
   .info {
     display: grid;

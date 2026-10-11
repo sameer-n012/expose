@@ -9,6 +9,7 @@ use expose_editor::{
 
 use super::EditorEngineError;
 use super::dto::{DocumentId, DocumentInfo, EditDto};
+use super::save::{DocumentOrigin, SavedFiles};
 
 /// The maximum number of undo steps of a document. A delete step keeps the
 /// removed layer, so the history of a large photo can hold several full
@@ -31,38 +32,52 @@ pub const BACKGROUND_NAME: &str = "Background";
 pub fn build_document(mut image: WorkingImage) -> Result<Document, EditorEngineError> {
     image.premultiply_alpha();
     let spec = DocumentSpec::new(image.width(), image.height());
-    // `new_empty` gives a document with no layers. The photo layer is then
-    // the only layer, at the canvas origin.
-    let mut document = Document::new_empty(spec)?;
+    // The photo layer is the only layer, at the canvas origin.
     let layer = PixelLayer::new(image, (0, 0))?;
-    // The open is not an undo step, so the inverse edit is not kept.
-    let (_id, _undo) = document.add_layer(
-        BACKGROUND_NAME,
-        LayerContent::Pixel(layer),
-        Placement::root(0),
-    )?;
-    Ok(document)
+    Ok(Document::from_layer(spec, BACKGROUND_NAME, layer)?)
 }
 
-/// An open document and its undo history.
+/// An open document, its undo history, and its save state.
 #[derive(Debug)]
 pub struct EditSession {
     document: Document,
     history: History,
+    origin: DocumentOrigin,
+    /// The document revision at the last save, or at the open.
+    saved_revision: u64,
 }
 
 impl EditSession {
     /// Starts a session for `document` with an empty history of
-    /// [`HISTORY_STEPS`] steps.
+    /// [`HISTORY_STEPS`] steps and no origin. The document is not dirty.
     ///
     /// # Errors
     ///
     /// [`EditorEngineError::Internal`] if the history cannot be made (the
     /// step count is a constant larger than 0, so this does not occur).
     pub fn new(document: Document) -> Result<Self, EditorEngineError> {
+        Self::with_origin(document, DocumentOrigin::default())
+    }
+
+    /// Starts a session like [`Self::new`], with the photo and the files
+    /// that the document came from.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::new`].
+    pub fn with_origin(
+        document: Document,
+        origin: DocumentOrigin,
+    ) -> Result<Self, EditorEngineError> {
         let history = History::new(HISTORY_STEPS)
             .map_err(|_| EditorEngineError::Internal("the history step count is 0"))?;
-        Ok(Self { document, history })
+        let saved_revision = document.revision();
+        Ok(Self {
+            document,
+            history,
+            origin,
+            saved_revision,
+        })
     }
 
     /// The document.
@@ -70,14 +85,36 @@ impl EditSession {
         &self.document
     }
 
+    /// The photo and the files that the document came from.
+    pub const fn origin(&self) -> &DocumentOrigin {
+        &self.origin
+    }
+
+    /// `true` if the document changed after the last save (or the open).
+    /// An undo back to the saved state is also a change: the revision is a
+    /// change stamp, not a content hash.
+    pub const fn is_dirty(&self) -> bool {
+        self.document.revision() != self.saved_revision
+    }
+
+    /// Records a save of the document at `revision` to `files`. Edits that
+    /// came after the snapshot of the save keep the document dirty.
+    pub fn mark_saved(&mut self, revision: u64, files: SavedFiles) {
+        self.saved_revision = revision;
+        self.origin.saved = Some(files);
+    }
+
     /// The info for the UI, with the document ID `id`.
     pub fn info(&self, id: DocumentId) -> DocumentInfo {
-        DocumentInfo::new(
+        let mut info = DocumentInfo::new(
             id,
             &self.document,
             self.history.can_undo(),
             self.history.can_redo(),
-        )
+        );
+        info.dirty = self.is_dirty();
+        info.saved_photo_id = self.origin.saved.as_ref().map(|s| s.photo_id);
+        info
     }
 
     /// Applies `edit` and records it as one history step.
@@ -132,15 +169,9 @@ impl EditSession {
 }
 
 /// Finds the layer with the numeric ID `raw`.
-///
-/// `LayerId` has no public constructor, so the function searches the
-/// document. The tree of a document is small (tens of layers), so a linear
-/// search is fast enough.
 fn resolve(document: &Document, raw: u64) -> Result<LayerId, EditorEngineError> {
     document
-        .layer_ids()
-        .into_iter()
-        .find(|id| id.get() == raw)
+        .layer_by_number(raw)
         .ok_or(EditorEngineError::LayerNotFound(raw))
 }
 
@@ -528,6 +559,44 @@ mod tests {
         .unwrap();
         s.undo().unwrap();
         assert!((opacity(&s) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn dirty_follows_the_saved_revision() {
+        let mut s = session();
+        let bg = background(&s);
+        let info = s.info(1);
+        assert!(!info.dirty);
+        assert_eq!(info.saved_photo_id, None);
+        s.edit(
+            EditDto::SetVisible {
+                layer_id: bg,
+                visible: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(s.info(1).dirty);
+        let files = SavedFiles {
+            photo_id: expose_catalog::PhotoId(7),
+            document_path: "/p/a-edit.exdoc".into(),
+            image_path: "/p/a-edit.tif".into(),
+        };
+        // A save of the current revision.
+        s.mark_saved(s.document().revision(), files.clone());
+        let info = s.info(1);
+        assert!(!info.dirty);
+        assert_eq!(info.saved_photo_id, Some(expose_catalog::PhotoId(7)));
+        assert_eq!(s.origin().saved.as_ref(), Some(&files));
+        // An undo after the save is a change.
+        s.undo().unwrap();
+        assert!(s.info(1).dirty);
+        // A save of an older revision (an edit came after the snapshot)
+        // keeps the document dirty.
+        let old = s.document().revision();
+        s.redo().unwrap();
+        s.mark_saved(old, files);
+        assert!(s.info(1).dirty);
     }
 
     #[test]

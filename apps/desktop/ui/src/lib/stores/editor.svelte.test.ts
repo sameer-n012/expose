@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { DocumentInfo, EditDto, EditorApi, LayerInfo } from '../editor/api';
+import type { DocumentInfo, EditDto, EditorApi, LayerInfo, SaveResult } from '../editor/api';
 import { EditorStore, GESTURE_IDLE_MS } from './editor.svelte';
 import { ToastStore } from './toasts.svelte';
 
@@ -21,7 +21,17 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 }
 
 function info(documentId: number, revision: number, layers: LayerInfo[] = [layer(1), layer(2)], extra: Partial<DocumentInfo> = {}): DocumentInfo {
-  return { documentId, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, ...extra };
+  return { documentId, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, ...extra };
+}
+
+function saveResult(documentId: number, revision: number, photoId = 77, created = true): SaveResult {
+  return {
+    photoId,
+    documentPath: '/photos/a-edit.exdoc',
+    imagePath: '/photos/a-edit.tif',
+    created,
+    info: info(documentId, revision, undefined, { dirty: false, savedPhotoId: photoId }),
+  };
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -35,15 +45,172 @@ function setup() {
     edit: vi.fn(async (documentId: number, _edit: EditDto, _gesture: number | null) => info(documentId, ++revision)),
     undo: vi.fn(async (documentId: number) => info(documentId, ++revision)),
     redo: vi.fn(async (documentId: number) => info(documentId, ++revision)),
+    save: vi.fn(async (documentId: number) => saveResult(documentId, revision)),
     close: vi.fn(async (_documentId: number) => undefined),
   } satisfies EditorApi;
   const toasts = new ToastStore();
   const modules = { active: 'editor' as 'library' | 'develop' | 'editor', switchTo: vi.fn() };
   const library = { focusIndex: null as number | null, photoAt: () => undefined, selectedIds: [] as number[] };
+  const onSaved = vi.fn((_result: SaveResult) => undefined);
   let clock = 0;
-  const store = new EditorStore({ library, modules: modules as never, toasts, api, now: () => clock });
-  return { api, store, toasts, modules, library, advance: (ms: number) => (clock += ms) };
+  const store = new EditorStore({ library, modules: modules as never, toasts, api, now: () => clock, onSaved });
+  return { api, store, toasts, modules, library, onSaved, advance: (ms: number) => (clock += ms) };
 }
+
+/** Makes the next edits of the fake shell report a dirty document. */
+function editsAreDirty(api: ReturnType<typeof setup>['api']): void {
+  let revision = 100;
+  api.edit.mockImplementation(async (documentId: number) => info(documentId, ++revision, undefined, { dirty: true }));
+  api.save.mockImplementation(async (documentId: number) => saveResult(documentId, revision));
+}
+
+describe('EditorStore save', () => {
+  it('waits for queued edits, saves, and takes the clean info', async () => {
+    const { store, api, toasts, onSaved } = setup();
+    await store.openPhoto(5);
+    editsAreDirty(api);
+    store.edit({ type: 'setVisible', layerId: 1, visible: false });
+    expect(store.canSave).toBe(true);
+    const saved = store.save();
+    expect(store.saving).toBe(true);
+    expect(store.canSave).toBe(false);
+    expect(await saved).toBe(true);
+    // The edit ran before the save.
+    expect(api.edit.mock.invocationCallOrder[0]).toBeLessThan(api.save.mock.invocationCallOrder[0] ?? 0);
+    expect(store.saving).toBe(false);
+    expect(store.dirty).toBe(false);
+    expect(store.info?.savedPhotoId).toBe(77);
+    expect(onSaved).toHaveBeenCalledOnce();
+    expect(toasts.items.at(-1)?.message).toBe('Saved to library: a-edit.tif');
+  });
+
+  it('a second save while one runs shares the run', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    const a = store.save();
+    const b = store.save();
+    expect(await a).toBe(true);
+    expect(await b).toBe(true);
+    expect(api.save).toHaveBeenCalledOnce();
+  });
+
+  it('an edit after the save snapshot keeps the newer info and stays dirty', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    editsAreDirty(api);
+    let release!: () => void;
+    api.save.mockImplementationOnce(
+      (documentId: number) =>
+        new Promise<SaveResult>((resolve) => {
+          release = () => resolve(saveResult(documentId, 0));
+        }),
+    );
+    const saved = store.save();
+    await tick();
+    store.edit({ type: 'setVisible', layerId: 1, visible: false });
+    await tick();
+    release();
+    await saved;
+    expect(store.info?.revision).toBe(101);
+    expect(store.dirty).toBe(true);
+    expect(store.info?.savedPhotoId).toBe(77);
+  });
+
+  it('a failed save shows an error and keeps the document dirty', async () => {
+    const { store, api, toasts, onSaved } = setup();
+    await store.openPhoto(5);
+    editsAreDirty(api);
+    store.edit({ type: 'setVisible', layerId: 1, visible: false });
+    api.save.mockRejectedValueOnce({ kind: 'invalidInput', message: 'would overwrite' });
+    expect(await store.save()).toBe(false);
+    expect(store.dirty).toBe(true);
+    expect(store.saving).toBe(false);
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(toasts.items.at(-1)?.kind).toBe('error');
+    expect(toasts.items.at(-1)?.message).toBe('Save the document failed.');
+  });
+
+  it('does nothing with no document', async () => {
+    const { store, api } = setup();
+    expect(await store.save()).toBe(false);
+    expect(api.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('EditorStore unsaved changes', () => {
+  async function dirtyStore() {
+    const s = setup();
+    await s.store.openPhoto(5);
+    editsAreDirty(s.api);
+    s.store.edit({ type: 'setVisible', layerId: 1, visible: false });
+    await tick();
+    return s;
+  }
+
+  it('a clean document opens another photo with no question', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    await store.openPhoto(6);
+    expect(store.leavePrompt).toBeNull();
+    expect(api.open).toHaveBeenCalledTimes(2);
+  });
+
+  it('Cancel keeps the dirty document open', async () => {
+    const { store, api } = await dirtyStore();
+    const opening = store.openPhoto(6);
+    await tick();
+    expect(store.leavePrompt).not.toBeNull();
+    store.answerLeave('cancel');
+    await opening;
+    expect(store.leavePrompt).toBeNull();
+    expect(api.open).toHaveBeenCalledOnce();
+    expect(api.close).not.toHaveBeenCalled();
+    expect(store.photoId).toBe(5);
+    expect(store.dirty).toBe(true);
+  });
+
+  it("Don't save opens the other photo and drops the changes", async () => {
+    const { store, api } = await dirtyStore();
+    const opening = store.openPhoto(6);
+    await tick();
+    store.answerLeave('discard');
+    await opening;
+    expect(api.save).not.toHaveBeenCalled();
+    expect(api.close).toHaveBeenCalledWith(1);
+    expect(store.photoId).toBe(6);
+  });
+
+  it('Save saves first, then opens the other photo', async () => {
+    const { store, api } = await dirtyStore();
+    const opening = store.openPhoto(6);
+    await tick();
+    store.answerLeave('save');
+    await opening;
+    expect(api.save).toHaveBeenCalledWith(1);
+    expect(api.save.mock.invocationCallOrder[0]).toBeLessThan(api.close.mock.invocationCallOrder[0] ?? 0);
+    expect(store.photoId).toBe(6);
+  });
+
+  it('a failed save on Save keeps the document open', async () => {
+    const { store, api } = await dirtyStore();
+    api.save.mockRejectedValueOnce({ kind: 'io', message: 'read-only' });
+    const opening = store.openPhoto(6);
+    await tick();
+    store.answerLeave('save');
+    await opening;
+    expect(api.close).not.toHaveBeenCalled();
+    expect(store.photoId).toBe(5);
+  });
+
+  it('the saved photo of the open document keeps the document', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    await store.save();
+    await store.editInEditor(77);
+    expect(api.open).toHaveBeenCalledOnce();
+    expect(store.leavePrompt).toBeNull();
+  });
+});
 
 describe('EditorStore documents', () => {
   it('opens a document, selects the top layer, and fits the view', async () => {

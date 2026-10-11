@@ -93,6 +93,36 @@ describe('EditorFrameClient', () => {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
+  it('ignores notFound of a closed document, but not of the open one', async () => {
+    let open: number | null = 1;
+    const calls: Array<ReturnType<typeof deferred>> = [];
+    const onError = vi.fn();
+    const client = new EditorFrameClient({
+      render: () => {
+        const d = deferred();
+        calls.push(d);
+        return d.promise;
+      },
+      onFrame: vi.fn(),
+      onError,
+      isCurrent: (id) => id === open,
+      maxInFlight: 1,
+    });
+    client.setDocument(1);
+    client.request(area(1));
+    // The store dropped the document and the shell closed it; the client
+    // still has the old document.
+    open = null;
+    calls[0]?.reject({ kind: 'notFound', message: 'editor document 1 is not open' });
+    await tick();
+    expect(onError).not.toHaveBeenCalled();
+    open = 1;
+    client.request(area(2));
+    calls[1]?.reject({ kind: 'notFound', message: 'editor document 1 is not open' });
+    await tick();
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
   it('reports a bad frame body', async () => {
     const { client, calls, onError, frames } = setup();
     client.setDocument(1);

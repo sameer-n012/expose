@@ -15,6 +15,7 @@ const photo: Photo = {
   rating: 0,
   flag: 'none',
   colorLabel: 'none',
+  isEditorOutput: false,
 };
 
 describe('thumbnailUrlFor', () => {

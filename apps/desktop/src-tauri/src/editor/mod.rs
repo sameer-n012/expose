@@ -6,7 +6,9 @@
 //! 1. `editor_open` reads the photo path and the develop settings from the
 //!    catalog, decodes the file, and runs the full develop on the CPU (as
 //!    export does). [`session::build_document`] makes a document with one
-//!    pixel layer "Background" that holds the photo. This work runs on a
+//!    pixel layer "Background" that holds the photo. If the photo is the
+//!    flattened image of an earlier save (a catalog link), the command reads
+//!    the layered `.exdoc` file instead (ADR 0015). This work runs on a
 //!    blocking thread, not on the render thread.
 //! 2. The [`engine`] render thread keeps the open documents. It applies
 //!    the edits, undo, and redo ([`session::EditSession`]), and renders
@@ -14,6 +16,9 @@
 //! 3. `editor_render` returns the view as an `EXF1` frame (see
 //!    [`crate::preview::frame`]): 8-bit RGBA, straight alpha, display color
 //!    space, transparent outside the canvas.
+//! 4. `editor_save` takes a [`SaveSnapshot`] on the render thread (a GPU
+//!    composite and a copy of the document), and then writes the files and
+//!    updates the catalog on a blocking thread ([`save`]).
 //!
 //! # Memory
 //!
@@ -24,6 +29,7 @@
 
 pub mod dto;
 pub mod engine;
+pub mod save;
 pub mod session;
 
 use expose_develop::DevelopError;
@@ -32,9 +38,10 @@ use expose_gpu::GpuError;
 
 pub use dto::{
     AdjustmentDto, BlendModeId, CurvePointDto, DocumentId, DocumentInfo, EditDto, LayerInfo,
-    LayerKindId, LevelsChannelDto,
+    LayerKindId, LevelsChannelDto, SaveResult,
 };
-pub use engine::{EditorEngine, MAX_VIEW_SIDE, RenderRequest};
+pub use engine::{EditorEngine, MAX_VIEW_SIDE, RenderRequest, SaveGuard};
+pub use save::{DocumentOrigin, SaveSnapshot, SavedFiles};
 pub use session::{EditSession, HISTORY_STEPS, build_document};
 
 use crate::error::{CommandError, ErrorKind};
@@ -73,6 +80,9 @@ pub enum EditorEngineError {
     /// The display encode failed.
     #[error("cannot encode the view: {0}")]
     Display(#[from] DevelopError),
+    /// A save of the document runs already.
+    #[error("a save of editor document {0} is already running")]
+    SaveInProgress(DocumentId),
     /// A state that must not occur (a bug).
     #[error("internal error: {0}")]
     Internal(&'static str),
@@ -118,7 +128,9 @@ impl From<EditorEngineError> for CommandError {
             EditorEngineError::DocumentNotFound(_) | EditorEngineError::LayerNotFound(_) => {
                 ErrorKind::NotFound
             }
-            EditorEngineError::InvalidViewSize { .. } => ErrorKind::InvalidInput,
+            EditorEngineError::InvalidViewSize { .. } | EditorEngineError::SaveInProgress(_) => {
+                ErrorKind::InvalidInput
+            }
             EditorEngineError::Editor(inner) => editor_error_kind(inner),
             EditorEngineError::GpuUnavailable(_) => ErrorKind::Unavailable,
             EditorEngineError::History(_)

@@ -40,6 +40,16 @@ A new table records, for an editor output photo: the photo ID of the TIFF, the `
 - Group nesting in a file is limited to 32 levels. The writer refuses deeper documents.
 - 6000 × 4000 single layer (release): noise 134.5 MB, write 1.9 s, read 1.3 s; smooth 70.6 MB, write 0.6 s, read 0.6 s.
 
+### Save details (editor-save)
+
+- TIFF: 16-bit, deflate, Rec. 2020 primaries with the BT.2020 curve and its ICC profile (it holds the full working gamut, and color-managed apps read it). The TIFF has an alpha channel (straight) only if a composite pixel is not opaque.
+- The flattened image is the GPU composite (`composite_gpu_image`) on the editor render thread. The save clones the document (about 16 B/px for a short time) so that the `.exdoc` write runs on a blocking thread and frames continue.
+- Each file is written atomically (temporary file in the same folder, fsync, rename). If the first save fails, both new files are removed.
+- The image info of the new photo comes from known values (composite size, capture time of the source photo), so the photo sorts next to its source.
+- Dirty: the revision differs from the revision at the last open or save. An undo back to the saved state is still dirty.
+- Window close with unsaved changes: a close guard asks Save / Don't save / Cancel. It needs the `core:window:allow-destroy` permission.
+- A linked photo with a missing or damaged `.exdoc` gives an error. The editor does not open the flattened TIFF in its place.
+
 ## Consequences
 
 - The `.tif` duplicates the composite in a second file; this is the cost of a photo that all other modules can use without the editor.
