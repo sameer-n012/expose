@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::import::ImportReport;
 use crate::model::{
-    AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, Flag, Folder, FolderId, FolderNode,
-    ImageInfo, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
+    AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, EditorOutput, Flag, Folder,
+    FolderId, FolderNode, ImageInfo, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
 };
 use crate::platform::FileSystem;
 use crate::query::PhotoQuery;
@@ -153,6 +153,33 @@ pub trait CatalogStore {
         schema_version: u32,
         settings: &serde_json::Value,
     ) -> Result<DevelopSettings>;
+
+    /// Records that a photo is an editor output. This replaces the record
+    /// that the photo had before (the first creation time stays).
+    ///
+    /// The document path is normalized with
+    /// [`normalize_folder_path`](crate::normalize_folder_path).
+    ///
+    /// Returns [`CatalogError::PhotoNotFound`](crate::CatalogError::PhotoNotFound)
+    /// if the photo or the source photo does not exist. Returns a database
+    /// error if a different photo already uses the document path.
+    fn set_editor_output(&mut self, output: &EditorOutput) -> Result<()>;
+
+    /// Returns the editor output record of a photo, or `None` if the photo
+    /// is not an editor output (or does not exist).
+    fn editor_output(&self, photo_id: PhotoId) -> Result<Option<EditorOutput>>;
+
+    /// Returns the editor output record with this document path, or `None`.
+    /// The path is normalized first.
+    fn editor_output_for_document(&self, document_path: &Path) -> Result<Option<EditorOutput>>;
+
+    /// Returns the photo for the file at `path` (folder and file name), or
+    /// `None`. The path is normalized first.
+    fn find_photo_by_path(&self, path: &Path) -> Result<Option<PhotoId>>;
+
+    /// Returns `true` if `path` is the image file of an editor output or the
+    /// document file of an editor output. The path is normalized first.
+    fn is_editor_output_path(&self, path: &Path) -> Result<bool>;
 
     /// Imports the supported photo files in `root` in place (no copy).
     ///

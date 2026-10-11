@@ -13,8 +13,8 @@ pub use schema::{APPLICATION_ID, LATEST_VERSION};
 
 use crate::error::{CatalogError, Result};
 use crate::model::{
-    AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, Flag, Folder, FolderId, FolderNode,
-    ImageInfo, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
+    AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, EditorOutput, Flag, Folder,
+    FolderId, FolderNode, ImageInfo, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
 };
 use crate::paths::{
     build_folder_tree, folder_name, is_valid_file_name, normalize_folder_path, path_text,
@@ -28,7 +28,8 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The photo columns, in the order that [`read_photo`] expects.
 const PHOTO_COLUMNS: &str = "p.id, p.folder_id, p.file_name, p.file_size, p.file_modified_ms, \
-     p.imported_ms, p.capture_time_ms, p.width, p.height, p.rating, p.flag, p.color_label";
+     p.imported_ms, p.capture_time_ms, p.width, p.height, p.rating, p.flag, p.color_label, \
+     EXISTS (SELECT 1 FROM editor_outputs e WHERE e.photo_id = p.id)";
 
 /// A catalog stored in one SQLite database file.
 ///
@@ -166,7 +167,45 @@ fn read_photo(row: &Row<'_>) -> rusqlite::Result<Photo> {
         rating: row.get(9)?,
         flag: row.get(10)?,
         color_label: row.get(11)?,
+        is_editor_output: row.get(12)?,
     })
+}
+
+fn read_editor_output(row: &Row<'_>) -> rusqlite::Result<EditorOutput> {
+    Ok(EditorOutput {
+        photo_id: PhotoId(row.get(0)?),
+        document_path: PathBuf::from(row.get::<_, String>(1)?),
+        source_photo_id: row.get::<_, Option<i64>>(2)?.map(PhotoId),
+    })
+}
+
+/// Splits a normalized file path into its folder path and file name.
+fn split_file_path(path: &Path) -> Result<(&Path, &str)> {
+    let invalid = |reason| CatalogError::InvalidPath {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let folder = path
+        .parent()
+        .ok_or_else(|| invalid("the path has no folder"))?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| is_valid_file_name(n))
+        .ok_or_else(|| invalid("the path has no valid file name"))?;
+    Ok((folder, name))
+}
+
+fn photo_id_by_path(conn: &Connection, path: &Path) -> Result<Option<PhotoId>> {
+    let (folder, name) = split_file_path(path)?;
+    let id = conn
+        .prepare_cached(
+            "SELECT p.id FROM photos p JOIN folders f ON f.id = p.folder_id \
+             WHERE f.path = ?1 AND p.file_name = ?2",
+        )?
+        .query_row(params![path_text(folder)?, name], |row| row.get(0))
+        .optional()?;
+    Ok(id.map(PhotoId))
 }
 
 fn read_folder(row: &Row<'_>) -> rusqlite::Result<Folder> {
@@ -637,5 +676,83 @@ impl CatalogStore for SqliteStore {
             settings: settings.clone(),
             updated_ms: now,
         })
+    }
+
+    fn set_editor_output(&mut self, output: &EditorOutput) -> Result<()> {
+        let document_path = normalize_folder_path(&output.document_path)?;
+        let document_text = path_text(&document_path)?;
+        let now = self.clock.now_ms();
+        let tx = self.conn.transaction()?;
+        if !photo_exists(&tx, output.photo_id)? {
+            return Err(CatalogError::PhotoNotFound(output.photo_id));
+        }
+        if let Some(source) = output.source_photo_id {
+            if !photo_exists(&tx, source)? {
+                return Err(CatalogError::PhotoNotFound(source));
+            }
+        }
+        tx.prepare_cached(
+            "INSERT INTO editor_outputs \
+                 (photo_id, document_path, source_photo_id, created_ms, updated_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?4) \
+             ON CONFLICT (photo_id) DO UPDATE SET \
+                 document_path = excluded.document_path, \
+                 source_photo_id = excluded.source_photo_id, \
+                 updated_ms = excluded.updated_ms",
+        )?
+        .execute(params![
+            output.photo_id.0,
+            document_text,
+            output.source_photo_id.map(|p| p.0),
+            now
+        ])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn editor_output(&self, photo_id: PhotoId) -> Result<Option<EditorOutput>> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT photo_id, document_path, source_photo_id \
+                 FROM editor_outputs WHERE photo_id = ?1",
+            )?
+            .query_row([photo_id.0], read_editor_output)
+            .optional()?)
+    }
+
+    fn editor_output_for_document(&self, document_path: &Path) -> Result<Option<EditorOutput>> {
+        let document_path = normalize_folder_path(document_path)?;
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT photo_id, document_path, source_photo_id \
+                 FROM editor_outputs WHERE document_path = ?1",
+            )?
+            .query_row([path_text(&document_path)?], read_editor_output)
+            .optional()?)
+    }
+
+    fn find_photo_by_path(&self, path: &Path) -> Result<Option<PhotoId>> {
+        let path = normalize_folder_path(path)?;
+        photo_id_by_path(&self.conn, &path)
+    }
+
+    fn is_editor_output_path(&self, path: &Path) -> Result<bool> {
+        let path = normalize_folder_path(path)?;
+        if self
+            .conn
+            .prepare_cached("SELECT 1 FROM editor_outputs WHERE document_path = ?1")?
+            .exists([path_text(&path)?])?
+        {
+            return Ok(true);
+        }
+        match photo_id_by_path(&self.conn, &path)? {
+            Some(id) => Ok(self
+                .conn
+                .prepare_cached("SELECT 1 FROM editor_outputs WHERE photo_id = ?1")?
+                .exists([id.0])?),
+            None => Ok(false),
+        }
     }
 }
