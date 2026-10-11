@@ -19,6 +19,8 @@
 //!   ([`GpuCompositor::render_view`], [`ViewSpec`]).
 //! - [`history`]: undo and redo. [`History::push_merge`] makes one undo
 //!   step from a gesture (for example, a slider drag).
+//! - [`mod@file`]: the native layered document file (`.exdoc`):
+//!   [`write_document`] and [`read_document`].
 //! - [`version`]: change stamps. [`Document::revision`] changes at each
 //!   change of the document; [`Layer::pixel_version`] and
 //!   [`Layer::mask_version`] change when the values of a layer change.
@@ -65,6 +67,7 @@ pub mod blend;
 pub mod composite;
 pub mod document;
 pub mod error;
+pub mod file;
 pub mod gpu;
 pub mod history;
 pub mod layer;
@@ -81,6 +84,7 @@ pub use document::{
     Background, BitDepth, ColorMode, Document, DocumentSpec, MAX_DIMENSION, MAX_PIXELS,
 };
 pub use error::{EditorError, EditorResult, SharedGpuError};
+pub use file::{FILE_EXTENSION, FileError, read_document, write_document};
 pub use gpu::{
     CURVE_TABLE_SIZE, GpuCompositor, MAX_VIEW_ORIGIN, MAX_VIEW_SCALE, MIN_VIEW_SCALE, ViewSpec,
 };

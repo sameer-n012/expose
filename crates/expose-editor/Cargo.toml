@@ -12,6 +12,13 @@ expose-core.workspace = true
 expose-gpu.workspace = true
 # Byte view of the GPU parameter block (MIT OR Apache-2.0 OR Zlib).
 bytemuck.workspace = true
+# CRC-32 of the blobs in the document file (MIT OR Apache-2.0).
+crc32fast = "1.4"
+# Deflate of the blobs in the document file (MIT OR Zlib OR Apache-2.0).
+miniz_oxide = "0.9"
+# Manifest of the document file (MIT OR Apache-2.0).
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
