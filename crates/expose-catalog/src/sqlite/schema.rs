@@ -67,6 +67,17 @@ const MIGRATIONS: &[&str] = &[
         updated_ms     INTEGER NOT NULL
     ) STRICT;
     ",
+    // Version 2: link from an editor output photo to its document file.
+    r"
+    CREATE TABLE editor_outputs (
+        photo_id        INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+        document_path   TEXT NOT NULL UNIQUE,
+        source_photo_id INTEGER REFERENCES photos(id) ON DELETE SET NULL,
+        created_ms      INTEGER NOT NULL,
+        updated_ms      INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX idx_editor_outputs_source ON editor_outputs(source_photo_id);
+    ",
 ];
 
 /// The newest schema version that this code knows.

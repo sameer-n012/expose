@@ -217,6 +217,24 @@ pub struct Photo {
     pub flag: Flag,
     /// The color label.
     pub color_label: ColorLabel,
+    /// `true` if the editor made this photo (it has an [`EditorOutput`]
+    /// record).
+    pub is_editor_output: bool,
+}
+
+/// The link between a photo that the editor saved and its editor document.
+///
+/// The photo is the flattened image file. The document file keeps the layers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorOutput {
+    /// The photo of the flattened image file.
+    pub photo_id: PhotoId,
+    /// The absolute path of the editor document file.
+    pub document_path: std::path::PathBuf,
+    /// The photo that the document was opened from, or `None` if it is not
+    /// known or no longer in the catalog.
+    pub source_photo_id: Option<PhotoId>,
 }
 
 /// The data of a file to add to the catalog.
