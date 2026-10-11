@@ -19,13 +19,15 @@ Editor save (ADR 0015):
 
 - [x] **catalog-editor-link** (S, PR #48) — `editor_outputs` table (schema 2), `set_editor_output`, `editor_output`, `editor_output_for_document`, `find_photo_by_path`, `is_editor_output_path`; `Photo.isEditorOutput`.
 - [x] **editor-file** (O, merged) — `.exdoc` read/write (`expose_editor::file`), `Document::from_layer`, `Document::layer_by_number`; `new_empty` no longer allocates a canvas buffer.
+- [x] **editor-save** (O, merged) — `editor_save` (`.exdoc` + 16-bit Rec. 2020 TIFF next to the original, atomic writes, one-file import, link, overwrite only own outputs), linked photos reopen their `.exdoc`, `Mod+S` + Save button, unsaved-changes question (photo switch, window close), "Layers" badge in the grid.
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **editor-save-shell** (O) — `editor_save` (write `.exdoc` + flattened 16-bit TIFF next to the original, import the TIFF, record the link, overwrite only recorded editor outputs, refresh the thumbnail), `editor_open` of a linked photo opens its `.exdoc`, `Mod+S` + unsaved-changes state in the UI. Also: use `Document::from_layer` and `layer_by_number` in the shell; the UI must ignore `notFound` from renders in flight after `editor_close`.
-2. [ ] **editor-tools** — brush, selection, masks in the UI, levels/curves editors.
+1. [ ] **editor-save-check** (operator) — check in the real webview: `Mod+S` writes `<name>-edit.exdoc` + `<name>-edit.tif` next to the original, the TIFF appears in the library with a "Layers" badge, "Edit in Editor" on it reopens the layers, a re-save overwrites and refreshes the thumbnail, and the unsaved-changes question on photo switch and on window close.
+2. [ ] **editor-save-followups** (S) — one catalog transaction for the first save (`add_photos` + `set_image_info` + `set_editor_output`); a catalog method to update `file_size`/`file_modified_ms` of a photo on re-save; "save as" to another folder (a read-only photo folder fails now).
+3. [ ] **editor-tools** — brush, selection, masks in the UI, levels/curves editors.
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
