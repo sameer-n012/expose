@@ -4,30 +4,23 @@ Work tracker for Expose. `FEATURES.md` is the master feature list. This file tra
 
 `FEATURES.md` items marked `[x]` (2026-10-04, after the operator check in the real webview): 2.2 exposure, contrast, highlights/shadows/whites/blacks; 2.2 point tone curve; sharpening; crop with presets and overlays; straighten/rotate/flip; histogram with clipping warnings (P2); reset (all settings or one panel); 5.1 the four P1 export items. White balance stays open (presets in the UI and the eyedropper are missing); automatic tone stays open (no UI yet). Loupe view stays open (no 1:1 zoom).
 
-Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys, Tone curve panel, Detail panel, histogram, crop tool, Reset all, sharp cropped previews, and crop polish work. All items in "Done" are checked.
+Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys, Tone curve panel, Detail panel, histogram, crop tool, Reset all, sharp cropped previews, and crop polish work. 2026-10-10: the Editor first version (open, zoom/pan, layers panel, adjustment layers, undo/redo) works.
+
+`FEATURES.md` editor items marked `[x]` (2026-10-10): 3.2 opacity and fill opacity, blend modes; 3.3 brightness/contrast, hue/saturation. Still open in the editor P1 list: new document, open/save native format (waits for editor-save-check), rotate view, multiple documents (tabs), add pixel layer, locks UI, layer masks UI, levels and curves editors, selections, brushes.
 
 ## In progress
 
-Editor, first version (ADR 0013):
-
-- [x] **editor-view** (O, merged, ADR 0014) — document revision and layer content versions, layer texture cache, cached full composite, `render_view` (zoom/pan view kernel; pan 1–2 ms at 4096²), `History::push_merge`.
-- [x] **editor-ui** (S, merged) — Editor module: canvas with zoom/pan, layers panel, adjustment layers, undo/redo, `Mod+E` "Edit in Editor"; built against the command contract in ADR 0013 with mocked `invoke` (the commands do not exist until editor-shell). UI notes for editor-shell: `aboveLayerId` can be inside a group (insert above it in its parent); the UI ignores the frame `seq`; pixels outside the canvas must be transparent. Later: layer thumbnails, drag-and-drop reorder, moves into/out of groups.
-- [x] **editor-shell** (O, merged) — `EditorEngine` (own render thread and `GpuContext`, one waiting render per document, `superseded` for older ones) and `editor_open/render/edit/undo/redo/close` in `src-tauri/src/editor/` + `commands/editor.rs`; history 50 steps; view side limit 8192.
-- [x] **editor-check** (operator, 2026-10-10) — the Editor works in the real webview.
-
-Editor save (ADR 0015):
-
-- [x] **catalog-editor-link** (S, PR #48) — `editor_outputs` table (schema 2), `set_editor_output`, `editor_output`, `editor_output_for_document`, `find_photo_by_path`, `is_editor_output_path`; `Photo.isEditorOutput`.
-- [x] **editor-file** (O, merged) — `.exdoc` read/write (`expose_editor::file`), `Document::from_layer`, `Document::layer_by_number`; `new_empty` no longer allocates a canvas buffer.
-- [x] **editor-save** (O, merged) — `editor_save` (`.exdoc` + 16-bit Rec. 2020 TIFF next to the original, atomic writes, one-file import, link, overwrite only own outputs), linked photos reopen their `.exdoc`, `Mod+S` + Save button, unsaved-changes question (photo switch, window close), "Layers" badge in the grid.
+- (none — all agent branches are merged; no worktrees)
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **editor-save-check** (operator) — check in the real webview: `Mod+S` writes `<name>-edit.exdoc` + `<name>-edit.tif` next to the original, the TIFF appears in the library with a "Layers" badge, "Edit in Editor" on it reopens the layers, a re-save overwrites and refreshes the thumbnail, and the unsaved-changes question on photo switch and on window close.
+1. [ ] **editor-save-check** (operator) — check in the real webview: `Mod+S` writes `<name>-edit.exdoc` + `<name>-edit.tif` next to the original, the TIFF appears in the library with a "Layers" badge, "Edit in Editor" on it reopens the layers, a re-save overwrites and refreshes the thumbnail, and the unsaved-changes question on photo switch and on window close. After the check: mark 3.1 "Open and save native layered document format" `[x]`.
 2. [ ] **editor-save-followups** (S) — one catalog transaction for the first save (`add_photos` + `set_image_info` + `set_editor_output`); a catalog method to update `file_size`/`file_modified_ms` of a photo on re-save; "save as" to another folder (a read-only photo folder fails now).
-3. [ ] **editor-tools** — brush, selection, masks in the UI, levels/curves editors.
+3. [ ] **editor-layers-ui** (S) — remaining P1 layer items in the UI: add an empty pixel layer, lock toggles (the model has `set_locks`), new document dialog (`DocumentSpec`), levels and curves editors for adjustment layers (the model and compositor support them). Check whether the `EditDto` contract needs new variants (shell + UI together).
+4. [ ] **editor-tools** (O) — split before work: (a) layer masks in the UI (add/delete/enable, show mask); (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke); (c) selections (rect/ellipse/lasso, selection as a mask). Needs a short design ADR first (stroke transport UI → shell, partial texture updates in the cache).
+5. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
@@ -60,6 +53,9 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor first version** (PRs #43–#46, ADRs 0012–0014; operator check 2026-10-10) — `GpuCompositor` (matches the CPU `composite`); revision + layer content versions, layer texture cache, `render_view` (pan 1–2 ms at 4096²), `History::push_merge`; Editor UI (canvas zoom/pan, layers panel, adjustment layers, undo/redo, `Mod+E`); `EditorEngine` + `editor_open/render/edit/undo/redo/close` (own render thread and `GpuContext`, history 50 steps).
+- [x] **editor save** (PRs #47–#50, ADR 0015; not yet checked by the operator) — catalog `editor_outputs` (schema 2); `.exdoc` format (`expose_editor::file`), `Document::from_layer`/`layer_by_number`; `editor_save` (`.exdoc` + 16-bit Rec. 2020 TIFF next to the original, atomic writes, import + link, overwrite only own outputs), linked photos reopen their `.exdoc`, `Mod+S`, unsaved-changes question, "Layers" grid badge.
 
 - [x] **editor-gpu** (PR "GPU compositor") — `GpuCompositor` in `expose-editor` matches the CPU `composite` for all 27 blend modes in both blend spaces, the 4 adjustment kinds, masks, nested groups, and dissolve (ADR 0012). 4096², 10 layers, perceptual: CPU 15.3 s, GPU 271 ms (warm).
 

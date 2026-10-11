@@ -189,9 +189,9 @@ This file is the master list of features for Expose.
 
 ### 3.2 Layers
 - [ ] **P1** Pixel layers: add, delete, duplicate, reorder, rename
-- [ ] **P1** Opacity and fill opacity
+- [x] **P1** Opacity and fill opacity
 - [ ] **P1** Show/hide, lock (transparency, pixels, position, all)
-- [ ] **P1** Blend modes (normal, multiply, screen, overlay, soft light, hard light, color dodge/burn, darken/lighten, difference, exclusion, hue, saturation, color, luminosity, and others)
+- [x] **P1** Blend modes (normal, multiply, screen, overlay, soft light, hard light, color dodge/burn, darken/lighten, difference, exclusion, hue, saturation, color, luminosity, and others)
 - [ ] **P1** Layer masks (pixel masks)
 - [ ] **P2** Vector masks
 - [ ] **P2** Layer groups (nested) with group blend modes and group masks
@@ -207,10 +207,10 @@ This file is the master list of features for Expose.
 - [ ] **P3** Auto-align layers and auto-blend layers
 
 ### 3.3 Adjustment layers (non-destructive)
-- [ ] **P1** Brightness/contrast
+- [x] **P1** Brightness/contrast
 - [ ] **P1** Levels
 - [ ] **P1** Curves
-- [ ] **P1** Hue/saturation
+- [x] **P1** Hue/saturation
 - [ ] **P2** Exposure
 - [ ] **P2** Vibrance
 - [ ] **P2** Color balance
