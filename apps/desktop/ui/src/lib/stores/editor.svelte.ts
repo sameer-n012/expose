@@ -13,10 +13,15 @@
  *   edit, on undo and redo, and after `GESTURE_IDLE_MS` without a live edit.
  * - After each edit, undo, or redo, the document info is replaced. The
  *   canvas view watches `info.revision` and requests a new frame.
+ * - `save()` waits for the queued edits, and then saves the document to the
+ *   library (a layered `.exdoc` file and a flattened TIFF). Edits during a
+ *   save go on; they keep the document dirty.
+ * - Before the open document is replaced, a dirty document asks the user
+ *   (`leavePrompt`: Save, Don't save, or Cancel).
  */
 import type { PhotoId } from '../catalog';
 import type { DisplaySpace } from '../develop/transport';
-import { editorApi, type DocumentInfo, type EditDto, type EditorApi, type LayerInfo } from '../editor/api';
+import { editorApi, type DocumentInfo, type EditDto, type EditorApi, type LayerInfo, type SaveResult } from '../editor/api';
 import { allLayerIds, findLayer, moveStep, newLayerIds } from '../editor/layers';
 import {
   clampView,
@@ -45,10 +50,27 @@ export interface EditorStoreOptions {
   readonly displaySpace?: DisplaySpace | null;
   /** The clock in milliseconds. For tests. */
   readonly now?: () => number;
+  /** Called after each successful save (the shell refreshes the library). */
+  readonly onSaved?: (result: SaveResult) => void;
 }
 
 /** What the Editor view shows. */
 export type EditorStatus = 'empty' | 'loading' | 'ready' | 'error';
+
+/** The answer to the unsaved-changes question. */
+export type LeaveChoice = 'save' | 'discard' | 'cancel';
+
+/** An open unsaved-changes question. */
+export interface LeavePrompt {
+  /** The question for the user. */
+  readonly message: string;
+}
+
+/** Returns the file name of a path (after the last `/` or `\`). */
+export function fileNameOf(path: string): string {
+  const index = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return path.slice(index + 1);
+}
 
 /** Returns true if the value looks like a `CommandError` of the given kind. */
 function errorKind(error: unknown): string | null {
@@ -76,6 +98,10 @@ export class EditorStore {
   viewport = $state.raw<Size>({ width: 0, height: 0 });
   /** The number of edits that wait or run. */
   pending = $state(0);
+  /** True while a save runs. */
+  saving = $state(false);
+  /** The open unsaved-changes question, or null. */
+  leavePrompt = $state.raw<LeavePrompt | null>(null);
 
   readonly #library: EditorStoreOptions['library'];
   readonly #modules: EditorStoreOptions['modules'];
@@ -83,6 +109,10 @@ export class EditorStore {
   readonly #api: EditorApi;
   readonly #displaySpace: DisplaySpace | null;
   readonly #now: () => number;
+  readonly #onSaved: ((result: SaveResult) => void) | undefined;
+  #answerLeave: ((choice: LeaveChoice) => void) | null = null;
+  /** The running save, or null. */
+  #saveRun: Promise<boolean> | null = null;
 
   #generation = 0;
   #chain: Promise<void> = Promise.resolve();
@@ -98,6 +128,17 @@ export class EditorStore {
     this.#api = options.api ?? editorApi;
     this.#displaySpace = options.displaySpace ?? null;
     this.#now = options.now ?? (() => Date.now());
+    this.#onSaved = options.onSaved;
+  }
+
+  /** True if the open document has changes after its last save (or its open). */
+  get dirty(): boolean {
+    return this.info?.dirty ?? false;
+  }
+
+  /** True if the Save command can run now. */
+  get canSave(): boolean {
+    return this.status === 'ready' && this.info !== null && !this.saving;
   }
 
   /** The display color space of the document (null: the shell default). */
@@ -147,14 +188,24 @@ export class EditorStore {
       return;
     }
     this.#modules.switchTo('editor');
-    if (photoId === this.photoId && this.info !== null) {
+    const info = this.info;
+    // The saved photo of the open document opens the same layered file:
+    // keep the open document.
+    if (info !== null && (photoId === this.photoId || photoId === info.savedPhotoId)) {
       return;
     }
     await this.openPhoto(photoId);
   }
 
-  /** Closes the old document and opens a document for the photo. */
+  /**
+   * Closes the old document and opens a document for the photo. If the old
+   * document has unsaved changes, the user is asked first; on Cancel the old
+   * document stays open.
+   */
   async openPhoto(photoId: PhotoId): Promise<void> {
+    if (this.info !== null && !(await this.confirmLeave())) {
+      return;
+    }
     const generation = ++this.#generation;
     const old = this.info;
     this.#live.clear();
@@ -198,6 +249,8 @@ export class EditorStore {
 
   /** Closes the open document (the view is destroyed). */
   async dispose(): Promise<void> {
+    // An open question has no view any more.
+    this.answerLeave('cancel');
     this.#generation += 1;
     const old = this.info;
     this.#live.clear();
@@ -208,6 +261,107 @@ export class EditorStore {
     if (old !== null) {
       await this.#closeDocument(old.documentId);
     }
+  }
+
+  // ---- Save ----
+
+  /**
+   * Saves the open document to the library. Waits for the queued edits
+   * first. A second call while a save runs returns the same result.
+   * Returns true on success. Errors show a toast.
+   */
+  save(): Promise<boolean> {
+    if (this.#saveRun !== null) {
+      return this.#saveRun;
+    }
+    if (!this.canSave) {
+      return Promise.resolve(false);
+    }
+    const run = this.#runSave().finally(() => {
+      this.#saveRun = null;
+    });
+    this.#saveRun = run;
+    return run;
+  }
+
+  async #runSave(): Promise<boolean> {
+    this.endGesture();
+    this.saving = true;
+    const generation = this.#generation;
+    try {
+      // The save must contain the edits that the user made before it.
+      await this.#chain;
+      const info = this.info;
+      if (info === null || generation !== this.#generation) {
+        return false;
+      }
+      const result = await this.#api.save(info.documentId);
+      if (generation === this.#generation) {
+        this.#applySaved(result);
+      }
+      this.#toasts.success(`Saved to library: ${fileNameOf(result.imagePath)}`);
+      this.#onSaved?.(result);
+      return true;
+    } catch (error: unknown) {
+      if (generation === this.#generation) {
+        this.#toasts.error(this.#messageFor('Save the document', error), error);
+      }
+      return false;
+    } finally {
+      this.saving = false;
+    }
+  }
+
+  /** Takes the save result. Edits after the save snapshot keep their newer info. */
+  #applySaved(result: SaveResult): void {
+    const current = this.info;
+    if (current === null || current.documentId !== result.info.documentId) {
+      return;
+    }
+    if (current.revision === result.info.revision) {
+      this.#apply(result.info);
+    } else {
+      this.info = { ...current, savedPhotoId: result.info.savedPhotoId };
+    }
+  }
+
+  /**
+   * Asks the user what to do with unsaved changes before the document is
+   * replaced. Returns true if the caller may go on (saved, or the user does
+   * not want to save), false on Cancel or a failed save.
+   */
+  async confirmLeave(): Promise<boolean> {
+    // Queued edits and a running save change `dirty`.
+    await this.#chain;
+    if (this.#saveRun !== null) {
+      await this.#saveRun;
+    }
+    if (!this.dirty) {
+      return true;
+    }
+    if (this.#answerLeave !== null) {
+      // A question is open already. This request does not go on.
+      return false;
+    }
+    const choice = await new Promise<LeaveChoice>((resolve) => {
+      this.#answerLeave = resolve;
+      this.leavePrompt = { message: 'The document has changes that are not saved.' };
+    });
+    if (choice === 'cancel') {
+      return false;
+    }
+    if (choice === 'discard') {
+      return true;
+    }
+    return this.save();
+  }
+
+  /** Answers the open unsaved-changes question (the dialog calls this). */
+  answerLeave(choice: LeaveChoice): void {
+    const answer = this.#answerLeave;
+    this.#answerLeave = null;
+    this.leavePrompt = null;
+    answer?.(choice);
   }
 
   async #closeDocument(documentId: number): Promise<void> {

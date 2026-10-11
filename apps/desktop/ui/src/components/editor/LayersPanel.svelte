@@ -1,7 +1,7 @@
 <!--
-  The Layers panel of the Editor: the layer tree (top layer first), the
-  layer commands, and the opacity, fill, and blend mode of the selected
-  layer.
+  The Layers panel of the Editor: the save state and the Save button, the
+  layer tree (top layer first), the layer commands, and the opacity, fill,
+  and blend mode of the selected layer.
 
   Sliders send live edits with one gesture per drag (see EditorStore).
   While edits are in flight, the sliders show the dragged value, so a late
@@ -30,6 +30,17 @@
   const rows = $derived(info === null ? [] : layerRows(info.layers, editor.expanded));
   const selected = $derived(editor.selected);
   const position = $derived(info === null || selected === null ? null : positionOf(info.layers, selected.id));
+
+  /** The save state text of the document. */
+  const saveState = $derived.by(() => {
+    if (editor.saving) {
+      return 'Saving…';
+    }
+    if (editor.dirty) {
+      return 'Unsaved changes';
+    }
+    return info === null || info.savedPhotoId === null ? 'Not saved' : 'Saved';
+  });
 
   let drafts = $state<Record<string, number>>({});
   let renaming = $state<number | null>(null);
@@ -101,6 +112,17 @@
 <details class="section" open>
   <summary>Layers</summary>
   <div class="body" role="group" aria-label="Layers">
+    {#if info !== null}
+      <div class="doc">
+        <span class="state" class:dirty={editor.dirty} data-testid="editor-save-state">
+          {#if editor.dirty}<span class="marker" aria-hidden="true">•</span>{/if}
+          {saveState}
+        </span>
+        <button type="button" class="save" disabled={!editor.canSave} title="Save to library (Mod+S)" onclick={() => void editor.save()}>
+          {editor.saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    {/if}
     <div class="toolbar">
       <button type="button" disabled={!editor.canUndo} title="Undo (Mod+Z)" onclick={() => editor.undo()}>Undo</button>
       <button type="button" disabled={!editor.canRedo} title="Redo (Mod+Shift+Z)" onclick={() => editor.redo()}>Redo</button>
@@ -261,6 +283,28 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     cursor: default;
+  }
+  .doc {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4) 0;
+    font-size: var(--font-size-sm);
+  }
+  .state {
+    color: var(--color-text-muted);
+  }
+  .state.dirty {
+    color: var(--color-text);
+  }
+  .marker {
+    margin-right: var(--space-1);
+    color: var(--color-accent);
+  }
+  .save:not(:disabled) {
+    background: var(--color-accent);
+    color: var(--color-text-on-accent);
   }
   .toolbar {
     display: flex;

@@ -32,6 +32,7 @@ export function makePhoto(id: number, over: Partial<Photo> = {}): Photo {
     rating: 0,
     flag: 'none',
     colorLabel: 'none',
+    isEditorOutput: false,
     ...over,
   };
 }

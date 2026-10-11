@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the main window.",
+  "description": "Permissions for the main window. The window close guard of the editor closes the window with destroy after it asks about unsaved changes.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": ["core:default", "core:window:allow-destroy", "dialog:default"]
 }
