@@ -10,6 +10,10 @@
  *   one. A document change drops all results of the old document.
  * - The error kind `superseded` is not an error (a newer request replaced
  *   the request in the shell).
+ * - The error kind `notFound` for a document that is not the current
+ *   document is not an error: the request was in flight when the document
+ *   closed. `isCurrent` tells the client which document is open now (the
+ *   store knows it before the client gets `setDocument`).
  */
 import { parseFrame, type Frame } from '../develop/frame';
 import { isSuperseded } from '../develop/previewClient';
@@ -29,6 +33,13 @@ export interface EditorFrameClientOptions {
   readonly onFrame: (frame: EditorFrame) => void;
   readonly onError: (error: unknown) => void;
   readonly maxInFlight?: number;
+  /** True if the document is the open document now. Default: the document of `setDocument`. */
+  readonly isCurrent?: (documentId: number) => boolean;
+}
+
+/** Returns true if the error is a command error of kind `notFound`. */
+function isNotFound(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'kind' in error && (error as { kind: unknown }).kind === 'notFound';
 }
 
 export class EditorFrameClient {
@@ -36,6 +47,7 @@ export class EditorFrameClient {
   readonly #onFrame: EditorFrameClientOptions['onFrame'];
   readonly #onError: EditorFrameClientOptions['onError'];
   readonly #maxInFlight: number;
+  readonly #isCurrent: (documentId: number) => boolean;
 
   #documentId: number | null = null;
   #waiting: RenderArea | null = null;
@@ -51,6 +63,7 @@ export class EditorFrameClient {
     this.#onFrame = options.onFrame;
     this.#onError = options.onError;
     this.#maxInFlight = Math.max(1, Math.floor(options.maxInFlight ?? EDITOR_MAX_IN_FLIGHT));
+    this.#isCurrent = options.isCurrent ?? ((documentId) => documentId === this.#documentId);
   }
 
   get inFlight(): number {
@@ -101,7 +114,8 @@ export class EditorFrameClient {
       body = await this.#render(documentId, area);
     } catch (error: unknown) {
       this.#release();
-      if (!isSuperseded(error) && !this.#disposed && generation === this.#generation) {
+      const closed = isNotFound(error) && !this.#isCurrent(documentId);
+      if (!isSuperseded(error) && !closed && !this.#disposed && generation === this.#generation) {
         this.#onError(error);
       }
       return;
