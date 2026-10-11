@@ -191,13 +191,7 @@ impl Document {
     /// fill from `spec.background` (transparent black for
     /// [`Background::Transparent`]). It has no locks.
     pub fn new(spec: DocumentSpec) -> EditorResult<Self> {
-        check_size(spec.width, spec.height)?;
-        check_range(
-            "resolution_ppi",
-            spec.resolution_ppi,
-            MIN_RESOLUTION_PPI,
-            MAX_RESOLUTION_PPI,
-        )?;
+        let mut doc = Self::empty(&spec)?;
         let fill = match spec.background {
             Background::White => [1.0, 1.0, 1.0, 1.0],
             Background::Black => [0.0, 0.0, 0.0, 1.0],
@@ -213,17 +207,6 @@ impl Document {
             }
         };
         let image = WorkingImage::new_filled(spec.width, spec.height, fill)?;
-        let mut doc = Self {
-            width: spec.width,
-            height: spec.height,
-            resolution_ppi: spec.resolution_ppi,
-            color_mode: spec.color_mode,
-            bit_depth: spec.bit_depth,
-            blend_space: spec.blend_space,
-            layers: Vec::new(),
-            next_id: 1,
-            revision: next_stamp(),
-        };
         let id = doc.alloc_id();
         doc.layers.push(Layer::new(
             id,
@@ -234,14 +217,87 @@ impl Document {
     }
 
     /// Makes a document with no layers. The composite is transparent.
+    ///
+    /// The function ignores `spec.background`. It does not allocate pixel
+    /// buffers.
     pub fn new_empty(spec: DocumentSpec) -> EditorResult<Self> {
-        let mut doc = Self::new(DocumentSpec {
-            background: Background::Transparent,
-            ..spec
-        })?;
-        doc.layers.clear();
-        doc.touch();
+        Self::empty(&spec)
+    }
+
+    /// Makes a document with one pixel layer, at the bottom of the root.
+    ///
+    /// The layer keeps its offset and its size (it can be different from
+    /// the canvas size). The layer gets ID 1 and default properties with
+    /// the given name. The function ignores `spec.background`, and it does
+    /// not allocate a canvas buffer. Use it to open a photo as a document.
+    pub fn from_layer(
+        spec: DocumentSpec,
+        name: impl Into<String>,
+        layer: PixelLayer,
+    ) -> EditorResult<Self> {
+        let mut doc = Self::empty(&spec)?;
+        let id = doc.alloc_id();
+        doc.layers.push(Layer::new(
+            id,
+            LayerProps::named(name),
+            LayerKind::Pixel(layer),
+        ));
         Ok(doc)
+    }
+
+    /// Makes a document from a layer tree that the caller made (the file
+    /// reader). The caller must make sure that the layer IDs are unique.
+    /// New IDs are larger than `next_id - 1` and larger than all IDs in
+    /// the tree.
+    pub(crate) fn from_parts(
+        spec: &DocumentSpec,
+        layers: Vec<Layer>,
+        next_id: u64,
+    ) -> EditorResult<Self> {
+        let mut doc = Self::empty(spec)?;
+        doc.next_id = next_id.max(1);
+        let mut max_id = 0;
+        for l in &layers {
+            l.visit(&mut |x| max_id = max_id.max(x.id().get()));
+        }
+        doc.reserve_id(LayerId(max_id));
+        doc.layers = layers;
+        Ok(doc)
+    }
+
+    /// Checks the spec and makes a document with no layers.
+    fn empty(spec: &DocumentSpec) -> EditorResult<Self> {
+        check_size(spec.width, spec.height)?;
+        check_range(
+            "resolution_ppi",
+            spec.resolution_ppi,
+            MIN_RESOLUTION_PPI,
+            MAX_RESOLUTION_PPI,
+        )?;
+        Ok(Self {
+            width: spec.width,
+            height: spec.height,
+            resolution_ppi: spec.resolution_ppi,
+            color_mode: spec.color_mode,
+            bit_depth: spec.bit_depth,
+            blend_space: spec.blend_space,
+            layers: Vec::new(),
+            next_id: 1,
+            revision: next_stamp(),
+        })
+    }
+
+    /// Returns the value that the next new layer ID gets.
+    pub(crate) const fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// Returns the ID of the layer with this numeric value, or `None` if no
+    /// layer has it. Use it for IDs that come from outside the crate (for
+    /// example, from the UI).
+    pub fn layer_by_number(&self, number: u64) -> Option<LayerId> {
+        let id = LayerId(number);
+        self.contains(id).then_some(id)
     }
 
     /// Returns the revision: a stamp that changes at each change of the
@@ -512,5 +568,30 @@ mod tests {
 
         let doc = Document::new_empty(DocumentSpec::new(3, 2)).unwrap();
         assert_eq!(doc.layer_count(), 0);
+    }
+
+    #[test]
+    fn from_layer_keeps_the_layer() {
+        let image = WorkingImage::new_filled(2, 3, [0.5, 0.5, 0.5, 1.0]).unwrap();
+        let layer = PixelLayer::new(image, (-1, 4)).unwrap();
+        let doc = Document::from_layer(DocumentSpec::new(5, 5), "Photo", layer.clone()).unwrap();
+        assert_eq!(doc.layer_count(), 1);
+        let l = &doc.layers()[0];
+        assert_eq!(l.name(), "Photo");
+        assert_eq!(l.as_pixel(), Some(&layer));
+        assert_eq!(doc.next_id(), 2);
+
+        let mut bad = DocumentSpec::new(5, 5);
+        bad.resolution_ppi = -1.0;
+        assert!(Document::from_layer(bad, "Photo", layer).is_err());
+    }
+
+    #[test]
+    fn layer_by_number_finds_layers() {
+        let doc = Document::new(DocumentSpec::new(2, 2)).unwrap();
+        let id = doc.layers()[0].id();
+        assert_eq!(doc.layer_by_number(id.get()), Some(id));
+        assert_eq!(doc.layer_by_number(id.get() + 1), None);
+        assert_eq!(doc.layer_by_number(0), None);
     }
 }
