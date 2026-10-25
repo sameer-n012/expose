@@ -68,6 +68,34 @@
 //! Output pixels at that edge can thus be slightly more transparent than
 //! the exact area mean.
 //!
+//! # Below snapshot
+//!
+//! A slider step changes one property of one layer. The composite of the
+//! layers below that layer does not change. Thus the view composite keeps
+//! a "below" snapshot: the composite of the bottom `k` top-level layers,
+//! with a key for each of these layers.
+//!
+//! - A layer key holds all data of the layer that changes its step: the
+//!   ID, the content versions (they stand for the pixel and mask values),
+//!   the properties, the mask offset, enable flag, and fill, the
+//!   adjustment parameters, and for a group the isolation and the keys of
+//!   all children. The canvas size and the blend space are also part of
+//!   the snapshot key.
+//! - The composite starts from the snapshot only if the snapshot keys are
+//!   equal to the keys of the bottom `k` layers now. Any change below
+//!   (also a new, deleted, or moved layer) thus discards the snapshot.
+//! - The snapshot index `k` is the lowest top-level layer that changed
+//!   since the last view composite. The first step on a layer composites
+//!   the full stack and keeps the state below the layer. The next steps on
+//!   the same layer composite only that layer and the layers above it.
+//! - A change in a group changes the key of its top-level group, so the
+//!   snapshot is the state below the top-level group.
+//! - Only [`GpuCompositor::render_view`] uses the snapshot.
+//!   [`GpuCompositor::composite_gpu`] always composites all layers.
+//!
+//! The result is the same as a full composite: the same kernels run on
+//! the same buffers in the same order.
+//!
 //! # Memory
 //!
 //! All cached textures are `rgba32float` (16 bytes for each pixel), so that
@@ -80,8 +108,9 @@
 //! - free composite buffers: `16 N` each, normally one or two (one more
 //!   for each level of nested groups);
 //! - with [`GpuCompositor::render_view`]: the composite (`16 N`), the
-//!   pyramid (about `16 N / 3`), and the view output (16 bytes for each
-//!   output pixel).
+//!   pyramid (about `16 N / 3`), the "below" snapshot (`16 N`, at most
+//!   one), and the view output (16 bytes for each output pixel). While a
+//!   snapshot is in use, the pool can hold one more free buffer.
 //!
 //! Example: 4096 x 4096 (`16 N` = 256 MiB) with 6 canvas-size layers, 2
 //! smaller layers, and one mask: about 2.3 GiB.
@@ -110,11 +139,13 @@ use bytemuck::{Pod, Zeroable};
 use expose_core::buffer::{Rect, WorkingImage};
 use expose_gpu::{CHANNELS, GpuContext, GpuImage, ImageFormat, Kernel};
 
-use crate::adjust::{Prepared, PreparedAdjustment};
+use crate::adjust::{Adjustment, Prepared, PreparedAdjustment};
 use crate::blend::{BlendMode, BlendSpace};
 use crate::document::Document;
 use crate::error::{EditorError, EditorResult};
-use crate::layer::{GroupIsolation, Layer, LayerId, LayerKind, MaskImage};
+use crate::layer::{
+    GroupIsolation, Layer, LayerId, LayerKind, LayerProps, Mask, MaskFill, MaskImage,
+};
 
 /// The number of samples in the curve table of a curves adjustment. The
 /// sample `i` is at `x = i / 4096`, so the usual curve points (for example
@@ -417,6 +448,108 @@ struct ViewCache {
     mips: Vec<GpuImage>,
 }
 
+/// All data of a layer (and of its children) that changes its composite
+/// step, without the pixel and mask values. The content versions stand
+/// for the values: they are unique stamps in the process (see
+/// [`crate::version`]), so equal keys give equal steps, also for clones
+/// and other documents.
+///
+/// [`layer_key`] destructures the property structs fully, so a new field
+/// gives a compile error there until the key includes it (or a comment
+/// tells why the composite does not use it).
+#[derive(Debug, Clone, PartialEq)]
+struct LayerKey {
+    id: LayerId,
+    pixel_version: u64,
+    mask_version: u64,
+    visible: bool,
+    /// The bits of the opacity and of the fill opacity. A compare of the
+    /// bits is exact (also for `-0.0` and NaN).
+    opacity: u32,
+    fill_opacity: u32,
+    blend_mode: BlendMode,
+    /// Mask offset, enable flag, and fill (the values: `mask_version`).
+    mask: Option<((i32, i32), bool, MaskFill)>,
+    kind: KindKey,
+}
+
+/// The content part of a [`LayerKey`].
+#[derive(Debug, Clone, PartialEq)]
+enum KindKey {
+    /// The offset (the values: `pixel_version`).
+    Pixel((i32, i32)),
+    /// The parameters. A float compare can only give "not equal" for equal
+    /// steps (NaN), which only makes the cache miss.
+    Adjustment(Adjustment),
+    Group {
+        isolation: GroupIsolation,
+        children: Vec<LayerKey>,
+    },
+}
+
+/// Returns the key of `layer` and its children.
+fn layer_key(layer: &Layer) -> LayerKey {
+    let LayerProps {
+        // The name and the locks do not change the composite.
+        name: _,
+        visible,
+        opacity,
+        fill_opacity,
+        blend_mode,
+        locks: _,
+    } = layer.props();
+    let mask = layer.mask().map(|m| {
+        let Mask {
+            image: _,
+            offset,
+            enabled,
+            fill,
+        } = m;
+        (*offset, *enabled, *fill)
+    });
+    let kind = match layer.kind() {
+        LayerKind::Pixel(p) => KindKey::Pixel(p.offset()),
+        LayerKind::Adjustment(a) => KindKey::Adjustment(a.clone()),
+        LayerKind::Group(g) => KindKey::Group {
+            isolation: g.isolation(),
+            children: g.children().iter().map(layer_key).collect(),
+        },
+    };
+    LayerKey {
+        id: layer.id(),
+        pixel_version: layer.pixel_version(),
+        mask_version: layer.mask_version(),
+        visible: *visible,
+        opacity: opacity.to_bits(),
+        fill_opacity: fill_opacity.to_bits(),
+        blend_mode: *blend_mode,
+        mask,
+        kind,
+    }
+}
+
+/// The composite of the bottom top-level layers of the canvas: the
+/// "below" snapshot of [`GpuCompositor::render_view`].
+#[derive(Debug)]
+struct Snapshot {
+    /// The keys of the top-level layers in the snapshot (the bottom
+    /// `keys.len()` layers).
+    keys: Vec<LayerKey>,
+    /// Their premultiplied composite of the full canvas.
+    image: GpuImage,
+}
+
+/// The state of the "below" snapshot. See the module documentation.
+#[derive(Debug)]
+struct BelowCache {
+    /// The canvas size and the blend space of `last` and `snapshot`.
+    size: (u32, u32),
+    space: BlendSpace,
+    /// The keys of the top-level layers at the last view composite.
+    last: Vec<LayerKey>,
+    snapshot: Option<Snapshot>,
+}
+
 /// The GPU compositor.
 ///
 /// Make one compositor for each [`GpuContext`] and use it for all
@@ -440,6 +573,10 @@ pub struct GpuCompositor {
     view_output: Option<GpuImage>,
     /// The number of view composites since the compositor was made.
     view_builds: u64,
+    /// The "below" snapshot for [`GpuCompositor::render_view`].
+    below: Option<BelowCache>,
+    /// The number of view composites that started from the snapshot.
+    view_partial_builds: u64,
 }
 
 impl GpuCompositor {
@@ -452,17 +589,20 @@ impl GpuCompositor {
             view: None,
             view_output: None,
             view_builds: 0,
+            below: None,
+            view_partial_builds: 0,
         })
     }
 
     /// Frees all cached GPU memory: layer textures, free buffers, the view
-    /// composite and its pyramid, and the view output. The next call
-    /// uploads and composites again.
+    /// composite, its pyramid, and the "below" snapshot, and the view
+    /// output. The next call uploads and composites again.
     pub fn clear_cache(&mut self) {
         self.cache.entries.clear();
         self.pool.clear();
         self.view = None;
         self.view_output = None;
+        self.below = None;
     }
 
     /// Returns the number of layer and mask uploads since the compositor
@@ -477,6 +617,13 @@ impl GpuCompositor {
     /// Use it to check the cache (for example, a pan must not composite).
     pub const fn view_composites(&self) -> u64 {
         self.view_builds
+    }
+
+    /// Returns the number of the view composites of
+    /// [`Self::view_composites`] that started from the "below" snapshot
+    /// (they did not composite the unchanged bottom layers again).
+    pub const fn view_partial_composites(&self) -> u64 {
+        self.view_partial_builds
     }
 
     /// Returns the approximate GPU memory that the compositor keeps
@@ -498,7 +645,13 @@ impl GpuCompositor {
             .iter()
             .flat_map(|v| std::iter::once(&v.composite).chain(v.mips.iter()))
             .map(bytes);
+        let below = self
+            .below
+            .iter()
+            .flat_map(|b| b.snapshot.iter())
+            .map(|s| bytes(&s.image));
         bytes(&self.placeholder)
+            + below.sum::<u64>()
             + parts.sum::<u64>()
             + self.pool.iter().map(bytes).sum::<u64>()
             + view.sum::<u64>()
@@ -530,29 +683,14 @@ impl GpuCompositor {
         region: Rect,
     ) -> EditorResult<GpuImage> {
         check_region(document, region)?;
-        self.cache.prune(document);
-        // The pool keeps buffers of one size only.
-        self.pool
-            .retain(|b| b.width() == region.width && b.height() == region.height);
-        let region_param = rect_param(region)?;
-        let mut clear_params = Params::zeroed();
-        clear_params.region = region_param;
-        let mut run = Run {
-            bufs: Bufs {
-                ctx,
-                width: region.width,
-                height: region.height,
-                free: &mut self.pool,
-                clear_params,
-            },
-            cache: &mut self.cache,
-            placeholder: &self.placeholder,
+        let mut run = Run::new(
+            ctx,
+            &mut self.cache,
+            &mut self.pool,
+            &self.placeholder,
+            document,
             region,
-            region_param,
-            canvas: document.bounds(),
-            max_dim: ctx.limits().max_texture_dimension_2d,
-            space: document.blend_space(),
-        };
+        )?;
         let start = run.bufs.take_clear(run.placeholder).await?;
         let result = run
             .composite_list(document.layers(), Buf::Owned(start))
@@ -594,6 +732,10 @@ impl GpuCompositor {
     ///   It composites again only if [`Document::revision`] changed since
     ///   the last call (or the document is a different one). A pan or a
     ///   zoom thus runs one kernel of the view size.
+    /// - A composite starts from the "below" snapshot when the bottom
+    ///   layers did not change (see the module documentation). Repeated
+    ///   changes of one layer thus composite only that layer and the
+    ///   layers above it.
     /// - Zoom 1 or more (`scale >= 1`): nearest neighbor, so that canvas
     ///   pixels show as sharp squares.
     /// - Zoom less than 1: the area mean of the canvas pixels under each
@@ -676,8 +818,92 @@ impl GpuCompositor {
             }
         }
         self.view_builds += 1;
-        let composite = self.composite_gpu(ctx, document, bounds).await?;
+        let composite = self.composite_canvas(ctx, document).await?;
         build_pyramid(ctx, document.revision(), composite, mips).await
+    }
+
+    /// Composites the full canvas like [`Self::composite_gpu`], with the
+    /// "below" snapshot (see the module documentation):
+    ///
+    /// 1. If the snapshot keys are the keys of the bottom top-level layers
+    ///    now, the composite starts from the snapshot. Else it starts from
+    ///    transparent black, and the snapshot is dropped.
+    /// 2. The target snapshot index is the lowest top-level layer that
+    ///    changed since the last call (normally the layer that the user
+    ///    edits). If the composite passes that index, the state there
+    ///    becomes the new snapshot (no copy: the buffer moves).
+    async fn composite_canvas(
+        &mut self,
+        ctx: &GpuContext,
+        document: &Document,
+    ) -> EditorResult<GpuImage> {
+        let bounds = document.bounds();
+        check_region(document, bounds)?;
+        let layers = document.layers();
+        let keys: Vec<LayerKey> = layers.iter().map(layer_key).collect();
+        let size = (bounds.width, bounds.height);
+        let space = document.blend_space();
+        // If the call fails, the snapshot stays dropped (no stale state).
+        let (last, old) = match self.below.take() {
+            Some(b) if b.size == size && b.space == space => (b.last, b.snapshot),
+            _ => (Vec::new(), None),
+        };
+        let mut snapshot = old.filter(|s| keys.starts_with(&s.keys));
+        let start = snapshot.as_ref().map_or(0, |s| s.keys.len());
+        let target = if keys == last {
+            start
+        } else {
+            keys.iter()
+                .zip(&last)
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| keys.len().min(last.len()))
+        };
+
+        let mut run = Run::new(
+            ctx,
+            &mut self.cache,
+            &mut self.pool,
+            &self.placeholder,
+            document,
+            bounds,
+        )?;
+        let mut done = start;
+        let mut cur = match &snapshot {
+            Some(s) => Buf::Borrowed(&s.image),
+            None => Buf::Owned(run.bufs.take_clear(run.placeholder).await?),
+        };
+        // A snapshot of 0 layers or of all layers has no use.
+        if target > start && target < layers.len() {
+            let below = run.composite_list(&layers[start..target], cur).await?;
+            cur = match below {
+                Buf::Owned(image) => {
+                    if let Some(old) = snapshot.take() {
+                        run.bufs.recycle(Buf::Owned(old.image));
+                    }
+                    let saved = snapshot.insert(Snapshot {
+                        keys: keys[..target].to_vec(),
+                        image,
+                    });
+                    Buf::Borrowed(&saved.image)
+                }
+                // No step ran (the layers are hidden): the buffer is the
+                // old snapshot. It stays correct with its own keys.
+                borrowed @ Buf::Borrowed(_) => borrowed,
+            };
+            done = target;
+        }
+        let result = run.composite_list(&layers[done..], cur).await?;
+        let image = run.bufs.into_image(result).await?;
+        if start > 0 {
+            self.view_partial_builds += 1;
+        }
+        self.below = Some(BelowCache {
+            size,
+            space,
+            last: keys,
+            snapshot,
+        });
+        Ok(image)
     }
 }
 
@@ -1122,7 +1348,41 @@ struct Run<'c> {
     space: BlendSpace,
 }
 
-impl Run<'_> {
+impl<'c> Run<'c> {
+    /// Starts a composite of `region` (which the caller checked). Prunes
+    /// the layer cache and drops the free buffers of a different size.
+    fn new(
+        ctx: &'c GpuContext,
+        cache: &'c mut LayerCache,
+        pool: &'c mut Vec<GpuImage>,
+        placeholder: &'c GpuImage,
+        document: &Document,
+        region: Rect,
+    ) -> EditorResult<Self> {
+        cache.prune(document);
+        // The pool keeps buffers of one size only.
+        pool.retain(|b| b.width() == region.width && b.height() == region.height);
+        let region_param = rect_param(region)?;
+        let mut clear_params = Params::zeroed();
+        clear_params.region = region_param;
+        Ok(Self {
+            bufs: Bufs {
+                ctx,
+                width: region.width,
+                height: region.height,
+                free: pool,
+                clear_params,
+            },
+            cache,
+            placeholder,
+            region,
+            region_param,
+            canvas: document.bounds(),
+            max_dim: ctx.limits().max_texture_dimension_2d,
+            space: document.blend_space(),
+        })
+    }
+
     /// The parameters that are the same for all steps.
     fn params(&self) -> Params {
         let mut params = Params::zeroed();
@@ -2164,6 +2424,157 @@ mod tests {
         assert!((out[0][0] - 0.5).abs() < 1e-6);
     }
 
+    /// Renders a view of `doc` and checks the cached view composite: it must
+    /// be bit-equal to a full GPU composite, and the full composite must
+    /// agree with the CPU reference.
+    fn check_view_composite(
+        ctx: &GpuContext,
+        comp: &mut GpuCompositor,
+        doc: &Document,
+        what: &str,
+    ) {
+        read_view(ctx, comp, doc, view(0.0, 0.0, 1.0, 8, 8));
+        let cached = {
+            let cache = comp.view.as_ref().expect("a view composite");
+            pollster::block_on(cache.composite.read_rgba_f32(ctx)).unwrap()
+        };
+        let full = pollster::block_on(comp.composite_gpu_image(ctx, doc, doc.bounds())).unwrap();
+        assert!(
+            cached
+                .iter()
+                .zip(full.as_slice())
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "{what}: the view composite is not the full composite"
+        );
+        compare(ctx, comp, doc, doc.bounds(), false, TOL, what);
+    }
+
+    /// The index of the "below" snapshot, or `None`.
+    fn snapshot_index(comp: &GpuCompositor) -> Option<usize> {
+        comp.below
+            .as_ref()
+            .and_then(|b| b.snapshot.as_ref())
+            .map(|s| s.keys.len())
+    }
+
+    #[test]
+    fn render_view_below_snapshot_matches_full_composite() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(21);
+        let mut doc = empty_doc(40, 32, BlendSpace::Perceptual);
+        // 0: base, 1: masked multiply layer, 2: levels, 3: isolated group,
+        // 4: pass-through group, 5: hue/saturation, 6: hidden layer.
+        let base = add_pixel(&mut doc, &mut rng, None, (40, 32), (0, 0));
+        let p1 = add_pixel(&mut doc, &mut rng, None, (30, 20), (-4, 6));
+        doc.set_blend_mode(p1, BlendMode::Multiply).unwrap();
+        set_mask(&mut doc, &mut rng, p1, (20, 16), (3, 8), MaskFill::Black);
+        let a2 = add(
+            &mut doc,
+            None,
+            LayerContent::Adjustment(Adjustment::Levels(levels())),
+        );
+        let g3 = add(
+            &mut doc,
+            None,
+            LayerContent::Group(GroupIsolation::Isolated),
+        );
+        add_pixel(&mut doc, &mut rng, Some(g3), (20, 20), (10, 4));
+        let child = add_pixel(&mut doc, &mut rng, Some(g3), (16, 16), (18, 12));
+        doc.set_blend_mode(child, BlendMode::Screen).unwrap();
+        let g4 = add(
+            &mut doc,
+            None,
+            LayerContent::Group(GroupIsolation::PassThrough),
+        );
+        doc.set_opacity(g4, 0.7).unwrap();
+        add(
+            &mut doc,
+            Some(g4),
+            LayerContent::Adjustment(Adjustment::Curves(curves())),
+        );
+        let hs = |hue: f32| {
+            Adjustment::HueSaturation(HueSaturation {
+                hue,
+                saturation: 0.2,
+                lightness: -0.1,
+            })
+        };
+        let a5 = add(&mut doc, None, LayerContent::Adjustment(hs(30.0)));
+        let p6 = add_pixel(&mut doc, &mut rng, None, (12, 12), (2, 2));
+        doc.set_visible(p6, false).unwrap();
+
+        let mut partial = 0;
+        let mut step = |comp: &mut GpuCompositor, doc: &Document, hit: bool, at, what: &str| {
+            check_view_composite(&ctx, comp, doc, what);
+            partial += u64::from(hit);
+            assert_eq!(comp.view_partial_composites(), partial, "{what}: hits");
+            assert_eq!(snapshot_index(comp), at, "{what}: snapshot index");
+        };
+
+        step(&mut comp, &doc, false, None, "initial");
+        // The first change of a layer keeps the state below it; the next
+        // changes start from there.
+        doc.set_opacity(a5, 0.8).unwrap();
+        step(&mut comp, &doc, false, Some(5), "top 1");
+        doc.set_adjustment(a5, hs(45.0)).unwrap();
+        step(&mut comp, &doc, true, Some(5), "top 2");
+        // A change below the snapshot discards it.
+        let mut l = levels();
+        l.master.gamma = 0.8;
+        doc.set_adjustment(a2, Adjustment::Levels(l)).unwrap();
+        step(&mut comp, &doc, false, Some(2), "levels 1");
+        doc.set_blend_mode(a2, BlendMode::Overlay).unwrap();
+        step(&mut comp, &doc, true, Some(2), "levels 2");
+        // A change above the snapshot starts from it and moves it up.
+        doc.set_opacity(a5, 0.6).unwrap();
+        step(&mut comp, &doc, true, Some(5), "top 3");
+        doc.set_opacity(a5, 0.5).unwrap();
+        step(&mut comp, &doc, true, Some(5), "top 4");
+        // A change in a group: the snapshot is below the top-level group.
+        doc.set_opacity(child, 0.4).unwrap();
+        step(&mut comp, &doc, false, Some(3), "child 1");
+        doc.set_blend_mode(child, BlendMode::Difference).unwrap();
+        step(&mut comp, &doc, true, Some(3), "child 2");
+        // A mask write and a pixel write below discard the snapshot. A
+        // change of layer 0 keeps no snapshot.
+        doc.write_mask(p1, Rect::new(2, 2, 3, 3), &[0.5; 9])
+            .unwrap();
+        step(&mut comp, &doc, false, Some(1), "mask write");
+        let mut history = History::default();
+        let e = doc
+            .write_pixels(base, Rect::new(1, 1, 2, 2), &[[0.1, 0.2, 0.3, 1.0]; 4])
+            .unwrap();
+        history.push("Write", vec![e]);
+        step(&mut comp, &doc, false, None, "pixel write");
+        history.undo(&mut doc).unwrap();
+        step(&mut comp, &doc, false, None, "undo write");
+        // The hidden top layer: no step runs below it, then it shows.
+        doc.set_visible(p6, true).unwrap();
+        step(&mut comp, &doc, false, Some(6), "show top");
+        doc.set_opacity(p6, 0.5).unwrap();
+        step(&mut comp, &doc, true, Some(6), "top opacity");
+        // A new layer inside the snapshot range, and its delete.
+        let e = doc.delete_layer(g3).unwrap();
+        history.push("Delete", vec![e]);
+        step(&mut comp, &doc, false, Some(3), "delete group");
+        history.undo(&mut doc).unwrap();
+        step(&mut comp, &doc, true, Some(3), "undo delete");
+        // A move of a layer below and a blend space change discard it.
+        doc.translate_layer(p1, 2, 1).unwrap();
+        step(&mut comp, &doc, false, Some(1), "move");
+        doc.set_blend_space(BlendSpace::Linear).unwrap();
+        step(&mut comp, &doc, false, None, "blend space");
+        doc.set_opacity(a5, 0.9).unwrap();
+        step(&mut comp, &doc, false, Some(5), "linear 1");
+        doc.set_opacity(a5, 0.3).unwrap();
+        step(&mut comp, &doc, true, Some(5), "linear 2");
+        // `clear_cache` drops the snapshot.
+        comp.clear_cache();
+        assert_eq!(snapshot_index(&comp), None);
+        assert_eq!(comp.cache_memory_bytes(), 16);
+    }
+
     #[test]
     fn render_view_rejects_invalid_views() {
         let Some(ctx) = context() else { return };
@@ -2319,15 +2730,27 @@ mod tests {
         }
         assert_eq!(comp.view_composites(), 1, "a pan composited");
         // A slider step: an opacity change, then a view (composite, pyramid,
-        // and view kernel; no upload, no buffer allocation).
+        // and view kernel; no upload, no buffer allocation). The first step
+        // on the layer composites all layers and keeps the "below"
+        // snapshot; the next steps start from it.
+        let mut full_change_ms = 0.0;
         let mut change_ms = f64::MAX;
-        for i in 0..3 {
+        for i in 0..4 {
             doc.set_opacity(top, 0.4 + 0.1 * i as f32).unwrap();
             let t = Instant::now();
             pollster::block_on(comp.render_view(&ctx, &doc, &spec(0.0, 0.3))).unwrap();
             ctx.wait_idle().unwrap();
-            change_ms = change_ms.min(ms(t));
+            if i == 0 {
+                full_change_ms = ms(t);
+            } else {
+                change_ms = change_ms.min(ms(t));
+            }
         }
+        assert_eq!(
+            comp.view_partial_composites(),
+            3,
+            "the snapshot was not used"
+        );
         let memory_mib = comp.cache_memory_bytes() as f64 / (1024.0 * 1024.0);
 
         let t = Instant::now();
@@ -2340,7 +2763,8 @@ mod tests {
              {first_ms:.1} ms ({uploads} uploads); warm after an opacity change \
              {warm_ms:.1} ms; cold (all uploads) {cold_ms:.1} ms; render_view 2560x1600: \
              first {view_first_ms:.1} ms, pan at scale 1 / 0.5 / 0.3: {:.2} / {:.2} / \
-             {:.2} ms, after an opacity change {change_ms:.1} ms; cache {memory_mib:.0} MiB; \
+             {:.2} ms, after an opacity change of layer 5: first {full_change_ms:.1} ms, \
+             next (below snapshot) {change_ms:.1} ms; cache {memory_mib:.0} MiB; \
              read-back about {readback_ms:.1} ms",
             pan_ms[0], pan_ms[1], pan_ms[2]
         );
