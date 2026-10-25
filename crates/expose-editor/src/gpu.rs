@@ -3,7 +3,7 @@
 //! [`GpuCompositor`] gives the same result as the CPU reference
 //! [`composite`](crate::composite::composite), within float tolerance. The
 //! model (coverage, pixel layers, adjustment layers, groups, dissolve) is
-//! the same. See [`crate::composite`].
+//! the same. See [`crate::composite`](mod@crate::composite).
 //!
 //! # Design
 //!

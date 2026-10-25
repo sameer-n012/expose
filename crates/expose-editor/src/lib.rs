@@ -11,7 +11,7 @@
 //!   [`Edit`] records that they return.
 //! - [`blend`]: blend modes and the blending space.
 //! - [`adjust`]: adjustment layer parameters and their apply functions.
-//! - [`composite`]: the CPU reference compositor.
+//! - [`composite`](mod@composite): the CPU reference compositor.
 //! - [`gpu`]: the GPU compositor ([`GpuCompositor`]). It gives the same
 //!   result as the CPU reference, within float tolerance. It keeps a cache
 //!   of layer textures, and renders zoomed and panned views of a cached
