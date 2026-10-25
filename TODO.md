@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- **editor-gpu-followups** (agent, branch `feat/editor-gpu-followups`) — composite only from the changed layer up (cached "below" composite), curve table upload on change, curve end-point test, doc link warnings.
+- (none — all agent branches are merged; no worktrees)
 
 ## Next (suggested order)
 
@@ -24,7 +24,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
-- [ ] **editor-gpu-followups** — a test for curve end points between curve table samples; slider steps take about 61 ms at 4096² (composite only the changed area, or cache the composite below the changed layer); GPU memory about 2.3 GiB for a 4096² 10-layer document (`rgba16float` layer textures or sparse tiles); upload the curve table only when it changes; `cargo doc` warns on ambiguous links to `crate::composite` (function and module).
+- [x] **editor-gpu-followups** (PR #53) — below snapshot in `render_view` (repeated slider step 62 → ~29 ms at 4096², +256 MiB), curve table cache, curve end-point test, doc links fixed (ADR 0014).
+- [ ] **editor-gpu-followups-2** — the first step on a new layer is a full composite (70–79 ms); composite and rebuild the pyramid only in the changed area; GPU memory about 2.6 GiB for a 4096² 10-layer document (sparse tiles; `rgba16float` fails the 5e-5 CPU tolerance at 2.6e-4 — operator decision if a looser tolerance is acceptable).
 
 ### Follow-ups from merged work
 
