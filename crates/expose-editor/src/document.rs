@@ -1,7 +1,7 @@
 //! The layered document: canvas settings and the layer tree.
 //!
 //! Change operations are in [`crate::ops`]. The compositor is in
-//! [`crate::composite`].
+//! [`crate::composite`](mod@crate::composite).
 
 use expose_core::buffer::{Rect, WorkingImage};
 

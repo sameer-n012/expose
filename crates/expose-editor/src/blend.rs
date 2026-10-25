@@ -4,7 +4,7 @@
 //!
 //! The functions in this module work on **straight** (not premultiplied)
 //! colors. `cb` is the backdrop color (the layers below). `cs` is the source
-//! color (the layer). The compositor (see [`crate::composite`]) uses the
+//! color (the layer). The compositor (see [`crate::composite`](mod@crate::composite)) uses the
 //! result `B(cb, cs)` in the W3C Compositing and Blending Level 1 formula:
 //!
 //! ```text
