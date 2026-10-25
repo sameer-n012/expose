@@ -176,7 +176,7 @@ This file is the master list of features for Expose.
 
 ### 3.1 Documents and canvas
 - [ ] **P1** New document (size, resolution, color mode, bit depth, background)
-- [ ] **P1** Open and save native layered document format
+- [x] **P1** Open and save native layered document format
 - [ ] **P1** Zoom, pan, rotate view; fit and 100% view
 - [ ] **P1** Multiple open documents (tabs)
 - [ ] **P2** Canvas size and image size (with resampling methods)
