@@ -121,6 +121,9 @@
         <button type="button" class="save" disabled={!editor.canSave} title="Save to library (Mod+S)" onclick={() => void editor.save()}>
           {editor.saving ? 'Saving…' : 'Save'}
         </button>
+        <button type="button" disabled={!editor.canSave} title="Save as new files in a folder (Mod+Shift+S)" onclick={() => void editor.saveAs()}>
+          Save As…
+        </button>
       </div>
     {/if}
     <div class="toolbar">

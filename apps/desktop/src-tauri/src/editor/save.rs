@@ -13,10 +13,19 @@
 //! 3. [`write_files`] (no lock) writes the two files. Each write is atomic
 //!    ([`write_atomic`]).
 //! 4. [`record_in_catalog`] (catalog lock) imports the TIFF and records
-//!    the link at the first save, or updates the image info at a later
-//!    save.
+//!    the link in one transaction at the first save, or updates the file
+//!    facts and the image info in one transaction at a later save.
 //!
 //! [`save_snapshot`] runs steps 2 to 4.
+//!
+//! # Save as
+//!
+//! With a `folder`, the save does not reuse the files of an earlier save.
+//! It picks new free names in that folder and makes a new library photo
+//! and link, as for a first save. The earlier files stay as they are. The
+//! caller then stores the new files as the origin of the document. The
+//! same rules as for a first save keep the save away from catalog
+//! originals and from files that Expose did not make.
 //!
 //! # TIFF
 //!
@@ -33,7 +42,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use expose_catalog::{AddOutcome, CatalogStore, EditorOutput, ImageInfo, NewPhoto, PhotoId};
+use expose_catalog::{CatalogStore, ImageInfo, NewEditorOutput, PhotoId};
 use expose_core::buffer::WorkingImage;
 use expose_core::color::ColorSpaceId;
 use expose_editor::{Document, FILE_EXTENSION, to_straight_alpha, write_document};
@@ -142,6 +151,7 @@ pub struct SaveOutcome {
 pub fn save_snapshot(
     state: &CatalogState,
     snapshot: SaveSnapshot,
+    folder: Option<&Path>,
 ) -> Result<SaveOutcome, CommandError> {
     let SaveSnapshot {
         document,
@@ -149,7 +159,7 @@ pub fn save_snapshot(
         origin,
         ..
     } = snapshot;
-    let targets = plan_targets(&*state.lock()?, &origin)?;
+    let targets = plan_targets(&*state.lock()?, &origin, folder)?;
     let created = targets.photo_id.is_none();
     let written = write_files(&document, composite, &targets, created)?;
     // Free the document copy before the catalog step.
@@ -184,41 +194,82 @@ pub fn save_snapshot(
 /// - Else the paths are `<stem>-edit.exdoc` and `<stem>-edit.tif` in the
 ///   folder of the source photo. If a file with either name exists on the
 ///   disk or in the catalog, the function tries `-edit-2`, `-edit-3`, ...
+/// - With `folder` ("save as"), the function always makes a new pair of
+///   files in that folder with the same name rule. The stem comes from the
+///   source photo, or from the image file of the earlier save if the
+///   document has no source photo. The earlier files stay as they are, and
+///   the save makes a new library photo and link.
 ///
 /// # Errors
 ///
-/// See [`save_snapshot`].
+/// See [`save_snapshot`]. `invalidInput` if `folder` is not an absolute
+/// path of an existing directory.
 pub fn plan_targets<S: CatalogStore + ?Sized>(
     store: &S,
     origin: &DocumentOrigin,
+    folder: Option<&Path>,
 ) -> Result<SaveTargets, CommandError> {
-    let targets = if let Some(saved) = &origin.saved {
+    // A "save as" is a first save to new files: no link to reuse.
+    let link = if folder.is_some() {
+        None
+    } else {
+        origin.saved.as_ref()
+    };
+    let targets = if let Some(saved) = link {
         SaveTargets {
             document_path: saved.document_path.clone(),
             image_path: saved.image_path.clone(),
             photo_id: Some(saved.photo_id),
         }
     } else {
-        let source = origin.source_photo_id.ok_or_else(|| {
-            CommandError::invalid_input("the document has no source photo, so it has no folder")
-        })?;
-        let path = store.photo_path(source)?.ok_or_else(|| {
-            CommandError::new(
-                ErrorKind::NotFound,
-                "the source photo is not in the library",
-            )
-        })?;
-        let (folder, stem) = folder_and_stem(&path)?;
-        let (document_path, image_path) = pick_names(store, folder, stem)?;
+        let source_path = match origin.source_photo_id {
+            Some(source) => Some(store.photo_path(source)?.ok_or_else(|| {
+                CommandError::new(
+                    ErrorKind::NotFound,
+                    "the source photo is not in the library",
+                )
+            })?),
+            None => None,
+        };
+        let (target_folder, stem) = match (folder, &source_path, &origin.saved) {
+            (Some(folder), Some(path), _) => (check_folder(folder)?, folder_and_stem(path)?.1),
+            (Some(folder), None, Some(saved)) => {
+                (check_folder(folder)?, folder_and_stem(&saved.image_path)?.1)
+            }
+            (None, Some(path), _) => folder_and_stem(path)?,
+            _ => {
+                return Err(CommandError::invalid_input(
+                    "the document has no source photo, so it has no folder",
+                ));
+            }
+        };
+        let (document_path, image_path) = pick_names(store, target_folder, stem)?;
         SaveTargets {
             document_path,
             image_path,
             photo_id: None,
         }
     };
-    check_target(store, &targets.document_path, origin.saved.as_ref())?;
-    check_target(store, &targets.image_path, origin.saved.as_ref())?;
+    check_target(store, &targets.document_path, link)?;
+    check_target(store, &targets.image_path, link)?;
     Ok(targets)
+}
+
+/// Checks that `folder` is an absolute path of an existing directory.
+fn check_folder(folder: &Path) -> Result<&Path, CommandError> {
+    if !folder.is_absolute() {
+        return Err(CommandError::invalid_input(format!(
+            "the folder path is not absolute: {}",
+            folder.display()
+        )));
+    }
+    if !folder.is_dir() {
+        return Err(CommandError::invalid_input(format!(
+            "the folder does not exist: {}",
+            folder.display()
+        )));
+    }
+    Ok(folder)
 }
 
 /// Returns the folder and the file stem of a photo path.
@@ -395,19 +446,19 @@ fn write_image(
 
 /// Records the save in the catalog and returns the photo of the image.
 ///
-/// - First save (`targets.photo_id` is `None`): adds the image file to the
-///   folder (the folder is added if the catalog does not have it), sets
-///   its image info, and records the link.
-/// - Later save: replaces the image info of the photo (the size can
-///   change).
+/// - First save (`targets.photo_id` is `None`): one call to
+///   [`CatalogStore::add_editor_output`] adds the folder (if new), the
+///   photo, its image info, and the link in one transaction.
+/// - Later save: one call to [`CatalogStore::update_photo_file`] stores the
+///   new file size, file time, and image info in one transaction.
 ///
 /// The image info has the size of the image and the capture time of the
 /// source photo, so that the new photo sorts next to its source.
 ///
 /// # Errors
 ///
-/// `database` and other catalog errors; `internal` if the catalog already
-/// had a photo at the image path.
+/// `database` and other catalog errors; `invalidInput` if the catalog
+/// already had a photo at the image path.
 pub fn record_in_catalog<S: CatalogStore + ?Sized>(
     store: &mut S,
     targets: &SaveTargets,
@@ -424,50 +475,17 @@ pub fn record_in_catalog<S: CatalogStore + ?Sized>(
         height: Some(written.height),
     };
     if let Some(photo_id) = targets.photo_id {
-        store.set_image_info(photo_id, info)?;
+        store.update_photo_file(photo_id, written.file_size, written.modified_ms, info)?;
         return Ok(photo_id);
     }
-    let (folder_path, file_name) = match (
-        targets.image_path.parent(),
-        targets.image_path.file_name().and_then(|n| n.to_str()),
-    ) {
-        (Some(folder), Some(name)) => (folder, name.to_owned()),
-        _ => {
-            return Err(CommandError::internal(format!(
-                "the image path {} has no folder or file name",
-                targets.image_path.display()
-            )));
-        }
-    };
-    let folder = match store.find_folder(folder_path)? {
-        Some(folder) => folder,
-        None => store.add_folder(folder_path)?,
-    };
-    let outcomes = store.add_photos(
-        folder.id,
-        &[NewPhoto {
-            file_name,
-            file_size: written.file_size,
-            file_modified_ms: written.modified_ms,
-        }],
-    )?;
-    let photo_id = match outcomes.first() {
-        Some(AddOutcome::Added(id)) => *id,
-        Some(AddOutcome::AlreadyKnown(_)) => {
-            return Err(CommandError::internal(format!(
-                "the library already has a photo at {}",
-                targets.image_path.display()
-            )));
-        }
-        None => return Err(CommandError::internal("the import gave no result")),
-    };
-    store.set_image_info(photo_id, info)?;
-    store.set_editor_output(&EditorOutput {
-        photo_id,
+    Ok(store.add_editor_output(&NewEditorOutput {
+        image_path: targets.image_path.clone(),
         document_path: targets.document_path.clone(),
+        file_size: written.file_size,
+        file_modified_ms: written.modified_ms,
+        info,
         source_photo_id: source.map(|p| p.id),
-    })?;
-    Ok(photo_id)
+    })?)
 }
 
 /// Reads the layered document of an editor output link.

@@ -19,7 +19,7 @@
  * - Before the open document is replaced, a dirty document asks the user
  *   (`leavePrompt`: Save, Don't save, or Cancel).
  */
-import type { PhotoId } from '../catalog';
+import { pickFolder, type PhotoId } from '../catalog';
 import type { DisplaySpace } from '../develop/transport';
 import { editorApi, type DocumentInfo, type EditDto, type EditorApi, type LayerInfo, type SaveResult } from '../editor/api';
 import { allLayerIds, findLayer, moveStep, newLayerIds } from '../editor/layers';
@@ -52,6 +52,8 @@ export interface EditorStoreOptions {
   readonly now?: () => number;
   /** Called after each successful save (the shell refreshes the library). */
   readonly onSaved?: (result: SaveResult) => void;
+  /** Shows the folder dialog for "Save As". For tests. */
+  readonly pickFolder?: () => Promise<string | null>;
 }
 
 /** What the Editor view shows. */
@@ -110,6 +112,7 @@ export class EditorStore {
   readonly #displaySpace: DisplaySpace | null;
   readonly #now: () => number;
   readonly #onSaved: ((result: SaveResult) => void) | undefined;
+  readonly #pickFolder: () => Promise<string | null>;
   #answerLeave: ((choice: LeaveChoice) => void) | null = null;
   /** The running save, or null. */
   #saveRun: Promise<boolean> | null = null;
@@ -129,6 +132,7 @@ export class EditorStore {
     this.#displaySpace = options.displaySpace ?? null;
     this.#now = options.now ?? (() => Date.now());
     this.#onSaved = options.onSaved;
+    this.#pickFolder = options.pickFolder ?? pickFolder;
   }
 
   /** True if the open document has changes after its last save (or its open). */
@@ -271,20 +275,46 @@ export class EditorStore {
    * Returns true on success. Errors show a toast.
    */
   save(): Promise<boolean> {
+    return this.#startSave();
+  }
+
+  /**
+   * "Save As": asks for a folder, then saves the document as new files in
+   * that folder (a new library photo). The earlier files stay as they are.
+   * Returns false if the user cancels the dialog or the save fails.
+   */
+  async saveAs(): Promise<boolean> {
+    if (!this.canSave) {
+      return this.#saveRun ?? false;
+    }
+    let folder: string | null;
+    try {
+      folder = await this.#pickFolder();
+    } catch (error: unknown) {
+      this.#toasts.error('Open the folder picker failed.', error);
+      return false;
+    }
+    if (folder === null) {
+      return false;
+    }
+    return this.#startSave(folder);
+  }
+
+  #startSave(folder?: string): Promise<boolean> {
     if (this.#saveRun !== null) {
       return this.#saveRun;
     }
     if (!this.canSave) {
       return Promise.resolve(false);
     }
-    const run = this.#runSave().finally(() => {
+    const run = this.#runSave(folder).finally(() => {
       this.#saveRun = null;
     });
     this.#saveRun = run;
     return run;
   }
 
-  async #runSave(): Promise<boolean> {
+  async #runSave(folder?: string): Promise<boolean> {
     this.endGesture();
     this.saving = true;
     const generation = this.#generation;
@@ -295,7 +325,7 @@ export class EditorStore {
       if (info === null || generation !== this.#generation) {
         return false;
       }
-      const result = await this.#api.save(info.documentId);
+      const result = await this.#api.save(info.documentId, folder);
       if (generation === this.#generation) {
         this.#applySaved(result);
       }
@@ -304,7 +334,12 @@ export class EditorStore {
       return true;
     } catch (error: unknown) {
       if (generation === this.#generation) {
-        this.#toasts.error(this.#messageFor('Save the document', error), error);
+        let message = this.#messageFor('Save the document', error);
+        // A plain save writes next to the source photo; that folder can be read-only.
+        if (folder === undefined && errorKind(error) === 'io') {
+          message += ' Try "Save As…" to choose a different folder.';
+        }
+        this.#toasts.error(message, error);
       }
       return false;
     } finally {

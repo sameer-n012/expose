@@ -7,7 +7,8 @@ use crate::error::Result;
 use crate::import::ImportReport;
 use crate::model::{
     AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, EditorOutput, Flag, Folder,
-    FolderId, FolderNode, ImageInfo, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
+    FolderId, FolderNode, ImageInfo, LabelUpdate, NewEditorOutput, NewPhoto, Photo, PhotoId,
+    Rating,
 };
 use crate::platform::FileSystem;
 use crate::query::PhotoQuery;
@@ -164,6 +165,29 @@ pub trait CatalogStore {
     /// if the photo or the source photo does not exist. Returns a database
     /// error if a different photo already uses the document path.
     fn set_editor_output(&mut self, output: &EditorOutput) -> Result<()>;
+
+    /// Records a first editor save in one transaction: finds or adds the
+    /// folder of the image file, adds the photo, stores the image
+    /// information, and links the photo to the document. On any error the
+    /// catalog does not change.
+    ///
+    /// Returns [`CatalogError::InvalidPath`](crate::CatalogError::InvalidPath)
+    /// if a photo already exists at the image path.
+    fn add_editor_output(&mut self, new: &NewEditorOutput) -> Result<PhotoId>;
+
+    /// Stores the file size, the file modification time, and the image
+    /// information of a photo in one transaction. The editor uses it after
+    /// it writes the image file again.
+    ///
+    /// Returns [`CatalogError::PhotoNotFound`](crate::CatalogError::PhotoNotFound)
+    /// if the photo does not exist.
+    fn update_photo_file(
+        &mut self,
+        id: PhotoId,
+        file_size: u64,
+        file_modified_ms: i64,
+        info: ImageInfo,
+    ) -> Result<()>;
 
     /// Returns the editor output record of a photo, or `None` if the photo
     /// is not an editor output (or does not exist).

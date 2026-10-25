@@ -260,3 +260,101 @@ fn delete_cascades_and_clears_source() {
         None
     );
 }
+
+fn new_output(image: &str, doc: &str, source: Option<PhotoId>) -> expose_catalog::NewEditorOutput {
+    expose_catalog::NewEditorOutput {
+        image_path: PathBuf::from(image),
+        document_path: PathBuf::from(doc),
+        file_size: 77,
+        file_modified_ms: 5,
+        info: expose_catalog::ImageInfo {
+            capture_time_ms: Some(9),
+            width: Some(4),
+            height: Some(3),
+        },
+        source_photo_id: source,
+    }
+}
+
+#[test]
+fn add_editor_output_records_everything() {
+    let mut store = memory_store();
+    let src = add(&mut store, "/pics", &["a.jpg"])[0];
+    let id = store
+        .add_editor_output(&new_output(
+            "/new/a-edit.tif",
+            "/new/a-edit.exdoc",
+            Some(src),
+        ))
+        .unwrap();
+    let photo = store.get_photo(id).unwrap().unwrap();
+    assert_eq!(photo.file_name, "a-edit.tif");
+    assert_eq!((photo.file_size, photo.file_modified_ms), (77, 5));
+    assert_eq!((photo.width, photo.height), (Some(4), Some(3)));
+    assert!(photo.is_editor_output);
+    let link = store.editor_output(id).unwrap().unwrap();
+    assert_eq!(link.source_photo_id, Some(src));
+    assert!(store.find_folder(Path::new("/new")).unwrap().is_some());
+}
+
+#[test]
+fn add_editor_output_rolls_back_on_error() {
+    let mut store = memory_store();
+    let ids = add(&mut store, "/pics", &["a.tif", "b.tif"]);
+    store
+        .set_editor_output(&output(ids[0], "/pics/a.exdoc", None))
+        .unwrap();
+    let folders = store.list_folders().unwrap().len();
+
+    // Same image path as a known photo.
+    assert!(
+        store
+            .add_editor_output(&new_output("/pics/b.tif", "/pics/b.exdoc", None))
+            .is_err()
+    );
+    // The document path of a different photo: fails at the last insert.
+    assert!(
+        store
+            .add_editor_output(&new_output("/other/c.tif", "/pics/a.exdoc", None))
+            .is_err()
+    );
+    // A source photo that does not exist.
+    assert!(matches!(
+        store.add_editor_output(&new_output(
+            "/other/c.tif",
+            "/other/c.exdoc",
+            Some(PhotoId(999))
+        )),
+        Err(CatalogError::PhotoNotFound(_))
+    ));
+    assert_eq!(store.list_folders().unwrap().len(), folders);
+    assert_eq!(
+        store.find_photo_by_path(Path::new("/other/c.tif")).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn update_photo_file_changes_facts_and_info() {
+    let mut store = memory_store();
+    let id = add(&mut store, "/pics", &["a.tif"])[0];
+    let info = expose_catalog::ImageInfo {
+        capture_time_ms: None,
+        width: Some(10),
+        height: Some(20),
+    };
+    store.update_photo_file(id, 123, 456, info).unwrap();
+    let photo = store.get_photo(id).unwrap().unwrap();
+    assert_eq!((photo.file_size, photo.file_modified_ms), (123, 456));
+    assert_eq!((photo.width, photo.height), (Some(10), Some(20)));
+    assert!(matches!(
+        store.update_photo_file(PhotoId(999), 1, 1, info),
+        Err(CatalogError::PhotoNotFound(_))
+    ));
+    let zero = expose_catalog::ImageInfo {
+        width: Some(0),
+        ..info
+    };
+    assert!(store.update_photo_file(id, 1, 1, zero).is_err());
+    assert_eq!(store.get_photo(id).unwrap().unwrap().file_size, 123);
+}

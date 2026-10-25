@@ -1,7 +1,7 @@
 // Test code: a failed setup is a test failure.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use expose_catalog::SqliteStore;
+use expose_catalog::{AddOutcome, NewPhoto, SqliteStore};
 use expose_editor::{BlendMode, composite};
 
 use super::*;
@@ -96,7 +96,7 @@ fn snapshot(document: Document, origin: DocumentOrigin) -> SaveSnapshot {
 fn first_save_creates_both_files_the_photo_and_the_link() {
     let fx = Fixture::new();
     let doc = document([0.5, 0.25, 0.125, 1.0]);
-    let outcome = save_snapshot(&fx.state, snapshot(doc.clone(), fx.origin())).unwrap();
+    let outcome = save_snapshot(&fx.state, snapshot(doc.clone(), fx.origin()), None).unwrap();
     assert!(outcome.created);
     assert_eq!(outcome.files.document_path, fx.path("a-edit.exdoc"));
     assert_eq!(outcome.files.image_path, fx.path("a-edit.tif"));
@@ -137,7 +137,7 @@ fn first_save_creates_both_files_the_photo_and_the_link() {
 fn transparent_composite_keeps_alpha_and_opaque_has_none() {
     let fx = Fixture::new();
     let doc = document([0.4, 0.4, 0.4, 0.5]);
-    let outcome = save_snapshot(&fx.state, snapshot(doc, fx.origin())).unwrap();
+    let outcome = save_snapshot(&fx.state, snapshot(doc, fx.origin()), None).unwrap();
     let decoded = expose_raw::decode_path(&outcome.files.image_path).unwrap();
     let pixel = decoded.image.pixels()[0];
     assert!((pixel[3] - 0.5).abs() < 1e-3, "{pixel:?}");
@@ -148,7 +148,7 @@ fn transparent_composite_keeps_alpha_and_opaque_has_none() {
 #[test]
 fn second_save_replaces_the_same_files_and_adds_no_photo() {
     let fx = Fixture::new();
-    let first = save_snapshot(&fx.state, snapshot(document([0.2; 4]), fx.origin())).unwrap();
+    let first = save_snapshot(&fx.state, snapshot(document([0.2; 4]), fx.origin()), None).unwrap();
     let count = fx.photo_count();
     let mut doc = document([0.8, 0.1, 0.1, 1.0]);
     let id = doc.layers()[0].id();
@@ -157,7 +157,7 @@ fn second_save_replaces_the_same_files_and_adds_no_photo() {
         source_photo_id: Some(fx.source),
         saved: Some(first.files.clone()),
     };
-    let second = save_snapshot(&fx.state, snapshot(doc.clone(), origin)).unwrap();
+    let second = save_snapshot(&fx.state, snapshot(doc.clone(), origin), None).unwrap();
     assert!(!second.created);
     assert_eq!(second.files, first.files);
     assert_eq!(fx.photo_count(), count);
@@ -190,12 +190,13 @@ fn names_skip_files_on_disk_and_in_the_catalog() {
             )
             .unwrap();
     }
-    let targets = plan_targets(&*fx.state.lock().unwrap(), &fx.origin()).unwrap();
+    let targets = plan_targets(&*fx.state.lock().unwrap(), &fx.origin(), None).unwrap();
     assert_eq!(targets.document_path, fx.path("a-edit-3.exdoc"));
     assert_eq!(targets.image_path, fx.path("a-edit-3.tif"));
     assert_eq!(targets.photo_id, None);
     // The file of the other application stays.
-    let outcome = save_snapshot(&fx.state, snapshot(document([0.3; 4]), fx.origin())).unwrap();
+    let outcome =
+        save_snapshot(&fx.state, snapshot(document([0.3; 4]), fx.origin()), None).unwrap();
     assert_eq!(outcome.files.image_path, fx.path("a-edit-3.tif"));
     assert_eq!(fs::read(fx.path("a-edit.tif")).unwrap(), b"other");
 }
@@ -212,7 +213,7 @@ fn save_refuses_to_overwrite_files_that_expose_did_not_create() {
             image_path: fx.path("a.jpg"),
         }),
     };
-    let error = save_snapshot(&fx.state, snapshot(document([0.3; 4]), forged)).unwrap_err();
+    let error = save_snapshot(&fx.state, snapshot(document([0.3; 4]), forged), None).unwrap_err();
     assert_eq!(error.kind, ErrorKind::InvalidInput);
     assert!(
         error.message.contains("did not create"),
@@ -224,7 +225,7 @@ fn save_refuses_to_overwrite_files_that_expose_did_not_create() {
 
     // A file on the disk at the document path of a real link, but the link
     // has a different photo: refused.
-    let first = save_snapshot(&fx.state, snapshot(document([0.2; 4]), fx.origin())).unwrap();
+    let first = save_snapshot(&fx.state, snapshot(document([0.2; 4]), fx.origin()), None).unwrap();
     let other = DocumentOrigin {
         source_photo_id: Some(fx.source),
         saved: Some(SavedFiles {
@@ -232,7 +233,7 @@ fn save_refuses_to_overwrite_files_that_expose_did_not_create() {
             ..first.files
         }),
     };
-    let error = plan_targets(&*fx.state.lock().unwrap(), &other).unwrap_err();
+    let error = plan_targets(&*fx.state.lock().unwrap(), &other, None).unwrap_err();
     assert_eq!(error.kind, ErrorKind::InvalidInput);
 
     // A file on the disk that the catalog does not know.
@@ -289,6 +290,129 @@ fn atomic_write_replaces_or_leaves_no_trace() {
 #[test]
 fn document_with_no_source_cannot_make_a_first_save() {
     let fx = Fixture::new();
-    let error = plan_targets(&*fx.state.lock().unwrap(), &DocumentOrigin::default()).unwrap_err();
+    let error =
+        plan_targets(&*fx.state.lock().unwrap(), &DocumentOrigin::default(), None).unwrap_err();
     assert_eq!(error.kind, ErrorKind::InvalidInput);
+}
+
+#[test]
+fn save_as_makes_new_files_and_a_new_photo_and_keeps_the_old_ones() {
+    let fx = Fixture::new();
+    let first = save_snapshot(&fx.state, snapshot(document([0.2; 4]), fx.origin()), None).unwrap();
+    let count = fx.photo_count();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let origin = DocumentOrigin {
+        source_photo_id: Some(fx.source),
+        saved: Some(first.files.clone()),
+    };
+    let second = save_snapshot(
+        &fx.state,
+        snapshot(document([0.9; 4]), origin.clone()),
+        Some(elsewhere.path()),
+    )
+    .unwrap();
+    assert!(second.created);
+    assert_ne!(second.files.photo_id, first.files.photo_id);
+    assert_eq!(second.files.image_path, elsewhere.path().join("a-edit.tif"));
+    assert_eq!(
+        second.files.document_path,
+        elsewhere.path().join("a-edit.exdoc")
+    );
+    // The source folder has no new photo; the other folder has one.
+    assert_eq!(fx.photo_count(), count);
+    assert!(
+        fx.state
+            .lock()
+            .unwrap()
+            .find_photo_by_path(&second.files.image_path)
+            .unwrap()
+            .is_some()
+    );
+    // The first files are not changed.
+    let old = expose_raw::decode_path(&first.files.image_path).unwrap();
+    assert!(old.image.pixels()[0][0] < 0.5);
+    let store = fx.state.lock().unwrap();
+    let link = store.editor_output(second.files.photo_id).unwrap().unwrap();
+    assert_eq!(link.source_photo_id, Some(fx.source));
+    assert_eq!(link.document_path, second.files.document_path);
+    drop(store);
+
+    // A second "save as" to the same folder takes the next free name.
+    let third = save_snapshot(
+        &fx.state,
+        snapshot(document([0.9; 4]), origin),
+        Some(elsewhere.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        third.files.image_path,
+        elsewhere.path().join("a-edit-2.tif")
+    );
+}
+
+#[test]
+fn save_as_without_source_uses_the_stem_of_the_saved_image() {
+    let fx = Fixture::new();
+    let first = save_snapshot(&fx.state, snapshot(document([0.2; 4]), fx.origin()), None).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let origin = DocumentOrigin {
+        source_photo_id: None,
+        saved: Some(first.files),
+    };
+    let second = save_snapshot(
+        &fx.state,
+        snapshot(document([0.9; 4]), origin),
+        Some(elsewhere.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        second.files.image_path,
+        elsewhere.path().join("a-edit-edit.tif")
+    );
+}
+
+#[test]
+fn save_as_refuses_a_folder_that_is_not_an_existing_directory() {
+    let fx = Fixture::new();
+    let store = fx.state.lock().unwrap();
+    for folder in [
+        PathBuf::from("relative/dir"),
+        fx.path("missing"),
+        fx.path("a.jpg"),
+    ] {
+        let error = plan_targets(&*store, &fx.origin(), Some(&folder)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidInput, "{folder:?}");
+    }
+}
+
+#[test]
+fn save_as_into_the_original_folder_never_overwrites_the_original() {
+    let fx = Fixture::new();
+    let outcome = save_snapshot(
+        &fx.state,
+        snapshot(document([0.3; 4]), fx.origin()),
+        Some(fx.dir.path()),
+    )
+    .unwrap();
+    assert_eq!(outcome.files.image_path, fx.path("a-edit.tif"));
+    assert_eq!(fs::read(fx.path("a.jpg")).unwrap(), b"original");
+}
+
+#[test]
+fn record_at_a_known_image_path_fails_and_adds_no_rows() {
+    let fx = Fixture::new();
+    // The second record uses an image path that the first record added.
+    let targets = plan_targets(&*fx.state.lock().unwrap(), &fx.origin(), None).unwrap();
+    let mut store = fx.state.lock().unwrap();
+    let written = WrittenImage {
+        width: 4,
+        height: 3,
+        file_size: 1,
+        modified_ms: 1,
+    };
+    record_in_catalog(&mut *store, &targets, &fx.origin(), written).unwrap();
+    let count = store.list_folders().unwrap().len();
+    let error = record_in_catalog(&mut *store, &targets, &fx.origin(), written).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidInput);
+    assert_eq!(store.list_folders().unwrap().len(), count);
 }

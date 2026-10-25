@@ -138,7 +138,8 @@ export interface EditorApi {
   edit(documentId: number, edit: EditDto, gesture: number | null): Promise<DocumentInfo>;
   undo(documentId: number): Promise<DocumentInfo>;
   redo(documentId: number): Promise<DocumentInfo>;
-  save(documentId: number): Promise<SaveResult>;
+  /** Saves the document. With `folder` ("Save As"), it makes new files in that folder. */
+  save(documentId: number, folder?: string): Promise<SaveResult>;
   close(documentId: number): Promise<void>;
 }
 
@@ -149,7 +150,7 @@ export const editorApi: EditorApi = {
   edit: (documentId, edit, gesture) => invoke<DocumentInfo>('editor_edit', { documentId, edit, gesture }),
   undo: (documentId) => invoke<DocumentInfo>('editor_undo', { documentId }),
   redo: (documentId) => invoke<DocumentInfo>('editor_redo', { documentId }),
-  save: (documentId) => invoke<SaveResult>('editor_save', { documentId }),
+  save: (documentId, folder) => invoke<SaveResult>('editor_save', { documentId, folder: folder ?? null }),
   close: async (documentId) => {
     await invoke<null>('editor_close', { documentId });
   },

@@ -154,7 +154,7 @@ describe('LayersPanel save', () => {
     expect(state.textContent).toContain('Unsaved changes');
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await flush();
-    expect(api.save).toHaveBeenCalledWith(1);
+    expect(api.save).toHaveBeenCalledWith(1, undefined);
     expect(screen.getByTestId('editor-save-state').textContent?.trim()).toBe('Saved');
   });
 });
