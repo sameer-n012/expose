@@ -3,6 +3,7 @@
  *
  * - `Mod+E` (global): open the selected photo in the Editor.
  * - `Mod+S` (scope `editor`): save the document to the library.
+ * - `Mod+Shift+S` (scope `editor`): save as new files in a chosen folder.
  * - `Mod+Z`, `Mod+Shift+Z` (scope `editor`): undo and redo.
  * - `Mod+=`, `Mod+-`, `Mod+0`, `Mod+1` (scope `editor`): zoom in, zoom out,
  *   fit to window, 100 %.
@@ -12,6 +13,7 @@ import type { ShortcutAction } from '../shortcuts/registry';
 export const EDITOR_ACTION = {
   edit: 'editor.open',
   save: 'editor.save',
+  saveAs: 'editor.saveAs',
   undo: 'editor.undo',
   redo: 'editor.redo',
   zoomIn: 'editor.zoomIn',
@@ -23,6 +25,7 @@ export const EDITOR_ACTION = {
 /** The commands that the Editor actions call (the editor store has them). */
 export interface EditorCommands {
   save(): Promise<unknown>;
+  saveAs(): Promise<unknown>;
   undo(): void;
   redo(): void;
   zoomStep(direction: 1 | -1): void;
@@ -39,6 +42,7 @@ export function editInEditorAction(run: () => void): ShortcutAction {
 export function editorActions(commands: EditorCommands): ShortcutAction[] {
   return [
     { id: EDITOR_ACTION.save, label: 'Editor: save to library', scope: 'editor', defaultBinding: 'Mod+S', run: () => void commands.save() },
+    { id: EDITOR_ACTION.saveAs, label: 'Editor: save as…', scope: 'editor', defaultBinding: 'Mod+Shift+S', run: () => void commands.saveAs() },
     { id: EDITOR_ACTION.undo, label: 'Editor: undo', scope: 'editor', defaultBinding: 'Mod+Z', allowRepeat: true, run: () => commands.undo() },
     { id: EDITOR_ACTION.redo, label: 'Editor: redo', scope: 'editor', defaultBinding: 'Mod+Shift+Z', allowRepeat: true, run: () => commands.redo() },
     { id: EDITOR_ACTION.zoomIn, label: 'Editor: zoom in', scope: 'editor', defaultBinding: 'Mod+=', allowRepeat: true, run: () => commands.zoomStep(1) },

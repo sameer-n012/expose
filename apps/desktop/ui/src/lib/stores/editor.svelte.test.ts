@@ -130,6 +130,39 @@ describe('EditorStore save', () => {
     expect(toasts.items.at(-1)?.message).toBe('Save the document failed.');
   });
 
+  it('a failed plain save with an io error suggests Save As', async () => {
+    const { store, api, toasts } = setup();
+    await store.openPhoto(5);
+    api.save.mockRejectedValueOnce({ kind: 'io', message: 'read-only folder' });
+    expect(await store.save()).toBe(false);
+    expect(toasts.items.at(-1)?.message).toContain('Save As');
+  });
+
+  it('Save As asks for a folder and passes it to the save', async () => {
+    const { api, toasts, modules, library, onSaved } = setup();
+    const pickFolder = vi.fn(async () => '/elsewhere');
+    const store = new EditorStore({ library, modules: modules as never, toasts, api, onSaved, pickFolder });
+    await store.openPhoto(5);
+    expect(await store.saveAs()).toBe(true);
+    expect(api.save).toHaveBeenCalledWith(1, '/elsewhere');
+    expect(onSaved).toHaveBeenCalledOnce();
+  });
+
+  it('Save As does nothing when the folder dialog is cancelled', async () => {
+    const { api, toasts, modules, library } = setup();
+    const store = new EditorStore({ library, modules: modules as never, toasts, api, pickFolder: async () => null });
+    await store.openPhoto(5);
+    expect(await store.saveAs()).toBe(false);
+    expect(api.save).not.toHaveBeenCalled();
+  });
+
+  it('a plain save passes no folder', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    await store.save();
+    expect(api.save).toHaveBeenCalledWith(1, undefined);
+  });
+
   it('does nothing with no document', async () => {
     const { store, api } = setup();
     expect(await store.save()).toBe(false);
@@ -186,7 +219,7 @@ describe('EditorStore unsaved changes', () => {
     await tick();
     store.answerLeave('save');
     await opening;
-    expect(api.save).toHaveBeenCalledWith(1);
+    expect(api.save).toHaveBeenCalledWith(1, undefined);
     expect(api.save.mock.invocationCallOrder[0]).toBeLessThan(api.close.mock.invocationCallOrder[0] ?? 0);
     expect(store.photoId).toBe(6);
   });
