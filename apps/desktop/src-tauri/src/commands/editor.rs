@@ -181,6 +181,11 @@ async fn develop_document(
 /// the library, and records the link. A later save of the same document
 /// replaces the same two files and refreshes the thumbnail.
 ///
+/// With `folder` ("save as"), the save writes a new pair of files in that
+/// folder, makes a new library photo and link, and the document then
+/// belongs to the new files. The earlier files stay as they are. `folder`
+/// must be an absolute path of an existing directory.
+///
 /// The GPU composite runs on the render thread; the encode and the file
 /// writes run on a blocking thread, so frames keep coming.
 ///
@@ -193,12 +198,17 @@ pub async fn editor_save<R: Runtime>(
     app: AppHandle<R>,
     engine: State<'_, EditorEngine>,
     document_id: DocumentId,
+    folder: Option<String>,
 ) -> Result<SaveResult, CommandError> {
     let started = Instant::now();
     let snapshot = engine.snapshot_async(document_id).await?;
     let guard = SaveGuard::new(engine.inner(), document_id);
     let revision = snapshot.revision;
-    let outcome = with_catalog(app.clone(), move |state| save_snapshot(state, snapshot)).await?;
+    let folder = folder.map(PathBuf::from);
+    let outcome = with_catalog(app.clone(), move |state| {
+        save_snapshot(state, snapshot, folder.as_deref())
+    })
+    .await?;
     let info = guard.finish(revision, outcome.files.clone()).await?;
     warm_thumbnail(&app, outcome.files.photo_id);
     tracing::info!(
