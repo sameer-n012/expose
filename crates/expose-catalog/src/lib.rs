@@ -66,7 +66,8 @@ pub use import::{
 };
 pub use model::{
     AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, EditorOutput, Flag, Folder,
-    FolderId, FolderNode, ImageInfo, InvalidRating, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
+    FolderId, FolderNode, ImageInfo, InvalidRating, LabelUpdate, NewEditorOutput, NewPhoto, Photo,
+    PhotoId, Rating,
 };
 pub use paths::{build_folder_tree, folder_name, normalize_folder_path};
 pub use platform::{

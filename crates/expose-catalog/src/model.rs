@@ -237,6 +237,24 @@ pub struct EditorOutput {
     pub source_photo_id: Option<PhotoId>,
 }
 
+/// The data of a first editor save: the image file, its document, and the
+/// facts to store with them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEditorOutput {
+    /// The absolute path of the flattened image file.
+    pub image_path: std::path::PathBuf,
+    /// The absolute path of the editor document file.
+    pub document_path: std::path::PathBuf,
+    /// The size of the image file in bytes.
+    pub file_size: u64,
+    /// The modification time of the image file (Unix milliseconds).
+    pub file_modified_ms: i64,
+    /// The image information to store.
+    pub info: ImageInfo,
+    /// The photo that the document was opened from, if known.
+    pub source_photo_id: Option<PhotoId>,
+}
+
 /// The data of a file to add to the catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -14,7 +14,8 @@ pub use schema::{APPLICATION_ID, LATEST_VERSION};
 use crate::error::{CatalogError, Result};
 use crate::model::{
     AddOutcome, BatchInfoOutcome, ColorLabel, DevelopSettings, EditorOutput, Flag, Folder,
-    FolderId, FolderNode, ImageInfo, LabelUpdate, NewPhoto, Photo, PhotoId, Rating,
+    FolderId, FolderNode, ImageInfo, LabelUpdate, NewEditorOutput, NewPhoto, Photo, PhotoId,
+    Rating,
 };
 use crate::paths::{
     build_folder_tree, folder_name, is_valid_file_name, normalize_folder_path, path_text,
@@ -194,6 +195,16 @@ fn split_file_path(path: &Path) -> Result<(&Path, &str)> {
         .filter(|n| is_valid_file_name(n))
         .ok_or_else(|| invalid("the path has no valid file name"))?;
     Ok((folder, name))
+}
+
+fn check_image_info(info: &ImageInfo) -> Result<()> {
+    if info.width == Some(0) {
+        return Err(CatalogError::ZeroDimension { field: "width" });
+    }
+    if info.height == Some(0) {
+        return Err(CatalogError::ZeroDimension { field: "height" });
+    }
+    Ok(())
 }
 
 fn photo_id_by_path(conn: &Connection, path: &Path) -> Result<Option<PhotoId>> {
@@ -706,6 +717,88 @@ impl CatalogStore for SqliteStore {
             output.source_photo_id.map(|p| p.0),
             now
         ])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn add_editor_output(&mut self, new: &NewEditorOutput) -> Result<PhotoId> {
+        check_image_info(&new.info)?;
+        let image_path = normalize_folder_path(&new.image_path)?;
+        let document_path = normalize_folder_path(&new.document_path)?;
+        let document_text = path_text(&document_path)?;
+        let (folder_path, file_name) = split_file_path(&image_path)?;
+        let created_ms = self.clock.now_ms();
+        // Dropping the transaction on an error rolls everything back.
+        let tx = self.conn.transaction()?;
+        if photo_id_by_path(&tx, &image_path)?.is_some() {
+            return Err(CatalogError::InvalidPath {
+                path: image_path.clone(),
+                reason: "a photo already exists at this path",
+            });
+        }
+        if let Some(source) = new.source_photo_id {
+            if !photo_exists(&tx, source)? {
+                return Err(CatalogError::PhotoNotFound(source));
+            }
+        }
+        let folder_id = ensure_folder(&tx, folder_path)?;
+        tx.prepare_cached(
+            "INSERT INTO photos \
+                 (folder_id, file_name, file_size, file_modified_ms, imported_ms, \
+                  capture_time_ms, width, height) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?
+        .execute(params![
+            folder_id.0,
+            file_name,
+            new.file_size,
+            new.file_modified_ms,
+            created_ms,
+            new.info.capture_time_ms,
+            new.info.width,
+            new.info.height
+        ])?;
+        let photo_id = PhotoId(tx.last_insert_rowid());
+        tx.prepare_cached(
+            "INSERT INTO editor_outputs \
+                 (photo_id, document_path, source_photo_id, created_ms, updated_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+        )?
+        .execute(params![
+            photo_id.0,
+            document_text,
+            new.source_photo_id.map(|p| p.0),
+            created_ms
+        ])?;
+        tx.commit()?;
+        Ok(photo_id)
+    }
+
+    fn update_photo_file(
+        &mut self,
+        id: PhotoId,
+        file_size: u64,
+        file_modified_ms: i64,
+        info: ImageInfo,
+    ) -> Result<()> {
+        check_image_info(&info)?;
+        let tx = self.conn.transaction()?;
+        let changed = tx
+            .prepare_cached(
+                "UPDATE photos SET file_size = ?1, file_modified_ms = ?2, \
+                 capture_time_ms = ?3, width = ?4, height = ?5 WHERE id = ?6",
+            )?
+            .execute(params![
+                file_size,
+                file_modified_ms,
+                info.capture_time_ms,
+                info.width,
+                info.height,
+                id.0
+            ])?;
+        if changed == 0 {
+            return Err(CatalogError::PhotoNotFound(id));
+        }
         tx.commit()?;
         Ok(())
     }
