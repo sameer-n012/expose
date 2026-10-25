@@ -129,7 +129,9 @@
 //! - Curves: the table interpolation adds an error of less than about
 //!   `1e-6` where the curve is smooth. At a curve end point that is not on
 //!   a table sample (`x` not a multiple of `1 / 4096`), the error is at
-//!   most about `slope / 16384`.
+//!   most about `slope / 16384` in the encoded values (the decode to
+//!   linear multiplies it by up to about 2.3). Measured with slope 1.25
+//!   near white: 1.7e-4 in linear values.
 //! - Steps (hard mix, threshold contrast, dissolve, color selection, and
 //!   the branches of some blend modes) can give a different result when a
 //!   value is within float error of the step.
@@ -2273,6 +2275,83 @@ mod tests {
         check(&mut comp, &doc, "after clear");
         // a, b, c, d, mask of g.
         assert_eq!(comp.layer_uploads(), uploads + 5);
+    }
+
+    /// Curve end points that are not on a table sample (`x` not a multiple
+    /// of `1 / 4096`). The table interpolation rounds the corner at the end
+    /// point. The module documentation gives the bound: `slope / 16384`
+    /// in the encoded values.
+    #[test]
+    fn curve_end_points_between_table_samples() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        // The sRGB decode: the adjustment reads the encoded values.
+        let decode = |v: f32| {
+            if v <= 0.040_45 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let (lo, hi) = (0.1003_f32, 0.9001_f32);
+        let cell = 1.0 / 4096.0;
+        let (w, h) = (256_u32, 64_u32);
+        let n = (w * h) as f32;
+        // Red: dense near `lo`; green: dense near `hi`; blue: a full ramp.
+        let pixels = (0..w * h)
+            .map(|i| {
+                let t = i as f32 / n;
+                let near = (t - 0.5) * 4.0 * cell;
+                [decode(lo + near), decode(hi + near), decode(t), 1.0]
+            })
+            .collect();
+        let image = WorkingImage::from_pixels(w, h, pixels).unwrap();
+        let mut doc = empty_doc(w, h, BlendSpace::Perceptual);
+        add(
+            &mut doc,
+            None,
+            LayerContent::Pixel(PixelLayer::new(image, (0, 0)).unwrap()),
+        );
+        let line = vec![CurvePoint::new(lo, 0.0), CurvePoint::new(hi, 1.0)];
+        let c = Curves {
+            master: vec![
+                CurvePoint::new(0.000_07, 0.0),
+                CurvePoint::new(0.999_93, 1.0),
+            ],
+            red: line.clone(),
+            green: line,
+            blue: vec![
+                CurvePoint::new(0.0301, 0.1),
+                CurvePoint::new(0.5, 0.6),
+                CurvePoint::new(0.9702, 0.95),
+            ],
+        };
+        add(
+            &mut doc,
+            None,
+            LayerContent::Adjustment(Adjustment::Curves(c)),
+        );
+
+        // The largest slope is about 1.25 (red and green). The decode at
+        // the output multiplies the error by at most about 2.3.
+        let slope = 1.0 / (hi - lo) * 1.0001;
+        let bound = 2.3 * slope / 16384.0 + TOL;
+        let cpu = composite(&doc, doc.bounds()).unwrap();
+        let gpu = pollster::block_on(comp.composite_gpu_image(&ctx, &doc, doc.bounds())).unwrap();
+        let worst = cpu
+            .as_slice()
+            .iter()
+            .zip(gpu.as_slice())
+            .map(|(c, g)| (g - c).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!(
+            "curve_end_points_between_table_samples: largest error {worst:e}, bound {bound:e}"
+        );
+        assert!(worst <= bound, "largest error {worst:e} above {bound:e}");
+        // The samples near the end points show the interpolation error
+        // (measured: about 1.7e-4, near the bound). It is larger than the
+        // tolerance of the smooth parts.
+        assert!(worst > TOL, "the test does not reach an end point");
     }
 
     #[test]
