@@ -50,8 +50,14 @@ A new table records, for an editor output photo: the photo ID of the TIFF, the `
 - Window close with unsaved changes: a close guard asks Save / Don't save / Cancel. It needs the `core:window:allow-destroy` permission.
 - A linked photo with a missing or damaged `.exdoc` gives an error. The editor does not open the flattened TIFF in its place.
 
+### Follow-ups (editor-save-followups, 2026-10-25)
+
+- A first save records the catalog rows in one transaction: `CatalogStore::add_editor_output(&NewEditorOutput)` (find or add the folder, add the photo, image info, link). A duplicate image path gives `InvalidPath`; no rows stay after an error. A re-save calls `update_photo_file` (file size, file time, image info) in one transaction.
+- **Save As** (`Mod+Shift+S`, Layers panel button): `editor_save(documentId, folder)`. The folder must be an existing absolute directory. Save As is a first save in that folder: new `<stem>-edit[-N]` names, a new photo and a new link; `source_photo_id` stays. The old files stay. Later plain saves write the new files. The stem comes from the source photo, or from the saved image stem if no source is known.
+- A plain save that fails with an `io` error tells the user to try Save As.
+
 ## Consequences
 
 - The `.tif` duplicates the composite in a second file; this is the cost of a photo that all other modules can use without the editor.
 - `.exdoc` files are large (full `f32`), but they are lossless. A later version can add `f16` storage.
-- Writing next to the original needs write access to the photo folder. If the folder is read-only, the save fails with a clear error; a "save as" location is later work.
+- Writing next to the original needs write access to the photo folder. If the folder is read-only, the save fails with a clear error, and the user can use Save As.
