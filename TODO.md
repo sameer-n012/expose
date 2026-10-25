@@ -10,7 +10,8 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; no worktrees)
+- **editor-save-followups** (agent, branch `feat/editor-save-followups`) — one catalog transaction for the first save, file facts on re-save, "Save As…" to another folder.
+- **editor-gpu-followups** (agent, branch `feat/editor-gpu-followups`) — composite only from the changed layer up (cached "below" composite), curve table upload on change, curve end-point test, doc link warnings.
 
 ## Next (suggested order)
 
@@ -19,7 +20,7 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 1. [ ] **editor-save-check** (operator) — check in the real webview: `Mod+S` writes `<name>-edit.exdoc` + `<name>-edit.tif` next to the original, the TIFF appears in the library with a "Layers" badge, "Edit in Editor" on it reopens the layers, a re-save overwrites and refreshes the thumbnail, and the unsaved-changes question on photo switch and on window close. After the check: mark 3.1 "Open and save native layered document format" `[x]`.
 2. [ ] **editor-save-followups** (S) — one catalog transaction for the first save (`add_photos` + `set_image_info` + `set_editor_output`); a catalog method to update `file_size`/`file_modified_ms` of a photo on re-save; "save as" to another folder (a read-only photo folder fails now).
 3. [ ] **editor-layers-ui** (S) — remaining P1 layer items in the UI: add an empty pixel layer, lock toggles (the model has `set_locks`), new document dialog (`DocumentSpec`), levels and curves editors for adjustment layers (the model and compositor support them). Check whether the `EditDto` contract needs new variants (shell + UI together).
-4. [ ] **editor-tools** (O) — split before work: (a) layer masks in the UI (add/delete/enable, show mask); (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke); (c) selections (rect/ellipse/lasso, selection as a mask). Needs a short design ADR first (stroke transport UI → shell, partial texture updates in the cache).
+4. [ ] **editor-tools** (O) — split before work: (a) layer masks in the UI (add/delete/enable, show mask); (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke); (c) selections (rect/ellipse/lasso, selection as a mask). Design draft: ADR 0016 (Proposed) — order masks UI → selections → brushes; points (not pixels) over the IPC; selection outline as polygons; partial uploads from per-layer changed rectangles.
 5. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
 
 ### Follow-ups from editor-gpu (ADR 0012)
