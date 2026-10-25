@@ -28,7 +28,8 @@
 //! - Curves use a table of [`CURVE_TABLE_SIZE`] samples for each channel
 //!   (the color curve, then the master curve), with linear interpolation.
 //!   The other adjustments use the exact formulas. The table (64 KiB) is
-//!   uploaded at each composite; it is not cached.
+//!   in the layer texture cache with the curves that made it. It is
+//!   uploaded again only when the curves change.
 //! - Free region-size buffers stay in a pool in the compositor, so that the
 //!   next call with the same region size does not make new textures.
 //!
@@ -139,7 +140,7 @@ use bytemuck::{Pod, Zeroable};
 use expose_core::buffer::{Rect, WorkingImage};
 use expose_gpu::{CHANNELS, GpuContext, GpuImage, ImageFormat, Kernel};
 
-use crate::adjust::{Adjustment, Prepared, PreparedAdjustment};
+use crate::adjust::{Adjustment, Curves, MonotoneCubic, Prepared, PreparedAdjustment};
 use crate::blend::{BlendMode, BlendSpace};
 use crate::document::Document;
 use crate::error::{EditorError, EditorResult};
@@ -421,11 +422,21 @@ struct CachedPart {
     image: GpuImage,
 }
 
+/// The curve table of a curves adjustment layer.
+#[derive(Debug)]
+struct CurveTable {
+    /// The curves of the table.
+    curves: Curves,
+    /// [`CURVE_TABLE_SIZE`] x 1 texels: red, green, blue, unused.
+    image: GpuImage,
+}
+
 /// The cached textures of one layer.
 #[derive(Debug, Default)]
 struct LayerEntry {
     pixels: Option<CachedPart>,
     mask: Option<CachedPart>,
+    curve: Option<CurveTable>,
 }
 
 /// The layer texture cache. See the module documentation.
@@ -434,6 +445,8 @@ struct LayerCache {
     entries: HashMap<LayerId, LayerEntry>,
     /// The number of pixel and mask uploads since the compositor was made.
     uploads: u64,
+    /// The number of curve table uploads since the compositor was made.
+    curve_uploads: u64,
 }
 
 /// The cached composite of the full canvas and its view pyramid.
@@ -612,6 +625,12 @@ impl GpuCompositor {
         self.cache.uploads
     }
 
+    /// Returns the number of curve table uploads since the compositor was
+    /// made. A curves layer uploads its table only when its curves change.
+    pub const fn curve_uploads(&self) -> u64 {
+        self.cache.curve_uploads
+    }
+
     /// Returns the number of full-canvas composites that
     /// [`GpuCompositor::render_view`] made since the compositor was made.
     /// Use it to check the cache (for example, a pan must not composite).
@@ -638,7 +657,9 @@ impl GpuCompositor {
             e.pixels
                 .iter()
                 .chain(e.mask.iter())
-                .map(|part| bytes(&part.image))
+                .map(|part| &part.image)
+                .chain(e.curve.iter().map(|c| &c.image))
+                .map(bytes)
         });
         let view = self
             .view
@@ -1060,26 +1081,36 @@ impl LayerCache {
     /// the textures whose values changed.
     fn prune(&mut self, document: &Document) {
         // Layer ID -> (pixel version if a pixel layer, mask version if the
-        // layer has a mask).
-        let mut live: HashMap<LayerId, (Option<u64>, Option<u64>)> = HashMap::new();
+        // layer has a mask, curves if a curves layer). `visit` gives
+        // short-lived references, so the curves are copied (a few points).
+        type Live = (Option<u64>, Option<u64>, Option<Curves>);
+        let mut live: HashMap<LayerId, Live> = HashMap::new();
         for layer in document.layers() {
             layer.visit(&mut |l| {
                 let pixels = l.as_pixel().map(|_| l.pixel_version());
                 let mask = l.mask().map(|_| l.mask_version());
-                live.insert(l.id(), (pixels, mask));
+                let curves = match l.kind() {
+                    LayerKind::Adjustment(Adjustment::Curves(c)) => Some(c.clone()),
+                    _ => None,
+                };
+                live.insert(l.id(), (pixels, mask, curves));
             });
         }
         self.entries.retain(|id, entry| {
-            let Some(&(pixels, mask)) = live.get(id) else {
+            let Some((pixels, mask, curves)) = live.get(id) else {
                 return false;
             };
+            let (pixels, mask, curves) = (*pixels, *mask, curves.as_ref());
             if entry.pixels.as_ref().map(|p| p.version) != pixels {
                 entry.pixels = None;
             }
             if entry.mask.as_ref().map(|m| m.version) != mask {
                 entry.mask = None;
             }
-            entry.pixels.is_some() || entry.mask.is_some()
+            if entry.curve.as_ref().map(|c| &c.curves) != curves {
+                entry.curve = None;
+            }
+            entry.pixels.is_some() || entry.mask.is_some() || entry.curve.is_some()
         });
     }
 
@@ -1097,7 +1128,9 @@ impl LayerCache {
         layer: &Layer,
         area: Area,
     ) -> EditorResult<StepTextures<'s>> {
-        let Self { entries, uploads } = self;
+        let Self {
+            entries, uploads, ..
+        } = self;
         let entry = entries.entry(layer.id()).or_default();
         let source = match layer.as_pixel() {
             Some(p) => {
@@ -1110,6 +1143,7 @@ impl LayerCache {
                     return Ok(StepTextures {
                         source: None,
                         mask: None,
+                        table: None,
                     });
                 };
                 let wanted = Wanted {
@@ -1160,7 +1194,53 @@ impl LayerCache {
             }
             None => None,
         };
-        Ok(StepTextures { source, mask })
+        // `ensure_curve_table` stored the table of a curves layer, and
+        // `prune` dropped the tables of other layers.
+        let table = entry.curve.as_ref().map(|c| &c.image);
+        Ok(StepTextures {
+            source,
+            mask,
+            table,
+        })
+    }
+
+    /// Makes sure that the entry of layer `id` has the curve table of
+    /// `curves`. Uploads the table only if the curves changed. `master`
+    /// and `channels` are the prepared splines of `curves`.
+    async fn ensure_curve_table(
+        &mut self,
+        ctx: &GpuContext,
+        id: LayerId,
+        curves: &Curves,
+        master: Option<&MonotoneCubic>,
+        channels: &[MonotoneCubic; 3],
+    ) -> EditorResult<()> {
+        let entry = self.entries.entry(id).or_default();
+        if entry.curve.as_ref().is_some_and(|c| c.curves == *curves) {
+            return Ok(());
+        }
+        // The old table is dropped before the new texture is made.
+        entry.curve = None;
+        let last = CURVE_TABLE_SIZE - 1;
+        let mut data = Vec::with_capacity(CURVE_TABLE_SIZE as usize * CHANNELS);
+        for i in 0..CURVE_TABLE_SIZE {
+            // `i` and `last` are at most 4096, so they are exact in f32,
+            // and the quotient is in 0..=1.
+            #[allow(clippy::cast_precision_loss)]
+            let x = i as f32 / last as f32;
+            for curve in channels {
+                let y = curve.eval(x);
+                data.push(master.map_or(y, |m| m.eval(y)));
+            }
+            data.push(0.0);
+        }
+        let image = GpuImage::from_rgba_f32(ctx, CURVE_TABLE_SIZE, 1, FORMAT, &data).await?;
+        self.curve_uploads += 1;
+        entry.curve = Some(CurveTable {
+            curves: curves.clone(),
+            image,
+        });
+        Ok(())
     }
 }
 
@@ -1222,6 +1302,8 @@ struct Wanted {
 struct StepTextures<'a> {
     source: Option<&'a CachedPart>,
     mask: Option<&'a CachedPart>,
+    /// The curve table of a curves layer.
+    table: Option<&'a GpuImage>,
 }
 
 /// Returns the cached part in `slot` if it has the wanted version and
@@ -1442,9 +1524,17 @@ impl<'c> Run<'c> {
                 }
                 LayerKind::Adjustment(a) => {
                     let prepared = a.prepare()?;
-                    let table = self.adjust_params(&prepared, &mut params).await?;
-                    let table = table.as_ref().unwrap_or(placeholder);
+                    Self::adjust_params(&prepared, &mut params);
+                    // `prepare` gives `Prepared::Curves` for curves.
+                    if let (Adjustment::Curves(c), Prepared::Curves { master, channels }) =
+                        (a, &prepared.inner)
+                    {
+                        self.cache
+                            .ensure_curve_table(ctx, layer.id(), c, master.as_ref(), channels)
+                            .await?;
+                    }
                     let tex = self.cache.textures(ctx, layer, area).await?;
+                    let table = tex.table.unwrap_or(placeholder);
                     let mask = set_mask_params(layer, tex.mask, &mut params)?;
                     let mask = mask.unwrap_or(placeholder);
                     self.bufs
@@ -1492,19 +1582,14 @@ impl<'c> Run<'c> {
         Ok(cur)
     }
 
-    /// Sets the adjustment parameters. For curves, uploads and returns the
-    /// curve table.
-    async fn adjust_params(
-        &self,
-        prepared: &PreparedAdjustment,
-        params: &mut Params,
-    ) -> EditorResult<Option<GpuImage>> {
+    /// Sets the adjustment parameters. The curve table of a curves
+    /// adjustment comes from the layer cache.
+    fn adjust_params(prepared: &PreparedAdjustment, params: &mut Params) {
         match &prepared.inner {
             Prepared::BrightnessContrast(bc) => {
                 params.flags[3] = ADJUST_BRIGHTNESS_CONTRAST;
                 let (k, threshold) = bc.k.map_or((0.0, 1.0), |k| (k, 0.0));
                 params.adj[0] = [bc.brightness, k, threshold, 0.0];
-                Ok(None)
             }
             Prepared::Levels(l) => {
                 params.flags[3] = ADJUST_LEVELS;
@@ -1514,27 +1599,10 @@ impl<'c> Run<'c> {
                 params.adj[2] = ch.map(|c| c.gamma);
                 params.adj[3] = ch.map(|c| c.output_black);
                 params.adj[4] = ch.map(|c| c.output_white);
-                Ok(None)
             }
-            Prepared::Curves { master, channels } => {
+            Prepared::Curves { .. } => {
+                // The curve table comes from the layer cache.
                 params.flags[3] = ADJUST_CURVES;
-                let last = CURVE_TABLE_SIZE - 1;
-                let mut data = Vec::with_capacity(CURVE_TABLE_SIZE as usize * CHANNELS);
-                for i in 0..CURVE_TABLE_SIZE {
-                    // `i` and `last` are at most 4096, so they are exact in
-                    // f32, and the quotient is in 0..=1.
-                    #[allow(clippy::cast_precision_loss)]
-                    let x = i as f32 / last as f32;
-                    for curve in channels.iter() {
-                        let y = curve.eval(x);
-                        data.push(master.as_ref().map_or(y, |m| m.eval(y)));
-                    }
-                    data.push(0.0);
-                }
-                let table =
-                    GpuImage::from_rgba_f32(self.bufs.ctx, CURVE_TABLE_SIZE, 1, FORMAT, &data)
-                        .await?;
-                Ok(Some(table))
             }
             Prepared::HueSaturation {
                 matrix,
@@ -1546,7 +1614,6 @@ impl<'c> Run<'c> {
                     *dst = [row[0], row[1], row[2], 0.0];
                 }
                 params.adj[3] = [*saturation, *lightness, 0.0, 0.0];
-                Ok(None)
             }
         }
     }
@@ -2206,6 +2273,62 @@ mod tests {
         check(&mut comp, &doc, "after clear");
         // a, b, c, d, mask of g.
         assert_eq!(comp.layer_uploads(), uploads + 5);
+    }
+
+    #[test]
+    fn curve_table_uploads_only_after_a_curve_change() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(17);
+        let mut doc = empty_doc(24, 20, BlendSpace::Perceptual);
+        add_pixel(&mut doc, &mut rng, None, (24, 20), (0, 0));
+        let a = add(
+            &mut doc,
+            None,
+            LayerContent::Adjustment(Adjustment::Curves(curves())),
+        );
+        let check = |comp: &mut GpuCompositor, doc: &Document, what: &str| {
+            compare(&ctx, comp, doc, doc.bounds(), false, TOL, what);
+            compare(&ctx, comp, doc, Rect::new(2, 3, 10, 9), false, TOL, what);
+        };
+
+        check(&mut comp, &doc, "initial");
+        assert_eq!(comp.curve_uploads(), 1);
+        // Property changes and equal curves do not upload.
+        doc.set_opacity(a, 0.5).unwrap();
+        doc.set_blend_mode(a, BlendMode::Overlay).unwrap();
+        doc.set_adjustment(a, Adjustment::Curves(curves())).unwrap();
+        check(&mut comp, &doc, "props");
+        assert_eq!(comp.curve_uploads(), 1);
+        // New curves upload once.
+        let mut changed = curves();
+        changed.green[1] = CurvePoint::new(1.0, 0.7);
+        doc.set_adjustment(a, Adjustment::Curves(changed.clone()))
+            .unwrap();
+        check(&mut comp, &doc, "new curves");
+        check(&mut comp, &doc, "new curves again");
+        assert_eq!(comp.curve_uploads(), 2);
+        // A different adjustment kind drops the table; curves again upload.
+        let before = comp.cache_memory_bytes();
+        doc.set_adjustment(a, Adjustment::Levels(levels())).unwrap();
+        check(&mut comp, &doc, "levels");
+        assert!(
+            comp.cache_memory_bytes() < before,
+            "the table was not dropped"
+        );
+        doc.set_adjustment(a, Adjustment::Curves(changed)).unwrap();
+        check(&mut comp, &doc, "curves again");
+        assert_eq!(comp.curve_uploads(), 3);
+        // Two curves layers have one table each.
+        let b = add(
+            &mut doc,
+            None,
+            LayerContent::Adjustment(Adjustment::Curves(curves())),
+        );
+        doc.set_opacity(b, 0.6).unwrap();
+        check(&mut comp, &doc, "two layers");
+        check(&mut comp, &doc, "two layers again");
+        assert_eq!(comp.curve_uploads(), 4);
     }
 
     fn view(origin_x: f64, origin_y: f64, scale: f64, width: u32, height: u32) -> ViewSpec {
