@@ -16,15 +16,12 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [x] **editor-save-check** (operator, 2026-10-25: "save seems to work"; Save As not reported separately) — check in the real webview: `Mod+S` writes `<name>-edit.exdoc` + `<name>-edit.tif` next to the original, the TIFF appears in the library with a "Layers" badge, "Edit in Editor" on it reopens the layers, a re-save overwrites and refreshes the thumbnail, and the unsaved-changes question on photo switch and on window close; also Save As… (`Mod+Shift+S`) to another folder (PR #52). After the check: mark 3.1 "Open and save native layered document format" `[x]`.
-2. [x] **editor-save-followups** (PR #52) — `add_editor_output` (one transaction), `update_photo_file` on re-save, Save As… to another folder (ADR 0015, "Follow-ups").
-3. [ ] **editor-layers-ui** (S) — remaining P1 layer items in the UI: add an empty pixel layer, lock toggles (the model has `set_locks`), new document dialog (`DocumentSpec`), levels and curves editors for adjustment layers (the model and compositor support them). Check whether the `EditDto` contract needs new variants (shell + UI together).
-4. [ ] **editor-tools** (O) — split before work: (a) layer masks in the UI (add/delete/enable, show mask); (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke); (c) selections (rect/ellipse/lasso, selection as a mask). Design draft: ADR 0016 (Proposed) — order masks UI → selections → brushes; points (not pixels) over the IPC; selection outline as polygons; partial uploads from per-layer changed rectangles.
-5. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
+1. [ ] **editor-layers-ui** (S) — remaining P1 layer items in the UI: add an empty pixel layer, lock toggles (the model has `set_locks`), new document dialog (`DocumentSpec`), levels and curves editors for adjustment layers (the model and compositor support them). Check whether the `EditDto` contract needs new variants (shell + UI together).
+2. [ ] **editor-tools** (O) — split before work: (a) layer masks in the UI (add/delete/enable, show mask); (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke); (c) selections (rect/ellipse/lasso, selection as a mask). Design draft: ADR 0016 (Proposed) — order masks UI → selections → brushes; points (not pixels) over the IPC; selection outline as polygons; partial uploads from per-layer changed rectangles.
+3. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
-- [x] **editor-gpu-followups** (PR #53) — below snapshot in `render_view` (repeated slider step 62 → ~29 ms at 4096², +256 MiB), curve table cache, curve end-point test, doc links fixed (ADR 0014).
 - [ ] **editor-gpu-followups-2** — the first step on a new layer is a full composite (70–79 ms); composite and rebuild the pyramid only in the changed area; GPU memory about 2.6 GiB for a 4096² 10-layer document (sparse tiles; `rgba16float` fails the 5e-5 CPU tolerance at 2.6e-4 — operator decision if a looser tolerance is acceptable).
 
 ### Follow-ups from merged work
@@ -55,6 +52,9 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 ## Done
 
+- [x] **editor-gpu-followups** (PR #53, ADR 0014) — below snapshot in `render_view` (repeated slider step 62 → ~29 ms at 4096², +256 MiB), curve table cache, curve end-point test, doc links fixed.
+- [x] **editor-save-followups** (PR #52, ADR 0015 "Follow-ups"; operator check 2026-10-25) — `add_editor_output` (one transaction), `update_photo_file` on re-save, Save As… (`Mod+Shift+S`) to another folder.
+- [x] **editor-save-check** (operator, 2026-10-25) — save, re-save, "Layers" badge, reopen of the layers, unsaved-changes question, and Save As work in the real webview. 3.1 "Open and save native layered document format" is `[x]`.
 - [x] **editor first version** (PRs #43–#46, ADRs 0012–0014; operator check 2026-10-10) — `GpuCompositor` (matches the CPU `composite`); revision + layer content versions, layer texture cache, `render_view` (pan 1–2 ms at 4096²), `History::push_merge`; Editor UI (canvas zoom/pan, layers panel, adjustment layers, undo/redo, `Mod+E`); `EditorEngine` + `editor_open/render/edit/undo/redo/close` (own render thread and `GpuContext`, history 50 steps).
 - [x] **editor save** (PRs #47–#50, ADR 0015; operator check 2026-10-25) — catalog `editor_outputs` (schema 2); `.exdoc` format (`expose_editor::file`), `Document::from_layer`/`layer_by_number`; `editor_save` (`.exdoc` + 16-bit Rec. 2020 TIFF next to the original, atomic writes, import + link, overwrite only own outputs), linked photos reopen their `.exdoc`, `Mod+S`, unsaved-changes question, "Layers" grid badge.
 
