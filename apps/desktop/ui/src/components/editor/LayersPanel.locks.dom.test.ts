@@ -28,7 +28,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 }
 
 function doc(layers: LayerInfo[], revision = 0): DocumentInfo {
-  return { documentId: 1, width: 100, height: 80, layers, canUndo: false, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1 };
+  return { documentId: 1, width: 100, height: 80, layers, canUndo: false, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0 };
 }
 
 async function makeStore(layers: LayerInfo[]) {
@@ -42,6 +42,7 @@ async function makeStore(layers: LayerInfo[]) {
     redo: vi.fn(async () => doc(layers, ++revision)),
     save: vi.fn(),
     close: vi.fn(async () => undefined),
+    selectionOutline: vi.fn(async () => ({ selectionVersion: 0, step: 1, contours: [] })),
   } satisfies EditorApi;
   const store = new EditorStore({
     library: { focusIndex: null, photoAt: () => undefined, selectedIds: [] },

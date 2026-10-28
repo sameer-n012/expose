@@ -8,10 +8,15 @@
  * - `Mod+S` (scope `editor`): save the document to the library.
  * - `Mod+Shift+S` (scope `editor`): save as new files in a chosen folder.
  * - `Mod+Z`, `Mod+Shift+Z` (scope `editor`): undo and redo.
+ * - `Mod+A`, `Mod+D`, `Mod+Shift+I`, `Shift+F6` (scope `editor`): select all,
+ *   deselect, invert the selection, open the Feather dialog.
+ * - `M`, `L`, `H` (scope `editor`): marquee tool (rectangle, then ellipse),
+ *   polygon lasso, hand.
  * - `Mod+=`, `Mod+-`, `Mod+0`, `Mod+1` (scope `editor`): zoom in, zoom out,
  *   fit to window, 100 %.
  */
 import type { ShortcutAction } from '../shortcuts/registry';
+import type { EditorTool } from './selection';
 
 export const EDITOR_ACTION = {
   edit: 'editor.open',
@@ -26,6 +31,13 @@ export const EDITOR_ACTION = {
   newDocument: 'editor.newDocument',
   newLayer: 'editor.newLayer',
   showMask: 'editor.showMask',
+  selectAll: 'editor.selectAll',
+  deselect: 'editor.deselect',
+  invertSelection: 'editor.invertSelection',
+  featherSelection: 'editor.featherSelection',
+  marqueeTool: 'editor.marqueeTool',
+  lassoTool: 'editor.lassoTool',
+  handTool: 'editor.handTool',
 } as const;
 
 /** The commands that the Editor actions call (the editor store has them). */
@@ -40,6 +52,12 @@ export interface EditorCommands {
   requestNewDocument(): void;
   addPixelLayer(): void;
   toggleShowMask(): void;
+  selectAll(): void;
+  deselect(): void;
+  invertSelection(): void;
+  openFeatherDialog(): void;
+  cycleMarquee(): void;
+  setTool(tool: EditorTool): void;
 }
 
 /** The action that opens the selected photo in the Editor. The shell knows the photo. */
@@ -55,6 +73,14 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     { id: EDITOR_ACTION.newLayer, label: 'Editor: new layer', scope: 'editor', defaultBinding: 'Mod+Shift+N', run: () => commands.addPixelLayer() },
     // The store ignores the key when the selected layer has no mask.
     { id: EDITOR_ACTION.showMask, label: 'Editor: show layer mask', scope: 'editor', defaultBinding: '\\', run: () => commands.toggleShowMask() },
+    // The store does nothing for deselect, invert, and feather when there is no selection.
+    { id: EDITOR_ACTION.selectAll, label: 'Editor: select all', scope: 'editor', defaultBinding: 'Mod+A', run: () => commands.selectAll() },
+    { id: EDITOR_ACTION.deselect, label: 'Editor: deselect', scope: 'editor', defaultBinding: 'Mod+D', run: () => commands.deselect() },
+    { id: EDITOR_ACTION.invertSelection, label: 'Editor: invert selection', scope: 'editor', defaultBinding: 'Mod+Shift+I', run: () => commands.invertSelection() },
+    { id: EDITOR_ACTION.featherSelection, label: 'Editor: feather selection…', scope: 'editor', defaultBinding: 'Shift+F6', run: () => commands.openFeatherDialog() },
+    { id: EDITOR_ACTION.marqueeTool, label: 'Editor: marquee tool (rectangle, ellipse)', scope: 'editor', defaultBinding: 'M', run: () => commands.cycleMarquee() },
+    { id: EDITOR_ACTION.lassoTool, label: 'Editor: polygon lasso tool', scope: 'editor', defaultBinding: 'L', run: () => commands.setTool('polygonLasso') },
+    { id: EDITOR_ACTION.handTool, label: 'Editor: hand tool', scope: 'editor', defaultBinding: 'H', run: () => commands.setTool('hand') },
     { id: EDITOR_ACTION.save, label: 'Editor: save to library', scope: 'editor', defaultBinding: 'Mod+S', run: () => void commands.save() },
     { id: EDITOR_ACTION.saveAs, label: 'Editor: save as…', scope: 'editor', defaultBinding: 'Mod+Shift+S', run: () => void commands.saveAs() },
     { id: EDITOR_ACTION.undo, label: 'Editor: undo', scope: 'editor', defaultBinding: 'Mod+Z', allowRepeat: true, run: () => commands.undo() },

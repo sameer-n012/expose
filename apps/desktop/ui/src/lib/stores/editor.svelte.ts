@@ -31,8 +31,12 @@ import {
   type MaskFillId,
   type NewDocumentSpec,
   type SaveResult,
+  type SelectionModeId,
+  type SelectionOutline,
+  type SelectionShapeDto,
 } from '../editor/api';
-import { NO_LOCKS, allLayerIds, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
+import { clampFeather, cycleMarquee, type EditorTool } from '../editor/selection';
+import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
 import {
   clampView,
@@ -119,6 +123,13 @@ export class EditorStore {
   leavePrompt = $state.raw<LeavePrompt | null>(null);
   /** True while the New document dialog is open. */
   newDocumentOpen = $state(false);
+  /** The tool of the canvas. */
+  tool = $state<EditorTool>('hand');
+  /** The feather of new selections, 0..250 px. */
+  feather = $state(0);
+  antiAlias = $state(true);
+  /** True while the Feather dialog is open. */
+  featherDialogOpen = $state(false);
 
   readonly #library: EditorStoreOptions['library'];
   readonly #modules: EditorStoreOptions['modules'];
@@ -259,6 +270,96 @@ export class EditorStore {
   setMaskEnabled(layerId: number, enabled: boolean): void {
     if (this.info !== null && maskCommands(this.info.layers, layerId).canToggle) {
       this.edit({ type: 'setMaskEnabled', layerId, enabled });
+    }
+  }
+
+  // ---- Selection ----
+
+  /** True if the open document has a selection. */
+  get hasSelection(): boolean {
+    return this.info?.hasSelection ?? false;
+  }
+
+  /** Sets the tool of the canvas. */
+  setTool(tool: EditorTool): void {
+    this.tool = tool;
+  }
+
+  /** `M`: the rectangle tool, then the ellipse tool. */
+  cycleMarquee(): void {
+    if (this.info !== null) {
+      this.tool = cycleMarquee(this.tool);
+    }
+  }
+
+  /** Sets the feather of the selection tools (0..250 px). */
+  setFeather(radius: number): void {
+    this.feather = clampFeather(radius);
+  }
+
+  /** Selects a shape, with the feather and anti-alias options of the tools. */
+  selectShape(shape: SelectionShapeDto, mode: SelectionModeId): void {
+    if (this.info !== null) {
+      this.edit({ type: 'selectShape', shape, mode, antiAlias: this.antiAlias, feather: this.feather });
+    }
+  }
+
+  selectAll(): void {
+    if (this.info !== null) {
+      this.edit({ type: 'selectAll' });
+    }
+  }
+
+  /** Removes the selection. The shell refuses this without a selection, so the store does nothing then. */
+  deselect(): void {
+    if (this.hasSelection) {
+      this.edit({ type: 'deselect' });
+    }
+  }
+
+  invertSelection(): void {
+    if (this.hasSelection) {
+      this.edit({ type: 'invertSelection' });
+    }
+  }
+
+  featherSelection(radius: number): void {
+    if (this.hasSelection) {
+      this.edit({ type: 'featherSelection', radius: clampFeather(radius) });
+    }
+  }
+
+  /** Opens the Feather dialog (only with a selection). */
+  openFeatherDialog(): void {
+    if (this.hasSelection && this.status === 'ready') {
+      this.featherDialogOpen = true;
+    }
+  }
+
+  closeFeatherDialog(): void {
+    this.featherDialogOpen = false;
+  }
+
+  /** Makes the mask of a layer (default: the selected layer) from the selection. */
+  maskFromSelection(layerId: number | null = this.selectedId): void {
+    if (layerId !== null && this.info !== null && canMaskFromSelection(this.info.layers, layerId)) {
+      this.edit({ type: 'maskFromSelection', layerId });
+    }
+  }
+
+  /**
+   * Asks the shell for the outline of the selection. An error shows a toast
+   * and gives null. The caller must compare the document and the selection
+   * version of the answer with the current ones.
+   */
+  async selectionOutline(documentId: number, step: number): Promise<SelectionOutline | null> {
+    try {
+      return await this.#api.selectionOutline(documentId, step);
+    } catch (error: unknown) {
+      if (this.info?.documentId === documentId) {
+        this.#toasts.error('Read the selection outline failed.', error);
+      }
+      return null;
     }
   }
 

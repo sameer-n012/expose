@@ -16,6 +16,7 @@
     defaultAdjustment,
     hasOwnLock,
     layerRows,
+    canMaskFromSelection,
     maskChipTitle,
     maskCommands,
     positionOf,
@@ -53,9 +54,20 @@
   /** The mask commands that the selected layer allows. */
   const maskCmd = $derived(maskCommands(info?.layers ?? [], editor.selectedId));
 
-  /** Click adds a reveal-all mask. Alt+click adds a hide-all mask. */
+  /** True if "Mask from selection" can run on the selected layer. */
+  const fromSelection = $derived(editor.hasSelection && canMaskFromSelection(info?.layers ?? [], editor.selectedId));
+
+  /**
+   * Without a selection: click adds a reveal-all mask, Alt+click a hide-all
+   * mask. With a selection: click makes the mask from the selection, Alt+click
+   * adds a hide-all mask.
+   */
   function onAddMask(event: MouseEvent): void {
-    editor.addMask(event.altKey ? 'hide' : 'reveal');
+    if (editor.hasSelection && !event.altKey) {
+      editor.maskFromSelection();
+    } else {
+      editor.addMask(event.altKey ? 'hide' : 'reveal');
+    }
   }
 
   function maskMenu(action: () => void): void {
@@ -181,9 +193,11 @@
       <button
         type="button"
         class="add-mask"
-        disabled={!maskCmd.canAdd}
+        disabled={editor.hasSelection ? !fromSelection : !maskCmd.canAdd}
         aria-label="Add mask"
-        title="Add a layer mask that shows all (Alt+click: hides all)"
+        title={editor.hasSelection
+          ? 'Make a layer mask from the selection (Alt+click: adds a mask that hides all)'
+          : 'Add a layer mask that shows all (Alt+click: hides all)'}
         onclick={onAddMask}
       >
         <span class="mask-icon" aria-hidden="true"></span>
@@ -206,6 +220,9 @@
             </button>
             <button type="button" role="menuitem" disabled={!maskCmd.canAdd} onclick={() => maskMenu(() => editor.addMask('hide'))}>
               Add Mask (Hide All)
+            </button>
+            <button type="button" role="menuitem" disabled={!fromSelection} onclick={() => maskMenu(() => editor.maskFromSelection())}>
+              Mask from Selection
             </button>
             <button
               type="button"

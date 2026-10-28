@@ -24,7 +24,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 }
 
 function info(documentId: number, revision: number, layers: LayerInfo[] = [layer(1), layer(2)], extra: Partial<DocumentInfo> = {}): DocumentInfo {
-  return { documentId, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, ...extra };
+  return { documentId, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, ...extra };
 }
 
 function saveResult(documentId: number, revision: number, photoId = 77, created = true): SaveResult {
@@ -51,6 +51,7 @@ function setup() {
     redo: vi.fn(async (documentId: number) => info(documentId, ++revision)),
     save: vi.fn(async (documentId: number) => saveResult(documentId, revision)),
     close: vi.fn(async (_documentId: number) => undefined),
+    selectionOutline: vi.fn(async (_documentId: number, _step: number) => ({ selectionVersion: 0, step: 1, contours: [] })),
   } satisfies EditorApi;
   const toasts = new ToastStore();
   const modules = { active: 'editor' as 'library' | 'develop' | 'editor', switchTo: vi.fn() };
