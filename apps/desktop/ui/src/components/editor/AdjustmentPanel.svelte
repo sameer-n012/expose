@@ -1,12 +1,14 @@
 <!--
   The Properties panel of the Editor: the parameters of the selected
   adjustment layer. Brightness/Contrast and Hue/Saturation have sliders.
-  Levels and Curves have no editor yet.
+  Levels and Curves have their own editors.
 -->
 <script lang="ts">
   import type { AdjustmentDto } from '../../lib/editor/api';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
+  import CurvesEditor from './CurvesEditor.svelte';
   import EditorSlider from './EditorSlider.svelte';
+  import LevelsEditor from './LevelsEditor.svelte';
 
   interface Props {
     editor: EditorStore;
@@ -109,8 +111,14 @@
         onend={() => editor.endGesture()}
         onreset={() => reset('lightness')}
       />
-    {:else}
-      <p class="note">No editor yet.</p>
+    {:else if adjustment.type === 'levels'}
+      {#key layer.id}
+        <LevelsEditor {editor} layerId={layer.id} {adjustment} />
+      {/key}
+    {:else if adjustment.type === 'curves'}
+      {#key layer.id}
+        <CurvesEditor {editor} layerId={layer.id} {adjustment} />
+      {/key}
     {/if}
   </div>
 </details>
