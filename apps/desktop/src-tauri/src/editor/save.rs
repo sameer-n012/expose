@@ -84,6 +84,9 @@ pub struct DocumentOrigin {
     /// The files of the last save (or of the link that the document was
     /// opened from). The next save writes the same files.
     pub saved: Option<SavedFiles>,
+    /// The name of a new document (the file stem of a "save as" when the
+    /// document has no source photo and no earlier save), or `None`.
+    pub name: Option<String>,
 }
 
 /// The data that the render thread gives to a save.
@@ -197,7 +200,10 @@ pub fn save_snapshot(
 /// - With `folder` ("save as"), the function always makes a new pair of
 ///   files in that folder with the same name rule. The stem comes from the
 ///   source photo, or from the image file of the earlier save if the
-///   document has no source photo. The earlier files stay as they are, and
+///   document has no source photo. A new document with no source photo and
+///   no earlier save uses [`DocumentOrigin::name`]. Without a name, the
+///   save is `invalidInput`. A save with no `folder` for such a document
+///   is also `invalidInput`. The earlier files stay as they are, and
 ///   the save makes a new library photo and link.
 ///
 /// # Errors
@@ -236,6 +242,14 @@ pub fn plan_targets<S: CatalogStore + ?Sized>(
             (Some(folder), None, Some(saved)) => {
                 (check_folder(folder)?, folder_and_stem(&saved.image_path)?.1)
             }
+            (Some(folder), None, None) => match &origin.name {
+                Some(name) => (check_folder(folder)?, name.as_str()),
+                None => {
+                    return Err(CommandError::invalid_input(
+                        "the document has no name for the files",
+                    ));
+                }
+            },
             (None, Some(path), _) => folder_and_stem(path)?,
             _ => {
                 return Err(CommandError::invalid_input(

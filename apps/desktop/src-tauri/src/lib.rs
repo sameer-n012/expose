@@ -151,6 +151,7 @@ pub fn run() -> tauri::Result<()> {
             commands::catalog::set_develop_settings,
             commands::dialog::pick_folder,
             commands::editor::editor_open,
+            commands::editor::editor_new,
             commands::editor::editor_render,
             commands::editor::editor_edit,
             commands::editor::editor_undo,

@@ -7,10 +7,13 @@
 use expose_catalog::PhotoId;
 use expose_core::develop::CurvePoint;
 use expose_editor::{
-    Adjustment, BlendMode, BrightnessContrast, Curves, Document, GroupIsolation, HueSaturation,
-    Layer, LayerKind, Levels, LevelsChannel,
+    Adjustment, Background, BitDepth, BlendMode, BlendSpace, BrightnessContrast, ColorMode, Curves,
+    Document, DocumentSpec, GroupIsolation, HueSaturation, Layer, LayerKind, Levels, LevelsChannel,
+    Locks, MAX_DIMENSION, MAX_PIXELS,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::error::CommandError;
 
 /// The identifier of an open document. It is a process counter, so it is
 /// never used two times.
@@ -315,6 +318,146 @@ pub enum LayerKindId {
     Group,
 }
 
+/// The four locks of a layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one flag for each lock button"
+)]
+pub struct LocksDto {
+    /// Pixel writes must keep the alpha of each pixel.
+    pub transparency: bool,
+    /// Pixel and mask writes are not permitted.
+    pub pixels: bool,
+    /// The layer cannot move.
+    pub position: bool,
+    /// All locks, and property changes.
+    pub all: bool,
+}
+
+impl From<Locks> for LocksDto {
+    fn from(l: Locks) -> Self {
+        Self {
+            transparency: l.transparency,
+            pixels: l.pixels,
+            position: l.position,
+            all: l.all,
+        }
+    }
+}
+
+impl From<LocksDto> for Locks {
+    fn from(l: LocksDto) -> Self {
+        Self {
+            transparency: l.transparency,
+            pixels: l.pixels,
+            position: l.position,
+            all: l.all,
+        }
+    }
+}
+
+/// The content of the first layer of a new document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BackgroundId {
+    /// Opaque white.
+    White,
+    /// Opaque black.
+    Black,
+    /// Transparent.
+    Transparent,
+}
+
+/// The longest name of a new document, in characters.
+pub const MAX_NAME_CHARS: usize = 120;
+
+/// The settings of `editor_new`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewDocumentSpec {
+    /// The document name. It becomes a file stem.
+    pub name: String,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Resolution in pixels per inch.
+    pub resolution_ppi: f32,
+    /// Bit depth: 8, 16, or 32.
+    pub bit_depth: u32,
+    /// The first layer.
+    pub background: BackgroundId,
+}
+
+impl NewDocumentSpec {
+    /// Checks the settings and makes the document spec and the trimmed
+    /// name.
+    ///
+    /// # Errors
+    ///
+    /// `invalidInput` for an empty or too long name, a name with `/`, `\`,
+    /// `:` or a control character, a size out of range, a resolution out
+    /// of range, or a bit depth other than 8, 16, 32.
+    pub fn to_spec(&self) -> Result<(DocumentSpec, String), CommandError> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err(CommandError::invalid_input("the name is empty"));
+        }
+        if name.chars().count() > MAX_NAME_CHARS {
+            return Err(CommandError::invalid_input("the name is too long"));
+        }
+        if name
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+        {
+            return Err(CommandError::invalid_input(
+                "the name has a character that a file name cannot have",
+            ));
+        }
+        let (width, height) = (self.width, self.height);
+        if width == 0
+            || height == 0
+            || width > MAX_DIMENSION
+            || height > MAX_DIMENSION
+            || u64::from(width) * u64::from(height) > MAX_PIXELS
+        {
+            return Err(CommandError::invalid_input(
+                "the size is out of range for a document",
+            ));
+        }
+        if !self.resolution_ppi.is_finite() {
+            return Err(CommandError::invalid_input("the resolution is not valid"));
+        }
+        let bit_depth = match self.bit_depth {
+            8 => BitDepth::Eight,
+            16 => BitDepth::Sixteen,
+            32 => BitDepth::ThirtyTwo,
+            _ => {
+                return Err(CommandError::invalid_input(
+                    "the bit depth must be 8, 16, or 32",
+                ));
+            }
+        };
+        let background = match self.background {
+            BackgroundId::White => Background::White,
+            BackgroundId::Black => Background::Black,
+            BackgroundId::Transparent => Background::Transparent,
+        };
+        let spec = DocumentSpec {
+            width,
+            height,
+            resolution_ppi: self.resolution_ppi,
+            color_mode: ColorMode::Rgb,
+            bit_depth,
+            background,
+            blend_space: BlendSpace::Perceptual,
+        };
+        Ok((spec, name.to_owned()))
+    }
+}
+
 /// One layer of the tree that the UI shows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -335,6 +478,8 @@ pub struct LayerInfo {
     pub blend_mode: BlendModeId,
     /// `true` if the layer has a mask.
     pub has_mask: bool,
+    /// The own locks of the layer (not the locks that a parent group adds).
+    pub locks: LocksDto,
     /// The setting of an adjustment layer; `null` for other kinds.
     pub adjustment: Option<AdjustmentDto>,
     /// For a group: `true` if it is isolated, `false` if it passes
@@ -365,6 +510,7 @@ impl From<&Layer> for LayerInfo {
             fill_opacity: layer.fill_opacity(),
             blend_mode: layer.blend_mode().into(),
             has_mask: layer.mask().is_some(),
+            locks: layer.locks().into(),
             adjustment,
             isolated,
             children,
@@ -405,6 +551,9 @@ pub struct DocumentInfo {
     /// The library photo of the flattened image of the last save, or
     /// `None` if the document has no saved files yet.
     pub saved_photo_id: Option<PhotoId>,
+    /// The library photo that the document was first opened from, or
+    /// `None` (a new document).
+    pub source_photo_id: Option<PhotoId>,
 }
 
 impl DocumentInfo {
@@ -422,6 +571,7 @@ impl DocumentInfo {
             revision: document.revision(),
             dirty: false,
             saved_photo_id: None,
+            source_photo_id: None,
         }
     }
 }
@@ -484,6 +634,12 @@ pub enum EditDto {
         layer_id: u64,
         adjustment: AdjustmentDto,
     },
+    /// Adds a transparent pixel layer of the canvas size directly above
+    /// `above_layer_id` (in the same parent), or at the top of the root
+    /// list for `null`.
+    AddPixelLayer { above_layer_id: Option<u64> },
+    /// Sets the own locks of a layer.
+    SetLocks { layer_id: u64, locks: LocksDto },
 }
 
 impl EditDto {
@@ -500,6 +656,8 @@ impl EditDto {
             Self::Duplicate { .. } => "Duplicate Layer",
             Self::AddAdjustment { .. } => "New Adjustment Layer",
             Self::SetAdjustment { .. } => "Adjustment Settings",
+            Self::AddPixelLayer { .. } => "New Layer",
+            Self::SetLocks { .. } => "Layer Locks",
         }
     }
 }
@@ -742,5 +900,125 @@ mod tests {
         assert!(bottom["adjustment"].is_null());
         assert!(bottom["isolated"].is_null());
         assert!(bottom["children"].is_null());
+        assert!(value["sourcePhotoId"].is_null());
+        assert_eq!(
+            bottom["locks"],
+            json!({ "transparency": false, "pixels": false, "position": false, "all": false })
+        );
+    }
+
+    #[test]
+    fn new_layer_and_lock_edits_parse() {
+        let edit: EditDto =
+            serde_json::from_value(json!({ "type": "addPixelLayer", "aboveLayerId": 3 })).unwrap();
+        assert_eq!(
+            edit,
+            EditDto::AddPixelLayer {
+                above_layer_id: Some(3)
+            }
+        );
+        let edit: EditDto =
+            serde_json::from_value(json!({ "type": "addPixelLayer", "aboveLayerId": null }))
+                .unwrap();
+        assert_eq!(
+            edit,
+            EditDto::AddPixelLayer {
+                above_layer_id: None
+            }
+        );
+        let edit: EditDto = serde_json::from_value(json!({
+            "type": "setLocks",
+            "layerId": 4,
+            "locks": { "transparency": false, "pixels": true, "position": false, "all": false }
+        }))
+        .unwrap();
+        let EditDto::SetLocks { layer_id, locks } = edit else {
+            panic!("wrong variant");
+        };
+        assert_eq!(layer_id, 4);
+        assert!(locks.pixels && !locks.all);
+        assert!(Locks::from(locks).pixels);
+    }
+
+    fn new_spec() -> NewDocumentSpec {
+        serde_json::from_value(json!({
+            "name": " Poster ",
+            "width": 800,
+            "height": 600,
+            "resolutionPpi": 300.0,
+            "bitDepth": 8,
+            "background": "transparent"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn new_document_spec_parses_and_converts() {
+        let spec = new_spec();
+        assert_eq!(spec.background, BackgroundId::Transparent);
+        let (document, name) = spec.to_spec().unwrap();
+        assert_eq!(name, "Poster");
+        assert_eq!(document.bit_depth, BitDepth::Eight);
+        assert_eq!(document.background, Background::Transparent);
+        assert_eq!((document.width, document.height), (800, 600));
+    }
+
+    #[test]
+    fn new_document_spec_rejects_bad_values() {
+        let bad: Vec<NewDocumentSpec> = vec![
+            NewDocumentSpec {
+                name: "  ".into(),
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                name: "a/b".into(),
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                name: "a\\b".into(),
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                name: "a:b".into(),
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                name: "a\nb".into(),
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                name: "x".repeat(MAX_NAME_CHARS + 1),
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                width: 0,
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                height: MAX_DIMENSION + 1,
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                width: MAX_DIMENSION,
+                height: MAX_DIMENSION,
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                bit_depth: 12,
+                ..new_spec()
+            },
+            NewDocumentSpec {
+                resolution_ppi: f32::NAN,
+                ..new_spec()
+            },
+        ];
+        for spec in bad {
+            let error = spec.to_spec().unwrap_err();
+            assert_eq!(
+                error.kind,
+                crate::error::ErrorKind::InvalidInput,
+                "{spec:?}"
+            );
+        }
     }
 }

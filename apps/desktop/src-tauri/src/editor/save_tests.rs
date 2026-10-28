@@ -58,6 +58,7 @@ impl Fixture {
         DocumentOrigin {
             source_photo_id: Some(self.source),
             saved: None,
+            name: None,
         }
     }
 
@@ -156,6 +157,7 @@ fn second_save_replaces_the_same_files_and_adds_no_photo() {
     let origin = DocumentOrigin {
         source_photo_id: Some(fx.source),
         saved: Some(first.files.clone()),
+        name: None,
     };
     let second = save_snapshot(&fx.state, snapshot(doc.clone(), origin), None).unwrap();
     assert!(!second.created);
@@ -212,6 +214,7 @@ fn save_refuses_to_overwrite_files_that_expose_did_not_create() {
             document_path: fx.path("a-edit.exdoc"),
             image_path: fx.path("a.jpg"),
         }),
+        name: None,
     };
     let error = save_snapshot(&fx.state, snapshot(document([0.3; 4]), forged), None).unwrap_err();
     assert_eq!(error.kind, ErrorKind::InvalidInput);
@@ -232,6 +235,7 @@ fn save_refuses_to_overwrite_files_that_expose_did_not_create() {
             photo_id: fx.source,
             ..first.files
         }),
+        name: None,
     };
     let error = plan_targets(&*fx.state.lock().unwrap(), &other, None).unwrap_err();
     assert_eq!(error.kind, ErrorKind::InvalidInput);
@@ -296,6 +300,25 @@ fn document_with_no_source_cannot_make_a_first_save() {
 }
 
 #[test]
+fn new_document_save_as_uses_its_name_and_plain_save_is_refused() {
+    let fx = Fixture::new();
+    let origin = DocumentOrigin {
+        name: Some("Poster".to_owned()),
+        ..DocumentOrigin::default()
+    };
+    let folder = tempfile::tempdir().unwrap();
+    let targets = plan_targets(&*fx.state.lock().unwrap(), &origin, Some(folder.path())).unwrap();
+    assert_eq!(
+        targets.document_path,
+        folder.path().join("Poster-edit.exdoc")
+    );
+    assert_eq!(targets.image_path, folder.path().join("Poster-edit.tif"));
+    assert_eq!(targets.photo_id, None);
+    let error = plan_targets(&*fx.state.lock().unwrap(), &origin, None).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidInput);
+}
+
+#[test]
 fn save_as_makes_new_files_and_a_new_photo_and_keeps_the_old_ones() {
     let fx = Fixture::new();
     let first = save_snapshot(&fx.state, snapshot(document([0.2; 4]), fx.origin()), None).unwrap();
@@ -304,6 +327,7 @@ fn save_as_makes_new_files_and_a_new_photo_and_keeps_the_old_ones() {
     let origin = DocumentOrigin {
         source_photo_id: Some(fx.source),
         saved: Some(first.files.clone()),
+        name: None,
     };
     let second = save_snapshot(
         &fx.state,
@@ -358,6 +382,7 @@ fn save_as_without_source_uses_the_stem_of_the_saved_image() {
     let origin = DocumentOrigin {
         source_photo_id: None,
         saved: Some(first.files),
+        name: None,
     };
     let second = save_snapshot(
         &fx.state,

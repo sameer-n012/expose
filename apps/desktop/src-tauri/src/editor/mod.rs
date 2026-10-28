@@ -37,8 +37,8 @@ use expose_editor::EditorError;
 use expose_gpu::GpuError;
 
 pub use dto::{
-    AdjustmentDto, BlendModeId, CurvePointDto, DocumentId, DocumentInfo, EditDto, LayerInfo,
-    LayerKindId, LevelsChannelDto, SaveResult,
+    AdjustmentDto, BackgroundId, BlendModeId, CurvePointDto, DocumentId, DocumentInfo, EditDto,
+    LayerInfo, LayerKindId, LevelsChannelDto, LocksDto, NewDocumentSpec, SaveResult,
 };
 pub use engine::{EditorEngine, MAX_VIEW_SIDE, RenderRequest, SaveGuard};
 pub use save::{DocumentOrigin, SaveSnapshot, SavedFiles};

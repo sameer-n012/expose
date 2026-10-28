@@ -114,6 +114,7 @@ impl EditSession {
         );
         info.dirty = self.is_dirty();
         info.saved_photo_id = self.origin.saved.as_ref().map(|s| s.photo_id);
+        info.source_photo_id = self.origin.source_photo_id;
         info
     }
 
@@ -175,6 +176,44 @@ fn resolve(document: &Document, raw: u64) -> Result<LayerId, EditorEngineError> 
         .ok_or(EditorEngineError::LayerNotFound(raw))
 }
 
+/// The placement directly above the layer `above_layer_id` in its parent,
+/// or at the top of the root list for `None`.
+fn placement_above(
+    document: &Document,
+    above_layer_id: Option<u64>,
+) -> Result<Placement, EditorEngineError> {
+    Ok(match above_layer_id {
+        Some(raw) => {
+            let above = resolve(document, raw)?;
+            let placement = document
+                .placement_of(above)
+                .ok_or(EditorEngineError::LayerNotFound(raw))?;
+            Placement::new(placement.parent, placement.index + 1)
+        }
+        None => Placement::root(document.layers().len()),
+    })
+}
+
+/// The name "Layer N" of a new pixel layer: N is 1 more than the largest
+/// N of the layers (in the whole tree) that have exactly the name
+/// "Layer N", or 1 if there is none.
+fn next_layer_name(document: &Document) -> String {
+    let mut largest = 0_u64;
+    for layer in document.layers() {
+        layer.visit(&mut |l| {
+            if let Some(n) = l
+                .name()
+                .strip_prefix("Layer ")
+                .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|rest| rest.parse::<u64>().ok())
+            {
+                largest = largest.max(n);
+            }
+        });
+    }
+    format!("Layer {}", largest.saturating_add(1))
+}
+
 /// Applies one edit and returns its inverse.
 fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineError> {
     let undo = match edit {
@@ -222,19 +261,22 @@ fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineErr
             adjustment,
             above_layer_id,
         } => {
-            let at = match above_layer_id {
-                Some(raw) => {
-                    let above = resolve(document, raw)?;
-                    let placement = document
-                        .placement_of(above)
-                        .ok_or(EditorEngineError::LayerNotFound(raw))?;
-                    Placement::new(placement.parent, placement.index + 1)
-                }
-                None => Placement::root(document.layers().len()),
-            };
+            let at = placement_above(document, above_layer_id)?;
             let name = adjustment.layer_name();
             let content = LayerContent::Adjustment(Adjustment::from(adjustment));
             document.add_layer(name, content, at)?.1
+        }
+        EditDto::AddPixelLayer { above_layer_id } => {
+            let at = placement_above(document, above_layer_id)?;
+            let image = WorkingImage::new(document.width(), document.height())
+                .map_err(expose_editor::EditorError::from)?;
+            let layer = PixelLayer::new(image, (0, 0))?;
+            let name = next_layer_name(document);
+            document.add_layer(name, LayerContent::Pixel(layer), at)?.1
+        }
+        EditDto::SetLocks { layer_id, locks } => {
+            let id = resolve(document, layer_id)?;
+            document.set_locks(id, locks.into())?
         }
         EditDto::SetAdjustment {
             layer_id,
@@ -255,7 +297,7 @@ mod tests {
     use expose_editor::{BlendMode, EditorError, GroupIsolation, LayerKind};
 
     use super::*;
-    use crate::editor::dto::{AdjustmentDto, BlendModeId, LayerKindId};
+    use crate::editor::dto::{AdjustmentDto, BlendModeId, LayerKindId, LocksDto};
 
     fn session() -> EditSession {
         let image = WorkingImage::new_filled(4, 3, [0.5, 0.25, 0.125, 1.0]).unwrap();
@@ -622,5 +664,119 @@ mod tests {
         let mut fresh = session();
         fresh.undo().unwrap();
         fresh.redo().unwrap();
+    }
+
+    fn names(s: &EditSession) -> Vec<String> {
+        s.document()
+            .layers()
+            .iter()
+            .map(|l| l.name().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn add_pixel_layer_places_and_names_it() {
+        let mut s = session();
+        let bg = background(&s);
+        s.edit(
+            EditDto::AddPixelLayer {
+                above_layer_id: None,
+            },
+            None,
+        )
+        .unwrap();
+        s.edit(
+            EditDto::AddPixelLayer {
+                above_layer_id: Some(bg),
+            },
+            None,
+        )
+        .unwrap();
+        // Layer 2 sits directly above the background, Layer 1 on top.
+        assert_eq!(names(&s), ["Background", "Layer 2", "Layer 1"]);
+        let layer = &s.document().layers()[1];
+        let LayerKind::Pixel(p) = layer.kind() else {
+            panic!("not a pixel layer");
+        };
+        assert_eq!((p.image().width(), p.image().height()), (4, 3));
+        assert!(
+            p.image()
+                .pixels()
+                .iter()
+                .all(|px| px.iter().all(|c| *c < 1e-9))
+        );
+        s.undo().unwrap();
+        s.undo().unwrap();
+        assert_eq!(names(&s), ["Background"]);
+    }
+
+    #[test]
+    fn pixel_layer_name_counts_up_from_the_largest() {
+        let mut s = session();
+        let bg = background(&s);
+        s.edit(
+            EditDto::Rename {
+                layer_id: bg,
+                name: "Layer 7".into(),
+            },
+            None,
+        )
+        .unwrap();
+        s.edit(
+            EditDto::AddPixelLayer {
+                above_layer_id: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(names(&s), ["Layer 7", "Layer 8"]);
+    }
+
+    #[test]
+    fn locks_block_property_edits_and_are_undoable() {
+        let mut s = session();
+        let bg = background(&s);
+        let locks = LocksDto {
+            all: true,
+            ..LocksDto::default()
+        };
+        s.edit(
+            EditDto::SetLocks {
+                layer_id: bg,
+                locks,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(s.info(1).layers[0].locks.all);
+        let before = s.info(1).revision;
+        let error = s
+            .edit(
+                EditDto::SetOpacity {
+                    layer_id: bg,
+                    opacity: 0.5,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EditorEngineError::Editor(EditorError::Locked { .. })
+        ));
+        assert_eq!(s.info(1).revision, before);
+        s.undo().unwrap();
+        assert!(!s.info(1).layers[0].locks.all);
+        assert!(!s.info(1).can_undo);
+    }
+
+    #[test]
+    fn info_has_the_source_photo() {
+        let image = WorkingImage::new_filled(2, 2, [0.0; 4]).unwrap();
+        let origin = DocumentOrigin {
+            source_photo_id: Some(expose_catalog::PhotoId(5)),
+            ..DocumentOrigin::default()
+        };
+        let s = EditSession::with_origin(build_document(image).unwrap(), origin).unwrap();
+        assert_eq!(s.info(1).source_photo_id, Some(expose_catalog::PhotoId(5)));
     }
 }

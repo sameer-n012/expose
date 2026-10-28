@@ -19,8 +19,8 @@ use super::preview::DisplaySpaceArg;
 use super::{run_blocking, with_catalog};
 use crate::editor::save::{read_linked_document, save_snapshot};
 use crate::editor::{
-    DocumentId, DocumentInfo, DocumentOrigin, EditDto, EditorEngine, RenderRequest, SaveGuard,
-    SaveResult, SavedFiles, build_document,
+    DocumentId, DocumentInfo, DocumentOrigin, EditDto, EditorEngine, EditorEngineError,
+    NewDocumentSpec, RenderRequest, SaveGuard, SaveResult, SavedFiles, build_document,
 };
 use crate::error::{CommandError, ErrorKind};
 use crate::state::CatalogState;
@@ -83,6 +83,7 @@ fn open_source<S: CatalogStore + ?Sized>(
                     document_path: link.document_path,
                     image_path: path,
                 }),
+                name: None,
             },
         });
     }
@@ -129,6 +130,7 @@ pub async fn editor_open<R: Runtime>(
             let origin = DocumentOrigin {
                 source_photo_id: Some(photo_id),
                 saved: None,
+                name: None,
             };
             (document, origin)
         }
@@ -138,6 +140,32 @@ pub async fn editor_open<R: Runtime>(
         ms = started.elapsed().as_millis(),
         "editor document read"
     );
+    Ok(engine
+        .open_async(document, origin, display_space.unwrap_or_default().into())
+        .await?)
+}
+
+/// Makes a new document with one background layer and opens it. The
+/// document is not dirty. It has no source photo, so the first save needs
+/// a folder (save as) and uses the name of the spec as the file stem.
+///
+/// Errors: `invalidInput` (name, size, resolution, or bit depth),
+/// `unavailable` (no GPU).
+#[tauri::command]
+pub async fn editor_new(
+    engine: State<'_, EditorEngine>,
+    spec: NewDocumentSpec,
+    display_space: Option<DisplaySpaceArg>,
+) -> Result<DocumentInfo, CommandError> {
+    let (document_spec, name) = spec.to_spec()?;
+    let document = run_blocking(move || {
+        Document::new(document_spec).map_err(|e| CommandError::from(EditorEngineError::from(e)))
+    })
+    .await?;
+    let origin = DocumentOrigin {
+        name: Some(name),
+        ..DocumentOrigin::default()
+    };
     Ok(engine
         .open_async(document, origin, display_space.unwrap_or_default().into())
         .await?)
