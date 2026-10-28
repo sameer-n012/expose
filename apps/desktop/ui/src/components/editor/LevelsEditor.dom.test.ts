@@ -25,6 +25,7 @@ const layers: LayerInfo[] = [
     fillOpacity: 1,
     blendMode: 'normal',
     hasMask: false,
+    locks: { transparency: false, pixels: false, position: false, all: false },
     adjustment: levels,
     isolated: null,
     children: null,
@@ -32,7 +33,7 @@ const layers: LayerInfo[] = [
 ];
 
 function doc(revision = 0): DocumentInfo {
-  return { documentId: 1, width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, revision, dirty: revision > 0, savedPhotoId: null };
+  return { documentId: 1, width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, revision, dirty: revision > 0, savedPhotoId: null, sourcePhotoId: 1 };
 }
 
 async function makeStore() {
