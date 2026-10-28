@@ -16,6 +16,8 @@
     defaultAdjustment,
     hasOwnLock,
     layerRows,
+    maskChipTitle,
+    maskCommands,
     positionOf,
   } from '../../lib/editor/layers';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
@@ -46,6 +48,29 @@
   let drafts = $state<Record<string, number>>({});
   let renaming = $state<number | null>(null);
   let menuOpen = $state(false);
+  let maskMenuOpen = $state(false);
+
+  /** The mask commands that the selected layer allows. */
+  const maskCmd = $derived(maskCommands(info?.layers ?? [], editor.selectedId));
+
+  /** Click adds a reveal-all mask. Alt+click adds a hide-all mask. */
+  function onAddMask(event: MouseEvent): void {
+    editor.addMask(event.altKey ? 'hide' : 'reveal');
+  }
+
+  function maskMenu(action: () => void): void {
+    maskMenuOpen = false;
+    action();
+  }
+
+  /** Shift+click on the chip turns the mask on or off. Other clicks select the layer. */
+  function onChip(event: MouseEvent, layer: LayerInfo): void {
+    if (event.shiftKey) {
+      editor.setMaskEnabled(layer.id, !layer.maskEnabled);
+    } else {
+      editor.select(layer.id);
+    }
+  }
 
   // Drop the dragged values when all edits are done.
   $effect(() => {
@@ -148,6 +173,49 @@
       <button type="button" disabled={!editor.canUndo} title="Undo (Mod+Z)" onclick={() => editor.undo()}>Undo</button>
       <button type="button" disabled={!editor.canRedo} title="Redo (Mod+Shift+Z)" onclick={() => editor.redo()}>Redo</button>
       <button type="button" disabled={info === null} title="Add a pixel layer (Mod+Shift+N)" onclick={() => editor.addPixelLayer()}>New layer</button>
+      <button
+        type="button"
+        class="add-mask"
+        disabled={!maskCmd.canAdd}
+        aria-label="Add mask"
+        title="Add a layer mask that shows all (Alt+click: hides all)"
+        onclick={onAddMask}
+      >
+        <span class="mask-icon" aria-hidden="true"></span>
+        Add mask
+      </button>
+      <span class="menu">
+        <button
+          type="button"
+          disabled={!maskCmd.canAdd && !maskCmd.canDelete && !maskCmd.canToggle}
+          aria-haspopup="menu"
+          aria-expanded={maskMenuOpen}
+          onclick={() => (maskMenuOpen = !maskMenuOpen)}
+        >
+          Mask
+        </button>
+        {#if maskMenuOpen}
+          <div class="popup" role="menu" aria-label="Layer mask">
+            <button type="button" role="menuitem" disabled={!maskCmd.canAdd} onclick={() => maskMenu(() => editor.addMask('reveal'))}>
+              Add Mask (Reveal All)
+            </button>
+            <button type="button" role="menuitem" disabled={!maskCmd.canAdd} onclick={() => maskMenu(() => editor.addMask('hide'))}>
+              Add Mask (Hide All)
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!maskCmd.canToggle}
+              onclick={() => selected && maskMenu(() => editor.setMaskEnabled(selected.id, !selected.maskEnabled))}
+            >
+              {selected?.hasMask && !selected.maskEnabled ? 'Enable Mask' : 'Disable Mask'}
+            </button>
+            <button type="button" role="menuitem" disabled={!maskCmd.canDelete} onclick={() => maskMenu(() => editor.deleteMask())}>
+              Delete Mask
+            </button>
+          </div>
+        {/if}
+      </span>
       <span class="menu">
         <button
           type="button"
@@ -217,6 +285,18 @@
                 ondblclick={() => (renaming = layer.id)}
               >
                 {layer.name}
+              </button>
+            {/if}
+            {#if layer.hasMask}
+              <button
+                type="button"
+                class="mask-chip"
+                class:off={!layer.maskEnabled}
+                aria-label={layer.maskEnabled ? `Mask of ${layer.name} is on` : `Mask of ${layer.name} is off`}
+                title={maskChipTitle(layer)}
+                onclick={(e) => onChip(e, layer)}
+              >
+                {#if !layer.maskEnabled}<span class="x" aria-hidden="true">✕</span>{/if}
               </button>
             {/if}
             {#if hasOwnLock(layer)}
@@ -425,6 +505,42 @@
     color: var(--color-text);
     text-align: left;
     font-size: var(--font-size-sm);
+  }
+  .mask-chip {
+    position: relative;
+    flex: none;
+    width: 1.4em;
+    height: 1.1em;
+    padding: 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-text);
+  }
+  .mask-chip.off {
+    background: var(--color-bg-panel-raised);
+    opacity: 0.7;
+  }
+  .mask-chip .x {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #e5484d;
+    font-size: 0.9em;
+    line-height: 1;
+  }
+  .mask-icon {
+    display: inline-block;
+    width: 0.9em;
+    height: 0.9em;
+    margin-right: var(--space-1);
+    vertical-align: -0.1em;
+    border: 1px solid currentColor;
+    border-radius: 50%;
+  }
+  .popup button:disabled {
+    opacity: 0.5;
   }
   .name.hidden-layer {
     color: var(--color-text-muted);

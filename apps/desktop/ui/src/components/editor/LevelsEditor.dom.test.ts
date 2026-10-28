@@ -25,6 +25,7 @@ const layers: LayerInfo[] = [
     fillOpacity: 1,
     blendMode: 'normal',
     hasMask: false,
+    maskEnabled: false,
     locks: { transparency: false, pixels: false, position: false, all: false },
     adjustment: levels,
     isolated: null,

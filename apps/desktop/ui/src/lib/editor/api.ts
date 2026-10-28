@@ -74,6 +74,8 @@ export interface LayerInfo {
   fillOpacity: number;
   blendMode: BlendModeId;
   hasMask: boolean;
+  /** True if the layer has a mask and the mask is on. False if there is no mask. */
+  maskEnabled: boolean;
   /** For kind `adjustment`. */
   adjustment: AdjustmentDto | null;
   /** For kind `group`: false means pass-through. */
@@ -131,7 +133,14 @@ export type EditDto =
   | { type: 'setAdjustment'; layerId: number; adjustment: AdjustmentDto }
   /** `aboveLayerId` null: the top of the root list. A transparent canvas-size layer named "Layer N". */
   | { type: 'addPixelLayer'; aboveLayerId: number | null }
-  | { type: 'setLocks'; layerId: number; locks: LocksDto };
+  | { type: 'setLocks'; layerId: number; locks: LocksDto }
+  /** A canvas-size mask: `reveal` is all white, `hide` is all black. It is an error if the layer has a mask. */
+  | { type: 'addMask'; layerId: number; fill: MaskFillId }
+  | { type: 'deleteMask'; layerId: number }
+  | { type: 'setMaskEnabled'; layerId: number; enabled: boolean };
+
+/** The start state of a new layer mask. */
+export type MaskFillId = 'reveal' | 'hide';
 
 export type BackgroundId = 'white' | 'black' | 'transparent';
 
