@@ -4,11 +4,12 @@
 
 use expose_core::buffer::WorkingImage;
 use expose_editor::{
-    Adjustment, Document, DocumentSpec, Edit, History, LayerContent, LayerId, PixelLayer, Placement,
+    Adjustment, Document, DocumentSpec, Edit, History, LayerContent, LayerId, Mask, MaskFill,
+    MaskImage, PixelLayer, Placement,
 };
 
 use super::EditorEngineError;
-use super::dto::{DocumentId, DocumentInfo, EditDto};
+use super::dto::{DocumentId, DocumentInfo, EditDto, MaskFillId};
 use super::save::{DocumentOrigin, SavedFiles};
 
 /// The maximum number of undo steps of a document. A delete step keeps the
@@ -176,6 +177,15 @@ fn resolve(document: &Document, raw: u64) -> Result<LayerId, EditorEngineError> 
         .ok_or(EditorEngineError::LayerNotFound(raw))
 }
 
+/// `true` if the layer with the number `raw` has a mask.
+fn has_mask(document: &Document, raw: u64) -> Result<bool, EditorEngineError> {
+    let id = resolve(document, raw)?;
+    document
+        .layer(id)
+        .map(|layer| layer.mask().is_some())
+        .ok_or(EditorEngineError::LayerNotFound(raw))
+}
+
 /// The placement directly above the layer `above_layer_id` in its parent,
 /// or at the top of the root list for `None`.
 fn placement_above(
@@ -277,6 +287,29 @@ fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineErr
         EditDto::SetLocks { layer_id, locks } => {
             let id = resolve(document, layer_id)?;
             document.set_locks(id, locks.into())?
+        }
+        EditDto::AddMask { layer_id, fill } => {
+            let id = resolve(document, layer_id)?;
+            if has_mask(document, layer_id)? {
+                return Err(EditorEngineError::MaskExists(layer_id));
+            }
+            let (value, mask_fill) = match fill {
+                MaskFillId::Reveal => (1.0, MaskFill::White),
+                MaskFillId::Hide => (0.0, MaskFill::Black),
+            };
+            let image = MaskImage::new_filled(document.width(), document.height(), value)?;
+            document.set_mask(id, Some(Mask::new(image, (0, 0), mask_fill)))?
+        }
+        EditDto::DeleteMask { layer_id } => {
+            let id = resolve(document, layer_id)?;
+            if !has_mask(document, layer_id)? {
+                return Err(expose_editor::EditorError::NoMask(id).into());
+            }
+            document.set_mask(id, None)?
+        }
+        EditDto::SetMaskEnabled { layer_id, enabled } => {
+            let id = resolve(document, layer_id)?;
+            document.set_mask_enabled(id, enabled)?
         }
         EditDto::SetAdjustment {
             layer_id,
@@ -767,6 +800,161 @@ mod tests {
         s.undo().unwrap();
         assert!(!s.info(1).layers[0].locks.all);
         assert!(!s.info(1).can_undo);
+    }
+
+    fn mask_values(s: &EditSession) -> (f32, MaskFill) {
+        let mask = s.document().layers()[0].mask().unwrap();
+        (mask.image.data()[0], mask.fill)
+    }
+
+    #[test]
+    fn mask_add_reveal_and_hide() {
+        for (fill, value, mask_fill) in [
+            (MaskFillId::Reveal, 1.0, MaskFill::White),
+            (MaskFillId::Hide, 0.0, MaskFill::Black),
+        ] {
+            let mut s = session();
+            let bg = background(&s);
+            s.edit(EditDto::AddMask { layer_id: bg, fill }, None)
+                .unwrap();
+            let info = &s.info(1).layers[0];
+            assert!(info.has_mask && info.mask_enabled);
+            assert_eq!(mask_values(&s), (value, mask_fill));
+            let mask = s.document().layers()[0].mask().unwrap();
+            assert_eq!(mask.offset, (0, 0));
+            assert_eq!((mask.image.width(), mask.image.height()), (4, 3));
+            s.undo().unwrap();
+            assert!(!s.info(1).layers[0].has_mask);
+            s.redo().unwrap();
+            assert!(s.info(1).layers[0].has_mask);
+        }
+    }
+
+    #[test]
+    fn mask_double_add_is_an_error() {
+        let mut s = session();
+        let bg = background(&s);
+        let add = EditDto::AddMask {
+            layer_id: bg,
+            fill: MaskFillId::Reveal,
+        };
+        s.edit(add.clone(), None).unwrap();
+        let error = s.edit(add, None).unwrap_err();
+        assert!(matches!(error, EditorEngineError::MaskExists(id) if id == bg));
+    }
+
+    #[test]
+    fn mask_delete_and_enable_with_undo() {
+        let mut s = session();
+        let bg = background(&s);
+        // Without a mask, both edits fail.
+        for edit in [
+            EditDto::DeleteMask { layer_id: bg },
+            EditDto::SetMaskEnabled {
+                layer_id: bg,
+                enabled: false,
+            },
+        ] {
+            let error = s.edit(edit, None).unwrap_err();
+            assert!(matches!(
+                error,
+                EditorEngineError::Editor(EditorError::NoMask(_))
+            ));
+        }
+        s.edit(
+            EditDto::AddMask {
+                layer_id: bg,
+                fill: MaskFillId::Hide,
+            },
+            None,
+        )
+        .unwrap();
+        s.edit(
+            EditDto::SetMaskEnabled {
+                layer_id: bg,
+                enabled: false,
+            },
+            None,
+        )
+        .unwrap();
+        let info = &s.info(1).layers[0];
+        assert!(info.has_mask && !info.mask_enabled);
+        s.undo().unwrap();
+        assert!(s.info(1).layers[0].mask_enabled);
+        s.edit(EditDto::DeleteMask { layer_id: bg }, None).unwrap();
+        let info = &s.info(1).layers[0];
+        assert!(!info.has_mask && !info.mask_enabled);
+        s.undo().unwrap();
+        assert!(s.info(1).layers[0].has_mask);
+        assert_eq!(mask_values(&s), (0.0, MaskFill::Black));
+    }
+
+    #[test]
+    fn mask_edits_obey_locks() {
+        let mut s = session();
+        let bg = background(&s);
+        s.edit(
+            EditDto::AddMask {
+                layer_id: bg,
+                fill: MaskFillId::Reveal,
+            },
+            None,
+        )
+        .unwrap();
+        // The pixels lock stops add and delete, not the enable switch.
+        let pixels = LocksDto {
+            pixels: true,
+            ..LocksDto::default()
+        };
+        s.edit(
+            EditDto::SetLocks {
+                layer_id: bg,
+                locks: pixels,
+            },
+            None,
+        )
+        .unwrap();
+        let error = s
+            .edit(EditDto::DeleteMask { layer_id: bg }, None)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EditorEngineError::Editor(EditorError::Locked { .. })
+        ));
+        s.edit(
+            EditDto::SetMaskEnabled {
+                layer_id: bg,
+                enabled: false,
+            },
+            None,
+        )
+        .unwrap();
+        // The all lock stops the enable switch.
+        let all = LocksDto {
+            all: true,
+            ..LocksDto::default()
+        };
+        s.edit(
+            EditDto::SetLocks {
+                layer_id: bg,
+                locks: all,
+            },
+            None,
+        )
+        .unwrap();
+        let error = s
+            .edit(
+                EditDto::SetMaskEnabled {
+                    layer_id: bg,
+                    enabled: true,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EditorEngineError::Editor(EditorError::Locked { .. })
+        ));
     }
 
     #[test]

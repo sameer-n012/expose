@@ -59,6 +59,9 @@ pub enum EditorEngineError {
     /// The document has no layer with this ID.
     #[error("the document has no layer {0}")]
     LayerNotFound(u64),
+    /// The layer has a mask already. The edit does not replace it.
+    #[error("the layer {0} has a mask already")]
+    MaskExists(u64),
     /// The requested view size is not valid.
     #[error("the view size {width}x{height} is not in 1..={MAX_VIEW_SIDE}")]
     InvalidViewSize {
@@ -128,9 +131,9 @@ impl From<EditorEngineError> for CommandError {
             EditorEngineError::DocumentNotFound(_) | EditorEngineError::LayerNotFound(_) => {
                 ErrorKind::NotFound
             }
-            EditorEngineError::InvalidViewSize { .. } | EditorEngineError::SaveInProgress(_) => {
-                ErrorKind::InvalidInput
-            }
+            EditorEngineError::InvalidViewSize { .. }
+            | EditorEngineError::MaskExists(_)
+            | EditorEngineError::SaveInProgress(_) => ErrorKind::InvalidInput,
             EditorEngineError::Editor(inner) => editor_error_kind(inner),
             EditorEngineError::GpuUnavailable(_) => ErrorKind::Unavailable,
             EditorEngineError::History(_)
@@ -166,6 +169,10 @@ mod tests {
         assert_eq!(
             kind(EditorEngineError::LayerNotFound(4)),
             ErrorKind::NotFound
+        );
+        assert_eq!(
+            kind(EditorEngineError::MaskExists(4)),
+            ErrorKind::InvalidInput
         );
         assert_eq!(
             kind(EditorEngineError::InvalidViewSize {

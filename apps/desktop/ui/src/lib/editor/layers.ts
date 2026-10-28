@@ -220,6 +220,41 @@ export function effectiveLocks(layers: readonly LayerInfo[], id: number): LocksD
   return walk(layers, NO_LOCKS) ?? NO_LOCKS;
 }
 
+/** Which mask commands are available for a layer. */
+export interface MaskCommands {
+  /** A layer without a mask, with no pixels lock. */
+  readonly canAdd: boolean;
+  /** A layer with a mask, with no pixels lock. */
+  readonly canDelete: boolean;
+  /** A layer with a mask, with no `all` lock. */
+  readonly canToggle: boolean;
+}
+
+/**
+ * The mask commands of the layer `id`. The locks are the effective locks
+ * (own and from ancestor groups). The pixels lock (and `all`) stops add
+ * and delete. Only `all` stops the enable switch. A missing layer has no
+ * commands.
+ */
+export function maskCommands(layers: readonly LayerInfo[], id: number | null): MaskCommands {
+  const layer = id === null ? null : findLayer(layers, id);
+  if (id === null || layer === null) {
+    return { canAdd: false, canDelete: false, canToggle: false };
+  }
+  const locks = effectiveLocks(layers, id);
+  const pixelsFree = !locks.pixels && !locks.all;
+  return {
+    canAdd: !layer.hasMask && pixelsFree,
+    canDelete: layer.hasMask && pixelsFree,
+    canToggle: layer.hasMask && !locks.all,
+  };
+}
+
+/** The tooltip of the mask chip in a layer row. */
+export function maskChipTitle(layer: LayerInfo): string {
+  return layer.maskEnabled ? 'Layer mask on. Shift+click to turn it off.' : 'Layer mask off. Shift+click to turn it on.';
+}
+
 /** True if the layer has any own lock. */
 export function hasOwnLock(layer: LayerInfo): boolean {
   const l = layer.locks;

@@ -478,6 +478,9 @@ pub struct LayerInfo {
     pub blend_mode: BlendModeId,
     /// `true` if the layer has a mask.
     pub has_mask: bool,
+    /// `true` if the layer has a mask and the mask is on. `false` if there
+    /// is no mask.
+    pub mask_enabled: bool,
     /// The own locks of the layer (not the locks that a parent group adds).
     pub locks: LocksDto,
     /// The setting of an adjustment layer; `null` for other kinds.
@@ -510,6 +513,7 @@ impl From<&Layer> for LayerInfo {
             fill_opacity: layer.fill_opacity(),
             blend_mode: layer.blend_mode().into(),
             has_mask: layer.mask().is_some(),
+            mask_enabled: layer.mask().is_some_and(|m| m.enabled),
             locks: layer.locks().into(),
             adjustment,
             isolated,
@@ -640,6 +644,23 @@ pub enum EditDto {
     AddPixelLayer { above_layer_id: Option<u64> },
     /// Sets the own locks of a layer.
     SetLocks { layer_id: u64, locks: LocksDto },
+    /// Adds a mask of the canvas size. `reveal`: all 1.0 (white). `hide`:
+    /// all 0.0 (black). It is an error if the layer has a mask.
+    AddMask { layer_id: u64, fill: MaskFillId },
+    /// Removes the mask of a layer.
+    DeleteMask { layer_id: u64 },
+    /// Turns the mask of a layer on or off.
+    SetMaskEnabled { layer_id: u64, enabled: bool },
+}
+
+/// The start state of a new layer mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MaskFillId {
+    /// The mask shows all of the layer.
+    Reveal,
+    /// The mask hides all of the layer.
+    Hide,
 }
 
 impl EditDto {
@@ -658,6 +679,10 @@ impl EditDto {
             Self::SetAdjustment { .. } => "Adjustment Settings",
             Self::AddPixelLayer { .. } => "New Layer",
             Self::SetLocks { .. } => "Layer Locks",
+            Self::AddMask { .. } => "Add Layer Mask",
+            Self::DeleteMask { .. } => "Delete Layer Mask",
+            Self::SetMaskEnabled { enabled: true, .. } => "Enable Layer Mask",
+            Self::SetMaskEnabled { enabled: false, .. } => "Disable Layer Mask",
         }
     }
 }
@@ -897,6 +922,7 @@ mod tests {
         assert_eq!(bottom["fillOpacity"], 1.0);
         assert_eq!(bottom["blendMode"], "normal");
         assert_eq!(bottom["hasMask"], false);
+        assert_eq!(bottom["maskEnabled"], false);
         assert!(bottom["adjustment"].is_null());
         assert!(bottom["isolated"].is_null());
         assert!(bottom["children"].is_null());
@@ -938,6 +964,57 @@ mod tests {
         assert_eq!(layer_id, 4);
         assert!(locks.pixels && !locks.all);
         assert!(Locks::from(locks).pixels);
+    }
+
+    #[test]
+    fn mask_edits_parse_and_have_step_names() {
+        let edit: EditDto =
+            serde_json::from_value(json!({ "type": "addMask", "layerId": 2, "fill": "reveal" }))
+                .unwrap();
+        assert_eq!(
+            edit,
+            EditDto::AddMask {
+                layer_id: 2,
+                fill: MaskFillId::Reveal
+            }
+        );
+        assert_eq!(edit.step_name(), "Add Layer Mask");
+        let edit: EditDto =
+            serde_json::from_value(json!({ "type": "addMask", "layerId": 2, "fill": "hide" }))
+                .unwrap();
+        assert!(matches!(
+            edit,
+            EditDto::AddMask {
+                fill: MaskFillId::Hide,
+                ..
+            }
+        ));
+        let edit: EditDto =
+            serde_json::from_value(json!({ "type": "deleteMask", "layerId": 2 })).unwrap();
+        assert_eq!(edit, EditDto::DeleteMask { layer_id: 2 });
+        assert_eq!(edit.step_name(), "Delete Layer Mask");
+        let edit: EditDto = serde_json::from_value(
+            json!({ "type": "setMaskEnabled", "layerId": 2, "enabled": false }),
+        )
+        .unwrap();
+        assert_eq!(edit.step_name(), "Disable Layer Mask");
+        let back = serde_json::to_value(&edit).unwrap();
+        assert_eq!(
+            back,
+            json!({ "type": "setMaskEnabled", "layerId": 2, "enabled": false })
+        );
+        let on = EditDto::SetMaskEnabled {
+            layer_id: 2,
+            enabled: true,
+        };
+        assert_eq!(on.step_name(), "Enable Layer Mask");
+        // A bad fill name is a parse error.
+        assert!(
+            serde_json::from_value::<EditDto>(
+                json!({ "type": "addMask", "layerId": 2, "fill": "white" })
+            )
+            .is_err()
+        );
     }
 
     fn new_spec() -> NewDocumentSpec {

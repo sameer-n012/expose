@@ -28,10 +28,11 @@ import {
   type EditorApi,
   type LayerInfo,
   type LocksDto,
+  type MaskFillId,
   type NewDocumentSpec,
   type SaveResult,
 } from '../editor/api';
-import { NO_LOCKS, allLayerIds, effectiveLocks, findLayer, moveStep, newLayerIds } from '../editor/layers';
+import { NO_LOCKS, allLayerIds, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
 import {
   clampView,
@@ -196,6 +197,27 @@ export class EditorStore {
   addPixelLayer(): void {
     if (this.info !== null) {
       this.edit({ type: 'addPixelLayer', aboveLayerId: this.selectedId });
+    }
+  }
+
+  /** Adds a canvas-size mask to a layer (default: the selected layer). */
+  addMask(fill: MaskFillId, layerId: number | null = this.selectedId): void {
+    if (layerId !== null && this.info !== null && maskCommands(this.info.layers, layerId).canAdd) {
+      this.edit({ type: 'addMask', layerId, fill });
+    }
+  }
+
+  /** Removes the mask of a layer (default: the selected layer). */
+  deleteMask(layerId: number | null = this.selectedId): void {
+    if (layerId !== null && this.info !== null && maskCommands(this.info.layers, layerId).canDelete) {
+      this.edit({ type: 'deleteMask', layerId });
+    }
+  }
+
+  /** Turns the mask of a layer on or off. */
+  setMaskEnabled(layerId: number, enabled: boolean): void {
+    if (this.info !== null && maskCommands(this.info.layers, layerId).canToggle) {
+      this.edit({ type: 'setMaskEnabled', layerId, enabled });
     }
   }
 

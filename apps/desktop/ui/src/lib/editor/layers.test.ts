@@ -7,6 +7,8 @@ import {
   effectiveLocks,
   hasOwnLock,
   layerRows,
+  maskChipTitle,
+  maskCommands,
   moveStep,
   newLayerIds,
   positionOf,
@@ -22,6 +24,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
     fillOpacity: 1,
     blendMode: 'normal',
     hasMask: false,
+    maskEnabled: false,
     adjustment: null,
     isolated: null,
     children: null,
@@ -32,6 +35,41 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 
 // Bottom-first: 1, 2, group 3 [4, 5].
 const tree: LayerInfo[] = [layer(1), layer(2), layer(3, { kind: 'group', isolated: true, children: [layer(4), layer(5)] })];
+
+describe('maskCommands', () => {
+  const NONE_LOCKS = { transparency: false, pixels: false, position: false, all: false };
+  const masked = { hasMask: true, maskEnabled: true };
+
+  it('allows add on a layer without a mask', () => {
+    expect(maskCommands([layer(1)], 1)).toEqual({ canAdd: true, canDelete: false, canToggle: false });
+  });
+
+  it('allows delete and toggle on a layer with a mask', () => {
+    expect(maskCommands([layer(1, masked)], 1)).toEqual({ canAdd: false, canDelete: true, canToggle: true });
+  });
+
+  it('lets the pixels lock stop add and delete but not the switch', () => {
+    const locks = { ...NONE_LOCKS, pixels: true };
+    expect(maskCommands([layer(1, { locks })], 1).canAdd).toBe(false);
+    expect(maskCommands([layer(1, { ...masked, locks })], 1)).toEqual({ canAdd: false, canDelete: false, canToggle: true });
+  });
+
+  it('lets the all lock of a parent group stop everything', () => {
+    const group = layer(3, { kind: 'group', isolated: true, locks: { ...NONE_LOCKS, all: true }, children: [layer(4, masked), layer(5)] });
+    expect(maskCommands([group], 4)).toEqual({ canAdd: false, canDelete: false, canToggle: false });
+    expect(maskCommands([group], 5).canAdd).toBe(false);
+  });
+
+  it('has no commands without a layer', () => {
+    expect(maskCommands([layer(1)], null)).toEqual({ canAdd: false, canDelete: false, canToggle: false });
+    expect(maskCommands([layer(1)], 9)).toEqual({ canAdd: false, canDelete: false, canToggle: false });
+  });
+
+  it('names the chip action', () => {
+    expect(maskChipTitle(layer(1, masked))).toContain('turn it off');
+    expect(maskChipTitle(layer(1, { hasMask: true, maskEnabled: false }))).toContain('turn it on');
+  });
+});
 
 describe('layerRows', () => {
   it('lists the top layer first and hides collapsed children', () => {
