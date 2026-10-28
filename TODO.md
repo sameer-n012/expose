@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; no worktrees; 2026-10-27)
+- (none — all agent branches are merged; 2026-10-28)
 
 ## Next (suggested order)
 
@@ -18,7 +18,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 1. [ ] **editor-layers-check** (operator) — check in the real webview: New layer (`Mod+Shift+N`), lock toggles (the `all` lock disables opacity/fill/blend), New document (`Mod+N`; first Save opens Save As), Levels and Curves editors. After the check, mark in `FEATURES.md`: new document, lock UI, Levels, Curves (ADR 0017).
 2. [ ] **editor-masks-check** (operator) — check in the real webview: Add mask (click = reveal all, Alt+click = hide all), Mask menu, mask chip (Shift+click enables/disables, Alt+click shows the mask), `\` shows the mask, the "Mask: <name>" badge, undo of each mask edit, locks. After the check, mark the layer masks item in `FEATURES.md` (ADR 0018).
-3. [ ] **editor-selections-ui** (shell S + UI S, shared contract; start here) — the crate model (`Document::select_shape` etc.) and `expose_core::buffer::trace_contours` are merged (ADR 0019). Shell: selection edits as `EditDto` variants (shape, mode, anti-alias, feather; select all, deselect, invert, feather, mask from selection), outline polygons from `trace_contours` on the selection at the view scale (`step` from the zoom, `max_points` cap) returned with the change and on zoom; `DocumentInfo.hasSelection`. UI: rectangle / ellipse / polygon lasso tools (Shift = add, Alt = subtract, Shift+Alt = intersect), SVG outline overlay with an animated dash, `Mod+A`, `Mod+D`, `Mod+Shift+I`, feather dialog, "Mask from selection" in the Mask menu (the "Add mask" button uses the selection when one exists). Note: `feather_selection` takes about 200 ms at 4096² with a 20 px radius (speed-up: blur only the edge band).
+3. [ ] **editor-selections-check** (operator) — check in the real webview: rectangle / ellipse / polygon lasso tools (`M`, `L`, `H`; Shift = add, Alt = subtract, Shift+Alt = intersect; Escape cancels; lasso closes on the first point, double-click, or Enter), the animated outline (also zoomed out and after undo/redo), `Mod+A`, `Mod+D`, `Mod+Shift+I`, Feather dialog (`Shift+F6`), "Mask from selection", and Add mask with a selection. Also check the toolbar layout (top left) and the mask badge (now bottom left). After the check, mark the P1 selection items in `FEATURES.md` (ADR 0021).
+   - Follow-ups (S): the UI rounds shape corners and lasso points to whole canvas pixels (no sub-pixel precision when zoomed in); `feather_selection` takes about 200 ms at 4096² with a 20 px radius (speed-up: blur only the edge band).
 4. [ ] **editor-tools** (O) — (a) layer masks in the UI is done (ADR 0018); (c) selections: crate done (ADR 0019), UI is item 3; then (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke). Design: ADR 0016 (Accepted) — order masks UI → selections → brushes; points (not pixels) over the IPC; selection outline as polygons; partial uploads from per-layer changed rectangles.
 5. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
 6. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); the auto-open of the focused library photo can run while the New document dialog shows; dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
@@ -54,6 +55,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-selections-ui** (PRs #68, #69, ADR 0021) — shell: selection `EditDto` variants, `DocumentInfo.hasSelection`/`selectionVersion`, `editor_selection_outline` (0.5 iso-line, 100 000 point cap, step doubles until it fits), `EditorEngineError::InvalidStep`; UI: hand / rectangle / ellipse / polygon lasso tools, `SelectionOverlay` (animated dash, fetch on version or step change), `Mod+A`/`Mod+D`/`Mod+Shift+I`, Feather dialog, mask from selection. Waits for the operator check (item 3 in "Next").
 
 - [x] **editor-selection-model + core-contour** (PRs #64, #66, ADR 0019) — `Document` selection (`select_shape` rect/ellipse/polygon, modes, anti-alias, feather, select all, deselect, invert, `mask_from_selection`, undo; `selection_version`, `revision` unchanged); `EditorError::NoSelection`; `expose_core::buffer::trace_contours` (marching squares, 4096² ellipse 8.45 ms).
 - [x] **editor-gpu-f16** (PR #65, ADR 0020; memory part of editor-gpu-followups-2) — layer/mask textures, view pyramid, and mask view in `rgba16float`; GPU cache at 4096², 10 layers 2567 → 1699 MiB; slider step 30–33 → 26–27 ms.
