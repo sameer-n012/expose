@@ -154,6 +154,7 @@ pub fn run() -> tauri::Result<()> {
             commands::editor::editor_new,
             commands::editor::editor_render,
             commands::editor::editor_edit,
+            commands::editor::editor_selection_outline,
             commands::editor::editor_undo,
             commands::editor::editor_redo,
             commands::editor::editor_close,

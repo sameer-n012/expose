@@ -9,7 +9,7 @@ use expose_core::develop::CurvePoint;
 use expose_editor::{
     Adjustment, Background, BitDepth, BlendMode, BlendSpace, BrightnessContrast, ColorMode, Curves,
     Document, DocumentSpec, GroupIsolation, HueSaturation, Layer, LayerKind, Levels, LevelsChannel,
-    Locks, MAX_DIMENSION, MAX_PIXELS,
+    Locks, MAX_DIMENSION, MAX_PIXELS, SelectionMode, SelectionShape,
 };
 use serde::{Deserialize, Serialize};
 
@@ -531,6 +531,10 @@ pub fn layer_tree(layers: &[Layer]) -> Vec<LayerInfo> {
 /// The state of an open document that the UI shows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the fields are the UI contract"
+)]
 pub struct DocumentInfo {
     /// The document ID.
     pub document_id: DocumentId,
@@ -558,6 +562,12 @@ pub struct DocumentInfo {
     /// The library photo that the document was first opened from, or
     /// `None` (a new document).
     pub source_photo_id: Option<PhotoId>,
+    /// `true` if the document has a selection.
+    pub has_selection: bool,
+    /// The selection version ([`Document::selection_version`]). It changes
+    /// at each change of the selection, undo, and redo. The value is a
+    /// stamp from a process counter, so it stays far below 2^53.
+    pub selection_version: u64,
 }
 
 impl DocumentInfo {
@@ -576,6 +586,107 @@ impl DocumentInfo {
             dirty: false,
             saved_photo_id: None,
             source_photo_id: None,
+            has_selection: document.selection().is_some(),
+            selection_version: document.selection_version(),
+        }
+    }
+}
+
+/// The outline of the selection of a document (result of
+/// `editor_selection_outline`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionOutline {
+    /// The selection version of the outlines.
+    pub selection_version: u64,
+    /// The sample step that was used (can be larger than the requested
+    /// step).
+    pub step: u32,
+    /// Closed outlines. Each is a flat list `[x0, y0, x1, y1, ...]` in
+    /// canvas pixels.
+    pub contours: Vec<Vec<f32>>,
+}
+
+/// A selection shape in canvas pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[allow(missing_docs, reason = "the field names explain the fields")]
+pub enum SelectionShapeDto {
+    /// A rectangle.
+    Rect {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
+    /// An ellipse in the given box.
+    Ellipse {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
+    /// A closed polygon.
+    Polygon { points: Vec<[f64; 2]> },
+}
+
+impl From<SelectionShapeDto> for SelectionShape {
+    fn from(shape: SelectionShapeDto) -> Self {
+        match shape {
+            SelectionShapeDto::Rect {
+                x,
+                y,
+                width,
+                height,
+            } => Self::Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            SelectionShapeDto::Ellipse {
+                x,
+                y,
+                width,
+                height,
+            } => Self::Ellipse {
+                x,
+                y,
+                width,
+                height,
+            },
+            SelectionShapeDto::Polygon { points } => Self::Polygon {
+                points: points.into_iter().map(|[x, y]| (x, y)).collect(),
+            },
+        }
+    }
+}
+
+/// How a new selection shape combines with the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectionModeId {
+    /// The shape replaces the selection.
+    Replace,
+    /// The shape adds to the selection.
+    Add,
+    /// The shape removes from the selection.
+    Subtract,
+    /// The selection keeps the part inside the shape.
+    Intersect,
+}
+
+impl From<SelectionModeId> for SelectionMode {
+    fn from(mode: SelectionModeId) -> Self {
+        match mode {
+            SelectionModeId::Replace => Self::Replace,
+            SelectionModeId::Add => Self::Add,
+            SelectionModeId::Subtract => Self::Subtract,
+            SelectionModeId::Intersect => Self::Intersect,
         }
     }
 }
@@ -651,6 +762,26 @@ pub enum EditDto {
     DeleteMask { layer_id: u64 },
     /// Turns the mask of a layer on or off.
     SetMaskEnabled { layer_id: u64, enabled: bool },
+    /// Combines a shape with the selection. `feather` is the blur radius
+    /// in pixels.
+    SelectShape {
+        shape: SelectionShapeDto,
+        mode: SelectionModeId,
+        anti_alias: bool,
+        feather: f32,
+    },
+    /// Selects the whole canvas.
+    SelectAll,
+    /// Removes the selection. It is an error if there is no selection.
+    Deselect,
+    /// Inverts the selection. It is an error if there is no selection.
+    InvertSelection,
+    /// Blurs the edge of the selection. It is an error if there is no
+    /// selection.
+    FeatherSelection { radius: f32 },
+    /// Sets the mask of a layer from the selection. It is an error if
+    /// there is no selection.
+    MaskFromSelection { layer_id: u64 },
 }
 
 /// The start state of a new layer mask.
@@ -683,6 +814,12 @@ impl EditDto {
             Self::DeleteMask { .. } => "Delete Layer Mask",
             Self::SetMaskEnabled { enabled: true, .. } => "Enable Layer Mask",
             Self::SetMaskEnabled { enabled: false, .. } => "Disable Layer Mask",
+            Self::SelectShape { .. } => "Select",
+            Self::SelectAll => "Select All",
+            Self::Deselect => "Deselect",
+            Self::InvertSelection => "Invert Selection",
+            Self::FeatherSelection { .. } => "Feather Selection",
+            Self::MaskFromSelection { .. } => "Mask from Selection",
         }
     }
 }
@@ -895,6 +1032,8 @@ mod tests {
         assert_eq!(info.document_id, 9);
         assert_eq!((info.width, info.height), (4, 4));
         assert_eq!(info.revision, doc.revision());
+        assert!(!info.has_selection);
+        assert_eq!(info.selection_version, doc.selection_version());
         assert_eq!(info.layers.len(), 2);
         assert_eq!(info.layers[0].id, background.get());
         assert_eq!(info.layers[0].kind, LayerKindId::Pixel);
@@ -964,6 +1103,90 @@ mod tests {
         assert_eq!(layer_id, 4);
         assert!(locks.pixels && !locks.all);
         assert!(Locks::from(locks).pixels);
+    }
+
+    #[test]
+    fn selection_edits_parse_and_have_step_names() {
+        let edit: EditDto = serde_json::from_value(json!({
+            "type": "selectShape",
+            "shape": {"type": "polygon", "points": [[0, 0], [10, 0], [5, 8]]},
+            "mode": "add",
+            "antiAlias": true,
+            "feather": 0
+        }))
+        .unwrap();
+        assert_eq!(
+            edit,
+            EditDto::SelectShape {
+                shape: SelectionShapeDto::Polygon {
+                    points: vec![[0.0, 0.0], [10.0, 0.0], [5.0, 8.0]]
+                },
+                mode: SelectionModeId::Add,
+                anti_alias: true,
+                feather: 0.0,
+            }
+        );
+        assert_eq!(edit.step_name(), "Select");
+        let rect: EditDto = serde_json::from_value(json!({
+            "type": "selectShape",
+            "shape": {"type": "rect", "x": 1, "y": 2, "width": 3, "height": 4},
+            "mode": "intersect",
+            "antiAlias": false,
+            "feather": 2.5
+        }))
+        .unwrap();
+        assert!(matches!(
+            rect,
+            EditDto::SelectShape {
+                shape: SelectionShapeDto::Rect { .. },
+                mode: SelectionModeId::Intersect,
+                ..
+            }
+        ));
+        let ellipse: SelectionShapeDto = serde_json::from_value(
+            json!({"type": "ellipse", "x": 0, "y": 0, "width": 2, "height": 2}),
+        )
+        .unwrap();
+        assert!(matches!(ellipse, SelectionShapeDto::Ellipse { .. }));
+        // Unit variants of an internally tagged enum.
+        for (text, expected, name) in [
+            ("selectAll", EditDto::SelectAll, "Select All"),
+            ("deselect", EditDto::Deselect, "Deselect"),
+            (
+                "invertSelection",
+                EditDto::InvertSelection,
+                "Invert Selection",
+            ),
+        ] {
+            let parsed: EditDto = serde_json::from_value(json!({ "type": text })).unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.step_name(), name);
+            assert_eq!(
+                serde_json::to_value(&parsed).unwrap(),
+                json!({"type": text})
+            );
+        }
+        let feather: EditDto =
+            serde_json::from_value(json!({"type": "featherSelection", "radius": 4.5})).unwrap();
+        assert_eq!(feather, EditDto::FeatherSelection { radius: 4.5 });
+        assert_eq!(feather.step_name(), "Feather Selection");
+        let mask: EditDto =
+            serde_json::from_value(json!({"type": "maskFromSelection", "layerId": 3})).unwrap();
+        assert_eq!(mask, EditDto::MaskFromSelection { layer_id: 3 });
+        assert_eq!(mask.step_name(), "Mask from Selection");
+    }
+
+    #[test]
+    fn selection_outline_serializes_in_camel_case() {
+        let outline = SelectionOutline {
+            selection_version: 7,
+            step: 2,
+            contours: vec![vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0]],
+        };
+        assert_eq!(
+            serde_json::to_value(&outline).unwrap(),
+            json!({"selectionVersion": 7, "step": 2, "contours": [[0.0, 0.0, 1.0, 0.0, 1.0, 1.0]]})
+        );
     }
 
     #[test]

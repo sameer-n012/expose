@@ -318,8 +318,35 @@ fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineErr
             let id = resolve(document, layer_id)?;
             document.set_adjustment(id, adjustment.into())?
         }
+        edit @ (EditDto::SelectShape { .. }
+        | EditDto::SelectAll
+        | EditDto::Deselect
+        | EditDto::InvertSelection
+        | EditDto::FeatherSelection { .. }
+        | EditDto::MaskFromSelection { .. }) => apply_selection(document, edit)?,
     };
     Ok(undo)
+}
+
+/// Applies a selection edit. Other edits are a bug and give an error.
+fn apply_selection(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineError> {
+    Ok(match edit {
+        EditDto::SelectShape {
+            shape,
+            mode,
+            anti_alias,
+            feather,
+        } => document.select_shape(&shape.into(), mode.into(), anti_alias, feather)?,
+        EditDto::SelectAll => document.select_all()?,
+        EditDto::Deselect => document.deselect()?,
+        EditDto::InvertSelection => document.invert_selection()?,
+        EditDto::FeatherSelection { radius } => document.feather_selection(radius)?,
+        EditDto::MaskFromSelection { layer_id } => {
+            let id = resolve(document, layer_id)?;
+            document.mask_from_selection(id)?
+        }
+        _ => return Err(EditorEngineError::Internal("not a selection edit")),
+    })
 }
 
 #[cfg(test)]
@@ -841,6 +868,71 @@ mod tests {
         s.edit(add.clone(), None).unwrap();
         let error = s.edit(add, None).unwrap_err();
         assert!(matches!(error, EditorEngineError::MaskExists(id) if id == bg));
+    }
+
+    fn select_rect() -> EditDto {
+        EditDto::SelectShape {
+            shape: super::super::dto::SelectionShapeDto::Rect {
+                x: 1.0,
+                y: 1.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            mode: super::super::dto::SelectionModeId::Replace,
+            anti_alias: false,
+            feather: 0.0,
+        }
+    }
+
+    #[test]
+    fn select_and_undo_restore_the_selection_state() {
+        let mut s = session();
+        let before = s.info(1);
+        assert!(!before.has_selection);
+        s.edit(select_rect(), None).unwrap();
+        let selected = s.info(1);
+        assert!(selected.has_selection);
+        assert_ne!(selected.selection_version, before.selection_version);
+        s.undo().unwrap();
+        let undone = s.info(1);
+        assert!(!undone.has_selection);
+        assert_ne!(undone.selection_version, selected.selection_version);
+        s.redo().unwrap();
+        assert!(s.info(1).has_selection);
+    }
+
+    #[test]
+    fn selection_edits_without_selection_fail_without_a_step() {
+        let mut s = session();
+        for edit in [
+            EditDto::Deselect,
+            EditDto::InvertSelection,
+            EditDto::FeatherSelection { radius: 2.0 },
+        ] {
+            let error = s.edit(edit, None).unwrap_err();
+            assert!(matches!(
+                error,
+                EditorEngineError::Editor(EditorError::NoSelection)
+            ));
+        }
+        assert!(!s.info(1).can_undo);
+    }
+
+    #[test]
+    fn selection_edits_apply() {
+        let mut s = session();
+        let bg = background(&s);
+        s.edit(EditDto::SelectAll, None).unwrap();
+        assert!(s.info(1).has_selection);
+        s.edit(EditDto::InvertSelection, None).unwrap();
+        s.edit(EditDto::FeatherSelection { radius: 1.0 }, None)
+            .unwrap();
+        s.edit(select_rect(), None).unwrap();
+        s.edit(EditDto::MaskFromSelection { layer_id: bg }, None)
+            .unwrap();
+        assert!(s.document().layers()[0].mask().is_some());
+        s.edit(EditDto::Deselect, None).unwrap();
+        assert!(!s.info(1).has_selection);
     }
 
     #[test]

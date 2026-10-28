@@ -29,6 +29,7 @@
 
 pub mod dto;
 pub mod engine;
+pub mod outline;
 pub mod save;
 pub mod session;
 
@@ -39,8 +40,10 @@ use expose_gpu::GpuError;
 pub use dto::{
     AdjustmentDto, BackgroundId, BlendModeId, CurvePointDto, DocumentId, DocumentInfo, EditDto,
     LayerInfo, LayerKindId, LevelsChannelDto, LocksDto, NewDocumentSpec, SaveResult,
+    SelectionModeId, SelectionOutline, SelectionShapeDto,
 };
 pub use engine::{EditorEngine, MAX_VIEW_SIDE, RenderRequest, SaveGuard};
+pub use outline::{MAX_OUTLINE_POINTS, selection_outline};
 pub use save::{DocumentOrigin, SaveSnapshot, SavedFiles};
 pub use session::{EditSession, HISTORY_STEPS, build_document};
 
@@ -59,6 +62,9 @@ pub enum EditorEngineError {
     /// The document has no layer with this ID.
     #[error("the document has no layer {0}")]
     LayerNotFound(u64),
+    /// The sample step of a selection outline is 0.
+    #[error("the outline step must be 1 or more")]
+    InvalidStep,
     /// The layer has a mask already. The edit does not replace it.
     #[error("the layer {0} has a mask already")]
     MaskExists(u64),
@@ -133,6 +139,7 @@ impl From<EditorEngineError> for CommandError {
                 ErrorKind::NotFound
             }
             EditorEngineError::InvalidViewSize { .. }
+            | EditorEngineError::InvalidStep
             | EditorEngineError::MaskExists(_)
             | EditorEngineError::SaveInProgress(_) => ErrorKind::InvalidInput,
             EditorEngineError::Editor(inner) => editor_error_kind(inner),
@@ -173,6 +180,10 @@ mod tests {
         );
         assert_eq!(
             kind(EditorEngineError::MaskExists(4)),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            kind(EditorEngineError::InvalidStep),
             ErrorKind::InvalidInput
         );
         assert_eq!(

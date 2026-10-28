@@ -20,7 +20,8 @@ use super::{run_blocking, with_catalog};
 use crate::editor::save::{read_linked_document, save_snapshot};
 use crate::editor::{
     DocumentId, DocumentInfo, DocumentOrigin, EditDto, EditorEngine, EditorEngineError,
-    NewDocumentSpec, RenderRequest, SaveGuard, SaveResult, SavedFiles, build_document,
+    NewDocumentSpec, RenderRequest, SaveGuard, SaveResult, SavedFiles, SelectionOutline,
+    build_document,
 };
 use crate::error::{CommandError, ErrorKind};
 use crate::state::CatalogState;
@@ -362,6 +363,21 @@ pub async fn editor_edit(
     gesture: Option<u64>,
 ) -> Result<DocumentInfo, CommandError> {
     Ok(engine.edit_async(document_id, edit, gesture).await?)
+}
+
+/// Returns the outline of the selection of a document as closed polygons
+/// in canvas pixels. `step` is the sample step in pixels (1 or more). If
+/// the outline is too large, the result has a larger step. A document
+/// without a selection gives no contours.
+///
+/// Errors: `notFound` (document), `invalidInput` (`step` is 0), `internal`.
+#[tauri::command]
+pub async fn editor_selection_outline(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    step: u32,
+) -> Result<SelectionOutline, CommandError> {
+    Ok(engine.selection_outline_async(document_id, step).await?)
 }
 
 /// Undoes the last step of a document. With no step to undo, the document
