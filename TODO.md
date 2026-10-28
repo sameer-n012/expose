@@ -10,20 +10,21 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; no worktrees; 2026-10-27)
+- **editor-gpu-f16** (O, agent) — `rgba16float` textures in `GpuCompositor` to cut GPU memory (memory part of editor-gpu-followups-2).
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
 1. [ ] **editor-layers-check** (operator) — check in the real webview: New layer (`Mod+Shift+N`), lock toggles (the `all` lock disables opacity/fill/blend), New document (`Mod+N`; first Save opens Save As), Levels and Curves editors. After the check, mark in `FEATURES.md`: new document, lock UI, Levels, Curves (ADR 0017).
-2. [ ] **editor-tools** (O) — split before work: (a) layer masks in the UI (add/delete/enable, show mask); (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke); (c) selections (rect/ellipse/lasso, selection as a mask). Design draft: ADR 0016 (Proposed) — order masks UI → selections → brushes; points (not pixels) over the IPC; selection outline as polygons; partial uploads from per-layer changed rectangles.
-3. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
-4. [ ] **editor-layers-followups** (S) — `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); the auto-open of the focused library photo can run while the New document dialog shows; dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
+2. [ ] **editor-masks-check** (operator) — check in the real webview: Add mask (click = reveal all, Alt+click = hide all), Mask menu, mask chip (Shift+click enables/disables, Alt+click shows the mask), `\` shows the mask, the "Mask: <name>" badge, undo of each mask edit, locks. After the check, mark the layer masks item in `FEATURES.md` (ADR 0018).
+3. [ ] **editor-tools** (O) — (a) layer masks in the UI is done (ADR 0018); next: (c) selections (rect/ellipse/lasso, selection as a mask, mask from selection), then (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke). Design: ADR 0016 (Accepted) — order masks UI → selections → brushes; points (not pixels) over the IPC; selection outline as polygons; partial uploads from per-layer changed rectangles.
+4. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
+5. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); the auto-open of the focused library photo can run while the New document dialog shows; dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
-- [ ] **editor-gpu-followups-2** — the first step on a new layer is a full composite (70–79 ms); composite and rebuild the pyramid only in the changed area; GPU memory about 2.6 GiB for a 4096² 10-layer document (sparse tiles; `rgba16float` fails the 5e-5 CPU tolerance at 2.6e-4 — operator decision if a looser tolerance is acceptable).
+- [ ] **editor-gpu-followups-2** — the first step on a new layer is a full composite (70–79 ms); composite and rebuild the pyramid only in the changed area; GPU memory about 2.6 GiB for a 4096² 10-layer document (sparse tiles; `rgba16float` fails the 5e-5 CPU tolerance at 2.6e-4 — operator decision 2026-10-27: a looser tolerance is acceptable; memory part in progress as editor-gpu-f16). The changed-area composite comes with brushes (ADR 0016 "Partial uploads").
 
 ### Follow-ups from merged work
 
@@ -52,6 +53,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-masks-ui** (PRs #61–#63, ADR 0018; operator check pending: editor-masks-check) — `GpuCompositor::render_mask_view` (gray mask view with its own cache); edits `addMask` (reveal/hide), `deleteMask`, `setMaskEnabled`, `LayerInfo.maskEnabled`; `editor_render` `showMaskLayerId`; Layers panel Add mask button, Mask menu, mask chip, show mask (`\`).
 
 - [x] **editor-layers-ui** (PRs #57–#59, ADR 0017; operator check pending: editor-layers-check) — Levels and Curves editors; `addPixelLayer` and `setLocks` edits, `LayerInfo.locks`, `DocumentInfo.sourcePhotoId`, `editor_new`; New layer button, lock toggles, New document dialog, first save of a new document opens Save As.
 
