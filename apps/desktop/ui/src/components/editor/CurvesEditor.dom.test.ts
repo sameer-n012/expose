@@ -52,6 +52,8 @@ async function makeStore() {
     dirty: revision > 0,
     savedPhotoId: null,
     sourcePhotoId: 1,
+    hasSelection: false,
+    selectionVersion: 0,
   });
   const api = {
     open: vi.fn(async () => doc()),

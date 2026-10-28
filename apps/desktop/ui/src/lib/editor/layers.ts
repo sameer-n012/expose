@@ -250,6 +250,18 @@ export function maskCommands(layers: readonly LayerInfo[], id: number | null): M
   };
 }
 
+/**
+ * True if "Mask from selection" can run on the layer. It replaces a mask that
+ * exists, so only the pixels lock (own or from a group) and a missing layer stop it.
+ */
+export function canMaskFromSelection(layers: readonly LayerInfo[], id: number | null): boolean {
+  if (id === null || findLayer(layers, id) === null) {
+    return false;
+  }
+  const locks = effectiveLocks(layers, id);
+  return !locks.pixels && !locks.all;
+}
+
 /** The tooltip of the mask chip in a layer row. */
 export function maskChipTitle(layer: LayerInfo): string {
   const toggle = layer.maskEnabled ? 'Shift+click to turn it off.' : 'Shift+click to turn it on.';

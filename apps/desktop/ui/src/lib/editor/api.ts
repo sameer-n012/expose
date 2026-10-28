@@ -102,6 +102,30 @@ export interface DocumentInfo {
   savedPhotoId: number | null;
   /** The library photo the document was opened from; null for a new document. */
   sourcePhotoId: number | null;
+  /** True if the document has a selection. */
+  hasSelection: boolean;
+  /** Changes at each selection change, also at undo and redo. */
+  selectionVersion: number;
+}
+
+/** How a new selection shape joins the selection that exists. */
+export type SelectionModeId = 'replace' | 'add' | 'subtract' | 'intersect';
+
+/** A selection shape, in canvas pixels. */
+export type SelectionShapeDto =
+  | { type: 'rect'; x: number; y: number; width: number; height: number }
+  /** The box around the ellipse. */
+  | { type: 'ellipse'; x: number; y: number; width: number; height: number }
+  /** 3 or more points. */
+  | { type: 'polygon'; points: [number, number][] };
+
+/** The outline of the selection (for the marching ants). */
+export interface SelectionOutline {
+  selectionVersion: number;
+  /** The step used (can be larger than the requested step). */
+  step: number;
+  /** Closed outlines. Each one is flat: [x0, y0, x1, y1, ...] in canvas pixels. */
+  contours: number[][];
 }
 
 /** The result of `editor_save`. */
@@ -137,7 +161,17 @@ export type EditDto =
   /** A canvas-size mask: `reveal` is all white, `hide` is all black. It is an error if the layer has a mask. */
   | { type: 'addMask'; layerId: number; fill: MaskFillId }
   | { type: 'deleteMask'; layerId: number }
-  | { type: 'setMaskEnabled'; layerId: number; enabled: boolean };
+  | { type: 'setMaskEnabled'; layerId: number; enabled: boolean }
+  /** `feather` is 0..=250 px. */
+  | { type: 'selectShape'; shape: SelectionShapeDto; mode: SelectionModeId; antiAlias: boolean; feather: number }
+  | { type: 'selectAll' }
+  /** Deselect, invert, and feather are errors when there is no selection. */
+  | { type: 'deselect' }
+  | { type: 'invertSelection' }
+  /** `radius` is 0..=250 px. */
+  | { type: 'featherSelection'; radius: number }
+  /** Replaces a mask that exists. Without a selection it makes a reveal-all mask. */
+  | { type: 'maskFromSelection'; layerId: number };
 
 /** The start state of a new layer mask. */
 export type MaskFillId = 'reveal' | 'hide';
@@ -182,6 +216,8 @@ export interface EditorApi {
   /** Saves the document. With `folder` ("Save As"), it makes new files in that folder. */
   save(documentId: number, folder?: string): Promise<SaveResult>;
   close(documentId: number): Promise<void>;
+  /** The outline of the selection. `step` is the sample step in canvas pixels (1 or more). */
+  selectionOutline(documentId: number, step: number): Promise<SelectionOutline>;
 }
 
 /** The real calls through `invoke`. */
@@ -196,4 +232,5 @@ export const editorApi: EditorApi = {
   close: async (documentId) => {
     await invoke<null>('editor_close', { documentId });
   },
+  selectionOutline: (documentId, step) => invoke<SelectionOutline>('editor_selection_outline', { documentId, step }),
 };
