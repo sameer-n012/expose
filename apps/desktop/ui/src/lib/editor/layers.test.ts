@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { LayerInfo } from './api';
-import { BLEND_GROUPS, defaultAdjustment, layerRows, moveStep, newLayerIds, positionOf } from './layers';
+import {
+  BLEND_GROUPS,
+  NO_LOCKS,
+  defaultAdjustment,
+  effectiveLocks,
+  hasOwnLock,
+  layerRows,
+  moveStep,
+  newLayerIds,
+  positionOf,
+} from './layers';
 
 function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
   return {
@@ -15,6 +25,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
     adjustment: null,
     isolated: null,
     children: null,
+    locks: { transparency: false, pixels: false, position: false, all: false },
     ...extra,
   };
 }
@@ -85,5 +96,29 @@ describe('menus and defaults', () => {
 
   it('finds new layer ids', () => {
     expect(newLayerIds(new Set([1, 2, 3, 4, 5]), [...tree, layer(6)])).toEqual([6]);
+  });
+});
+
+describe('effectiveLocks', () => {
+  const lockAll = { transparency: false, pixels: false, position: false, all: true };
+  const lockPos = { transparency: false, pixels: false, position: true, all: false };
+
+  it('returns the own locks of a root layer', () => {
+    expect(effectiveLocks([layer(1, { locks: lockPos })], 1)).toEqual(lockPos);
+  });
+
+  it('adds the locks of the ancestor groups', () => {
+    const layers = [layer(3, { kind: 'group', isolated: true, locks: lockAll, children: [layer(4, { locks: lockPos })] })];
+    expect(effectiveLocks(layers, 4)).toEqual({ transparency: false, pixels: false, position: true, all: true });
+    expect(effectiveLocks(layers, 3).position).toBe(false);
+  });
+
+  it('returns no locks for a missing layer', () => {
+    expect(effectiveLocks(tree, 99)).toEqual(NO_LOCKS);
+  });
+
+  it('hasOwnLock looks at the own locks only', () => {
+    expect(hasOwnLock(layer(1, { locks: lockPos }))).toBe(true);
+    expect(hasOwnLock(layer(1))).toBe(false);
   });
 });

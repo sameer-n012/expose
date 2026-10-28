@@ -18,12 +18,13 @@ const info: DocumentInfo = {
   documentId: 11,
   width: 100,
   height: 80,
-  layers: [{ id: 1, name: 'Photo', kind: 'pixel', visible: true, opacity: 1, fillOpacity: 1, blendMode: 'normal', hasMask: false, adjustment: null, isolated: null, children: null }],
+  layers: [{ id: 1, name: 'Photo', kind: 'pixel', visible: true, opacity: 1, fillOpacity: 1, blendMode: 'normal', hasMask: false, adjustment: null, isolated: null, children: null, locks: { transparency: false, pixels: false, position: false, all: false } }],
   canUndo: false,
   canRedo: false,
   revision: 0,
   dirty: false,
   savedPhotoId: null,
+  sourcePhotoId: 1,
 };
 
 beforeEach(() => {

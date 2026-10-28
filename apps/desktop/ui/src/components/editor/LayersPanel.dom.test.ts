@@ -20,6 +20,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
     adjustment: null,
     isolated: null,
     children: null,
+    locks: { transparency: false, pixels: false, position: false, all: false },
     ...extra,
   };
 }
@@ -27,13 +28,14 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 const bc = { type: 'brightnessContrast', brightness: 0, contrast: 0 } as const;
 
 function doc(layers: LayerInfo[], revision = 0): DocumentInfo {
-  return { documentId: 1, width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, revision, dirty: revision > 0, savedPhotoId: null };
+  return { documentId: 1, width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, revision, dirty: revision > 0, savedPhotoId: null, sourcePhotoId: 1 };
 }
 
 async function makeStore(layers: LayerInfo[]) {
   let revision = 0;
   const api = {
     open: vi.fn(async () => doc(layers)),
+    newDocument: vi.fn(async () => doc(layers)),
     render: vi.fn(async () => new ArrayBuffer(0)),
     edit: vi.fn(async (_id: number, _edit: EditDto, _gesture: number | null) => doc(layers, ++revision)),
     undo: vi.fn(async () => doc(layers, ++revision)),

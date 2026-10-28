@@ -2,7 +2,7 @@
  * Pure helpers for the layer tree: display order, lookup, reorder, blend
  * mode menu, and default adjustments.
  */
-import type { AdjustmentDto, BlendModeId, EditDto, LayerInfo } from './api';
+import type { AdjustmentDto, BlendModeId, EditDto, LayerInfo, LocksDto } from './api';
 
 /** One row of the layers panel. */
 export interface LayerRow {
@@ -187,4 +187,41 @@ export function defaultAdjustment(type: AdjustmentType): AdjustmentDto {
 /** Layer ids in `after` that are not in `before` (for example the layer that a duplicate made). */
 export function newLayerIds(before: ReadonlySet<number>, after: readonly LayerInfo[]): number[] {
   return [...allLayerIds(after)].filter((id) => !before.has(id));
+}
+
+/** No lock set. */
+export const NO_LOCKS: LocksDto = { transparency: false, pixels: false, position: false, all: false };
+
+/**
+ * The locks that apply to a layer: the union of its own locks and the locks
+ * of all its ancestor groups. A missing layer has no locks.
+ */
+export function effectiveLocks(layers: readonly LayerInfo[], id: number): LocksDto {
+  const walk = (list: readonly LayerInfo[], inherited: LocksDto): LocksDto | null => {
+    for (const layer of list) {
+      const own = {
+        transparency: inherited.transparency || layer.locks.transparency,
+        pixels: inherited.pixels || layer.locks.pixels,
+        position: inherited.position || layer.locks.position,
+        all: inherited.all || layer.locks.all,
+      };
+      if (layer.id === id) {
+        return own;
+      }
+      if (layer.children !== null) {
+        const found = walk(layer.children, own);
+        if (found !== null) {
+          return found;
+        }
+      }
+    }
+    return null;
+  };
+  return walk(layers, NO_LOCKS) ?? NO_LOCKS;
+}
+
+/** True if the layer has any own lock. */
+export function hasOwnLock(layer: LayerInfo): boolean {
+  const l = layer.locks;
+  return l.transparency || l.pixels || l.position || l.all;
 }

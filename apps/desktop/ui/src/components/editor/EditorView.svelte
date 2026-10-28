@@ -20,6 +20,7 @@
   import { isEditableTarget } from '../../lib/shortcuts/editable';
   import { editorApi } from '../../lib/editor/api';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
+  import NewDocumentDialog from './NewDocumentDialog.svelte';
   import { describeError, type ToastStore } from '../../lib/stores/toasts.svelte';
 
   interface Props {
@@ -220,7 +221,10 @@
 
 <div class="editor">
   {#if editor.status === 'empty'}
-    <p class="message" role="status">Select a photo in the Library to edit it.</p>
+    <div class="message" role="status">
+      <p>Select a photo in the Library to edit it.</p>
+      <button type="button" onclick={() => editor.requestNewDocument()}>New document…</button>
+    </div>
   {:else if editor.status === 'loading'}
     <p class="message" role="status">Opening the photo…</p>
   {:else if editor.status === 'error'}
@@ -268,6 +272,10 @@
     {/if}
   </div>
 </div>
+
+{#if editor.newDocumentOpen}
+  <NewDocumentDialog {editor} />
+{/if}
 
 <style>
   .editor {
@@ -323,6 +331,8 @@
   }
   .message {
     display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
     align-items: center;
     justify-content: center;
     height: 100%;
