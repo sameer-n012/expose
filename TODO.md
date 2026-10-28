@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; 2026-10-28)
+- **editor-brushes** (2026-10-28, ADR 0022): the brush engine is merged (PR #71). Three agents run: `feat/editor-partial-uploads` (crate, GPU partial uploads), `feat/editor-brush-shell` (stroke commands), `feat/editor-brush-ui` (brush/eraser tools, colors, paint target, stroke client).
 
 ## Next (suggested order)
 
