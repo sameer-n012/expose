@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; no worktrees; 2026-10-27)
+- **editor-selections-ui** (2026-10-28, ADR 0021): two agents with a shared contract — `feat/editor-selections-shell` (selection `EditDto` variants, `DocumentInfo.hasSelection`/`selectionVersion`, `editor_selection_outline`) and `feat/editor-selections-ui` (tools, outline overlay, shortcuts, feather dialog, mask from selection).
 
 ## Next (suggested order)
 
