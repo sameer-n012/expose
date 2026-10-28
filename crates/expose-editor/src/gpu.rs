@@ -69,6 +69,19 @@
 //! Output pixels at that edge can thus be slightly more transparent than
 //! the exact area mean.
 //!
+//! # Mask view
+//!
+//! [`GpuCompositor::render_mask_view`] shows the mask of one layer as an
+//! opaque gray image, with the same view geometry and sampling as
+//! [`GpuCompositor::render_view`]. One kernel makes the gray image of the
+//! full canvas from the canvas part of the mask (the mask fill outside the
+//! mask buffer). The compositor keeps this image and its pyramid for one
+//! mask, with the key: layer ID, [`Layer::mask_version`], mask offset,
+//! mask fill, and canvas size. A pan or a zoom thus runs only the view
+//! kernel. This cache is separate from the composite view cache, so a
+//! change between the two views does not composite or upload again. Both
+//! views write to the same view output texture.
+//!
 //! # Below snapshot
 //!
 //! A slider step changes one property of one layer. The composite of the
@@ -112,6 +125,9 @@
 //!   pyramid (about `16 N / 3`), the "below" snapshot (`16 N`, at most
 //!   one), and the view output (16 bytes for each output pixel). While a
 //!   snapshot is in use, the pool can hold one more free buffer.
+//! - with [`GpuCompositor::render_mask_view`]: the gray image (`16 N`) and
+//!   its pyramid (about `16 N / 3`), for one mask.
+//!   [`GpuCompositor::clear_mask_view_cache`] frees only these.
 //!
 //! Example: 4096 x 4096 (`16 N` = 256 MiB) with 6 canvas-size layers, 2
 //! smaller layers, and one mask: about 2.3 GiB.
@@ -204,6 +220,15 @@ const MIP_KERNEL: Kernel = Kernel {
 const VIEW_KERNEL: Kernel = Kernel {
     name: "expose-editor/view",
     source: include_str!("shaders/view.wgsl"),
+};
+
+/// Renders the mask of one layer as an opaque gray image of the canvas.
+const MASK_VIEW_KERNEL: Kernel = Kernel {
+    name: "expose-editor/mask-view",
+    source: concat!(
+        include_str!("shaders/common.wgsl"),
+        include_str!("shaders/mask_view.wgsl")
+    ),
 };
 
 /// Adjustment kinds in the kernel (`params.flags.w`).
@@ -463,6 +488,30 @@ struct ViewCache {
     mips: Vec<GpuImage>,
 }
 
+/// The key of the mask view cache: all data that changes the gray image
+/// of a mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MaskViewKey {
+    layer: LayerId,
+    /// [`Layer::mask_version`] (the mask values).
+    version: u64,
+    /// The mask offset and fill. They do not change the mask version.
+    offset: (i32, i32),
+    fill: MaskFill,
+    /// The canvas size.
+    size: (u32, u32),
+}
+
+/// The cached gray image of one mask and its view pyramid, for
+/// [`GpuCompositor::render_mask_view`].
+#[derive(Debug)]
+struct MaskViewCache {
+    key: MaskViewKey,
+    /// The gray image of the full canvas (opaque) in `composite`, and its
+    /// pyramid. `revision` is not used.
+    view: ViewCache,
+}
+
 /// All data of a layer (and of its children) that changes its composite
 /// step, without the pixel and mask values. The content versions stand
 /// for the values: they are unique stamps in the process (see
@@ -584,7 +633,8 @@ pub struct GpuCompositor {
     pool: Vec<GpuImage>,
     /// The composite of the full canvas for [`GpuCompositor::render_view`].
     view: Option<ViewCache>,
-    /// The output of the last [`GpuCompositor::render_view`].
+    /// The output of the last [`GpuCompositor::render_view`] or
+    /// [`GpuCompositor::render_mask_view`].
     view_output: Option<GpuImage>,
     /// The number of view composites since the compositor was made.
     view_builds: u64,
@@ -592,6 +642,11 @@ pub struct GpuCompositor {
     below: Option<BelowCache>,
     /// The number of view composites that started from the snapshot.
     view_partial_builds: u64,
+    /// The gray image of the last mask for
+    /// [`GpuCompositor::render_mask_view`].
+    mask_view: Option<MaskViewCache>,
+    /// The number of mask view builds since the compositor was made.
+    mask_view_builds: u64,
 }
 
 impl GpuCompositor {
@@ -606,18 +661,36 @@ impl GpuCompositor {
             view_builds: 0,
             below: None,
             view_partial_builds: 0,
+            mask_view: None,
+            mask_view_builds: 0,
         })
     }
 
     /// Frees all cached GPU memory: layer textures, free buffers, the view
-    /// composite, its pyramid, and the "below" snapshot, and the view
-    /// output. The next call uploads and composites again.
+    /// composite, its pyramid, and the "below" snapshot, the mask view
+    /// image and its pyramid, and the view output. The next call uploads
+    /// and composites again.
     pub fn clear_cache(&mut self) {
         self.cache.entries.clear();
         self.pool.clear();
         self.view = None;
         self.view_output = None;
         self.below = None;
+        self.mask_view = None;
+    }
+
+    /// Frees only the mask view image and its pyramid (for example, when
+    /// the editor stops to show a mask). The composite view cache stays.
+    pub fn clear_mask_view_cache(&mut self) {
+        self.mask_view = None;
+    }
+
+    /// Returns the number of mask view builds (mask upload, gray image,
+    /// and pyramid) that [`GpuCompositor::render_mask_view`] made since
+    /// the compositor was made. Use it to check the cache (for example, a
+    /// pan must not build again).
+    pub const fn mask_view_builds(&self) -> u64 {
+        self.mask_view_builds
     }
 
     /// Returns the number of layer and mask uploads since the compositor
@@ -666,6 +739,7 @@ impl GpuCompositor {
         let view = self
             .view
             .iter()
+            .chain(self.mask_view.iter().map(|m| &m.view))
             .flat_map(|v| std::iter::once(&v.composite).chain(v.mips.iter()))
             .map(bytes);
         let below = self
@@ -783,39 +857,117 @@ impl GpuCompositor {
     ) -> EditorResult<&GpuImage> {
         check_view(view, ctx.limits().max_texture_dimension_2d)?;
         let cache = self.take_view(ctx, document).await?;
-
-        let wanted = view_level(view.scale);
-        let level = wanted.min(cache.mips.len());
-        let source = match level.checked_sub(1).and_then(|i| cache.mips.get(i)) {
-            Some(mip) => mip,
-            None => &cache.composite,
-        };
-        // `level` is at most the pyramid depth (at most 15 for
-        // MAX_DIMENSION), so the cast is exact.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let level_scale = 2.0_f64.powi(level as i32);
-        let params = view_params(
-            view,
-            level_scale,
-            (source.width(), source.height()),
-            view.scale >= 1.0,
-        );
-
-        let out = match self.view_output.take() {
-            Some(image) if image.width() == view.width && image.height() == view.height => image,
-            _ => GpuImage::new(ctx, view.width, view.height, FORMAT).await?,
-        };
-        let out = self.view_output.insert(out);
-        let result = match params {
-            Ok(params) => ctx
-                .run_kernel_multi(&VIEW_KERNEL, &params, &[source], out)
-                .await
-                .map_err(EditorError::from),
-            Err(error) => Err(error),
-        };
+        let result = draw_view(ctx, &cache, view, &mut self.view_output).await;
         self.view = Some(cache);
-        result?;
-        Ok(out)
+        result
+    }
+
+    /// Renders the mask of `layer` as an opaque gray image in the same view
+    /// geometry as [`Self::render_view`].
+    ///
+    /// Each canvas pixel shows the mask value `v` of the layer at that
+    /// pixel: inside the mask buffer the value clamped to `0.0..=1.0`,
+    /// outside it the value of the mask fill. A disabled mask also shows
+    /// its values. The output pixel is opaque gray with the RGB value
+    /// `srgb_decode(v)` (linear), so that a display encoder with the sRGB
+    /// transfer curve shows `v` as display gray `v`. Output pixels outside
+    /// the canvas are transparent, as in [`Self::render_view`].
+    ///
+    /// The image belongs to the compositor. It is the same image as the
+    /// output of [`Self::render_view`]: the next call of either function
+    /// writes to it again.
+    ///
+    /// - The compositor keeps the gray image of the full canvas and its
+    ///   pyramid on the GPU, for one mask. It uploads the mask and builds
+    ///   them again only if the layer, the mask values
+    ///   ([`Layer::mask_version`]), the mask offset or fill, or the canvas
+    ///   size changed. A pan or a zoom thus runs one kernel of the view
+    ///   size.
+    /// - The function does not use or change the composite view cache of
+    ///   [`Self::render_view`].
+    /// - Zoom 1 or more: nearest neighbor. Zoom less than 1: the area mean
+    ///   of the gray values (linear) under each output pixel.
+    ///
+    /// # Errors
+    ///
+    /// - [`EditorError::InvalidView`] as in [`Self::render_view`].
+    /// - [`EditorError::LayerNotFound`] if no layer has the ID `layer`.
+    /// - [`EditorError::NoMask`] if the layer has no mask.
+    /// - [`EditorError::Gpu`] if a GPU operation fails (for example, the
+    ///   canvas is larger than the device texture limit).
+    pub async fn render_mask_view(
+        &mut self,
+        ctx: &GpuContext,
+        document: &Document,
+        view: &ViewSpec,
+        layer: LayerId,
+    ) -> EditorResult<&GpuImage> {
+        check_view(view, ctx.limits().max_texture_dimension_2d)?;
+        let found = document
+            .layer(layer)
+            .ok_or(EditorError::LayerNotFound(layer))?;
+        let mask = found.mask().ok_or(EditorError::NoMask(layer))?;
+        let bounds = document.bounds();
+        check_region(document, bounds)?;
+        let key = MaskViewKey {
+            layer,
+            version: found.mask_version(),
+            offset: mask.offset,
+            fill: mask.fill,
+            size: (bounds.width, bounds.height),
+        };
+        let cache = self.take_mask_view(ctx, key, mask).await?;
+        let result = draw_view(ctx, &cache.view, view, &mut self.view_output).await;
+        self.mask_view = Some(cache);
+        result
+    }
+
+    /// Takes the mask view cache out of `self.mask_view`, and builds it
+    /// again if its key is not `key`.
+    async fn take_mask_view(
+        &mut self,
+        ctx: &GpuContext,
+        key: MaskViewKey,
+        mask: &Mask,
+    ) -> EditorResult<MaskViewCache> {
+        let mut reuse = None;
+        if let Some(cache) = self.mask_view.take() {
+            if cache.key == key {
+                return Ok(cache);
+            }
+            if cache.key.size == key.size {
+                // The new image replaces the old one: the textures stay.
+                reuse = Some((cache.view.composite, cache.view.mips));
+            }
+        }
+        self.mask_view_builds += 1;
+        let (width, height) = key.size;
+        let canvas = Rect::new(0, 0, width, height);
+        let mut params = Params::zeroed();
+        params.region = rect_param(canvas)?;
+        params.coef[1] = mask.fill.value();
+        // Only the part of the mask buffer inside the canvas is uploaded.
+        // If there is no such part, the fill value applies everywhere
+        // (`params.mask` is then empty).
+        let (mw, mh) = (mask.image.width(), mask.image.height());
+        let texture = match canvas.intersection_signed(mask.offset.0, mask.offset.1, mw, mh) {
+            Some(part) => {
+                params.mask = rect_param(part)?;
+                let local = to_local(part, mask.offset)?;
+                Some(upload_mask(ctx, &mask.image, local).await?)
+            }
+            None => None,
+        };
+        let (image, mips) = match reuse {
+            Some(textures) => textures,
+            None => (GpuImage::new(ctx, width, height, FORMAT).await?, Vec::new()),
+        };
+        let p = &self.placeholder;
+        let m = texture.as_ref().unwrap_or(p);
+        ctx.run_kernel_multi(&MASK_VIEW_KERNEL, &params, &[p, m, p], &image)
+            .await?;
+        let view = build_pyramid(ctx, key.version, image, mips).await?;
+        Ok(MaskViewCache { key, view })
     }
 
     /// Takes the view composite out of `self.view`, and composites again
@@ -928,6 +1080,42 @@ impl GpuCompositor {
         });
         Ok(image)
     }
+}
+
+/// Renders `view` from the image and pyramid in `cache` to the view output
+/// in `output` (a new texture if the output size changed). See
+/// [`GpuCompositor::render_view`] for the sampling.
+async fn draw_view<'o>(
+    ctx: &GpuContext,
+    cache: &ViewCache,
+    view: &ViewSpec,
+    output: &'o mut Option<GpuImage>,
+) -> EditorResult<&'o GpuImage> {
+    let wanted = view_level(view.scale);
+    let level = wanted.min(cache.mips.len());
+    let source = match level.checked_sub(1).and_then(|i| cache.mips.get(i)) {
+        Some(mip) => mip,
+        None => &cache.composite,
+    };
+    // `level` is at most the pyramid depth (at most 15 for
+    // MAX_DIMENSION), so the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let level_scale = 2.0_f64.powi(level as i32);
+    let params = view_params(
+        view,
+        level_scale,
+        (source.width(), source.height()),
+        view.scale >= 1.0,
+    )?;
+
+    let out = match output.take() {
+        Some(image) if image.width() == view.width && image.height() == view.height => image,
+        _ => GpuImage::new(ctx, view.width, view.height, FORMAT).await?,
+    };
+    let out = output.insert(out);
+    ctx.run_kernel_multi(&VIEW_KERNEL, &params, &[source], out)
+        .await?;
+    Ok(out)
 }
 
 /// Fills the view pyramid of `composite`. `mips` are the textures of an
@@ -1636,6 +1824,7 @@ mod tests {
         clippy::too_many_lines
     )]
 
+    use expose_core::color::TransferFunction;
     use expose_core::develop::CurvePoint;
     use expose_gpu::{GpuContextOptions, GpuError};
 
@@ -2624,6 +2813,165 @@ mod tests {
         let out = read_view(&ctx, &mut comp, &small, view(0.0, 0.0, 0.5, 2, 1));
         assert_eq!(comp.view_composites(), 3);
         assert!((out[0][0] - 0.5).abs() < 1e-6);
+    }
+
+    /// Renders a mask view and reads it back.
+    fn read_mask_view(
+        ctx: &GpuContext,
+        comp: &mut GpuCompositor,
+        doc: &Document,
+        spec: ViewSpec,
+        layer: LayerId,
+    ) -> Vec<[f32; 4]> {
+        let image = pollster::block_on(comp.render_mask_view(ctx, doc, &spec, layer)).unwrap();
+        assert_eq!((image.width(), image.height()), (spec.width, spec.height));
+        let data = pollster::block_on(image.read_rgba_f32(ctx)).unwrap();
+        data.chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2], p[3]])
+            .collect()
+    }
+
+    /// The expected mask view pixel for the mask value `v`.
+    fn mask_gray(v: f32) -> [f32; 4] {
+        let g = TransferFunction::Srgb.decode(v);
+        [g, g, g, 1.0]
+    }
+
+    fn assert_mask_pixel(got: [f32; 4], want: [f32; 4], tol: f32, what: &str) {
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() <= tol, "{what}: {got:?} against {want:?}");
+        }
+    }
+
+    #[test]
+    fn render_mask_view_at_scale_one_is_the_straight_crop() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(21);
+        let mut doc = empty_doc(24, 20, BlendSpace::Perceptual);
+        let a = add_pixel(&mut doc, &mut rng, None, (24, 20), (0, 0));
+        let b = add_pixel(&mut doc, &mut rng, None, (12, 12), (6, 2));
+        // Mask of `a`: smaller than the canvas, partly outside it, black
+        // fill. Mask of `b`: disabled, white fill.
+        set_mask(&mut doc, &mut rng, a, (10, 6), (-3, 4), MaskFill::Black);
+        set_mask(&mut doc, &mut rng, b, (8, 9), (10, 8), MaskFill::White);
+        doc.set_mask_enabled(b, false).unwrap();
+        for id in [a, b] {
+            let mask = doc.layer(id).unwrap().mask().unwrap().clone();
+            // The left 3 columns and the bottom 5 rows are outside the canvas.
+            let out = read_mask_view(&ctx, &mut comp, &doc, view(-3.0, 5.0, 1.0, 30, 20), id);
+            for y in 0..20_i64 {
+                for x in 0..30_i64 {
+                    let got = out[(y * 30 + x) as usize];
+                    let (cx, cy) = (x - 3, y + 5);
+                    if !((0..24).contains(&cx) && (0..20).contains(&cy)) {
+                        assert_eq!(got, [0.0; 4], "({x}, {y}) is outside the canvas");
+                        continue;
+                    }
+                    let (mx, my) = (cx - i64::from(mask.offset.0), cy - i64::from(mask.offset.1));
+                    let inside = match (u32::try_from(mx), u32::try_from(my)) {
+                        (Ok(mx), Ok(my)) => mask.image.get(mx, my),
+                        _ => None,
+                    };
+                    let v = inside.unwrap_or(mask.fill.value()).clamp(0.0, 1.0);
+                    assert_mask_pixel(got, mask_gray(v), 1e-5, &format!("{id} ({x}, {y})"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn render_mask_view_downscale_keeps_a_flat_value() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut doc = flat_doc(64, 48, |_, _| [0.2, 0.3, 0.4, 1.0]);
+        let id = doc.layers()[0].id();
+        let image = MaskImage::from_data(64, 48, vec![0.5; 64 * 48]).unwrap();
+        doc.set_mask(id, Some(Mask::new(image, (0, 0), MaskFill::White)))
+            .unwrap();
+        let want = mask_gray(0.5);
+        for scale in [0.9, 0.5, 0.3, 0.25, 0.1] {
+            // Keep the output pixels inside the canvas.
+            let w = (64.0 * scale) as u32 - 1;
+            let h = (48.0 * scale) as u32 - 1;
+            let out = read_mask_view(&ctx, &mut comp, &doc, view(0.0, 0.0, scale, w, h), id);
+            for (i, p) in out.iter().enumerate() {
+                assert_mask_pixel(*p, want, 1e-4, &format!("scale {scale}, pixel {i}"));
+            }
+        }
+        assert_eq!(comp.mask_view_builds(), 1);
+    }
+
+    #[test]
+    fn render_mask_view_builds_only_after_a_mask_change() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(22);
+        let mut doc = empty_doc(16, 16, BlendSpace::Perceptual);
+        let id = add_pixel(&mut doc, &mut rng, None, (16, 16), (0, 0));
+        let image = MaskImage::from_data(16, 16, vec![0.25; 256]).unwrap();
+        doc.set_mask(id, Some(Mask::new(image, (0, 0), MaskFill::White)))
+            .unwrap();
+        let full = view(0.0, 0.0, 1.0, 16, 16);
+
+        read_view(&ctx, &mut comp, &doc, full);
+        assert_eq!(comp.view_composites(), 1);
+        let out = read_mask_view(&ctx, &mut comp, &doc, full, id);
+        assert_mask_pixel(out[0], mask_gray(0.25), 1e-5, "first");
+        assert_eq!(comp.mask_view_builds(), 1);
+
+        // Pan and zoom, and a disable of the mask: no new build.
+        read_mask_view(&ctx, &mut comp, &doc, view(-2.5, 3.0, 2.0, 20, 10), id);
+        read_mask_view(&ctx, &mut comp, &doc, view(0.0, 0.0, 0.3, 4, 4), id);
+        doc.set_mask_enabled(id, false).unwrap();
+        let out = read_mask_view(&ctx, &mut comp, &doc, full, id);
+        assert_mask_pixel(out[0], mask_gray(0.25), 1e-5, "disabled");
+        assert_eq!(comp.mask_view_builds(), 1);
+        // The composite view cache stays: no new composite.
+        read_view(&ctx, &mut comp, &doc, full);
+        assert_eq!(
+            comp.view_composites(),
+            2,
+            "the disable changed the revision"
+        );
+        read_mask_view(&ctx, &mut comp, &doc, full, id);
+        read_view(&ctx, &mut comp, &doc, full);
+        assert_eq!(comp.view_composites(), 2);
+        assert_eq!(comp.mask_view_builds(), 1);
+
+        // A mask write builds again and changes the result.
+        doc.write_mask(id, Rect::new(0, 0, 1, 1), &[0.75]).unwrap();
+        let out = read_mask_view(&ctx, &mut comp, &doc, full, id);
+        assert_eq!(comp.mask_view_builds(), 2);
+        assert_mask_pixel(out[0], mask_gray(0.75), 1e-5, "after write");
+        assert_mask_pixel(out[1], mask_gray(0.25), 1e-5, "after write, next pixel");
+
+        // The cache is counted, and the mask view clear frees it (at least
+        // the gray image of 16 x 16 rgba32float pixels).
+        let with_mask = comp.cache_memory_bytes();
+        comp.clear_mask_view_cache();
+        assert!(comp.cache_memory_bytes() + 16 * 256 <= with_mask);
+        read_mask_view(&ctx, &mut comp, &doc, full, id);
+        assert_eq!(comp.mask_view_builds(), 3);
+    }
+
+    #[test]
+    fn render_mask_view_rejects_a_layer_without_mask_and_an_unknown_layer() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(23);
+        let mut doc = empty_doc(8, 8, BlendSpace::Perceptual);
+        let id = add_pixel(&mut doc, &mut rng, None, (8, 8), (0, 0));
+        let full = view(0.0, 0.0, 1.0, 8, 8);
+        let result = pollster::block_on(comp.render_mask_view(&ctx, &doc, &full, id));
+        assert!(matches!(result, Err(EditorError::NoMask(e)) if e == id));
+        let unknown = LayerId(u64::MAX);
+        let result = pollster::block_on(comp.render_mask_view(&ctx, &doc, &full, unknown));
+        assert!(matches!(result, Err(EditorError::LayerNotFound(e)) if e == unknown));
+        let bad = view(0.0, 0.0, 0.0, 8, 8);
+        let result = pollster::block_on(comp.render_mask_view(&ctx, &doc, &bad, id));
+        assert!(matches!(result, Err(EditorError::InvalidView(_))));
+        assert_eq!(comp.mask_view_builds(), 0);
     }
 
     /// Renders a view of `doc` and checks the cached view composite: it must
