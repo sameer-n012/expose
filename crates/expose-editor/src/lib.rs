@@ -17,6 +17,9 @@
 //!   of layer textures, and renders zoomed and panned views of a cached
 //!   full composite for the editor canvas
 //!   ([`GpuCompositor::render_view`], [`ViewSpec`]).
+//! - [`selection`]: the document selection (rectangle, ellipse, and
+//!   polygon shapes, combine modes, feather, invert, mask from selection).
+//!   [`Document::selection_version`] changes at each selection change.
 //! - [`history`]: undo and redo. [`History::push_merge`] makes one undo
 //!   step from a gesture (for example, a slider drag).
 //! - [`mod@file`]: the native layered document file (`.exdoc`):
@@ -72,6 +75,7 @@ pub mod gpu;
 pub mod history;
 pub mod layer;
 pub mod ops;
+pub mod selection;
 pub mod version;
 
 pub use adjust::{
@@ -94,6 +98,9 @@ pub use layer::{
     Mask, MaskFill, MaskImage, PixelLayer, Placement,
 };
 pub use ops::Edit;
+pub use selection::{
+    MAX_FEATHER_RADIUS, MAX_POLYGON_POINTS, MAX_SELECTION_COORD, SelectionMode, SelectionShape,
+};
 
 /// The name of this crate.
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");

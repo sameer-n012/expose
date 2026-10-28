@@ -15,7 +15,8 @@
 //! Pixel and mask writes store only the old values of the written
 //! rectangle, not a copy of the layer. The values are swapped in place, so
 //! undo and redo need no extra copy. Delete stores the removed layer (with
-//! its pixels), because undo must restore it.
+//! its pixels), because undo must restore it. Selection edits store the
+//! old selection in a compact form (see [`crate::selection`]).
 
 use expose_core::buffer::{Rect, Rgba};
 
@@ -27,6 +28,7 @@ use crate::layer::{
     Group, GroupIsolation, Layer, LayerContent, LayerId, LayerKind, LayerProps, LockKind, Locks,
     Mask, Placement,
 };
+use crate::selection::StoredSelection;
 
 /// A reversible change to a document. See the module documentation.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,11 +87,19 @@ enum EditKind {
         data: Vec<f32>,
     },
     BlendSpace(BlendSpace),
+    /// The document selection to set (`None` = no selection), in compact
+    /// form. See [`crate::selection`].
+    Selection(Option<Box<StoredSelection>>),
 }
 
 impl Edit {
     const fn new(kind: EditKind) -> Self {
         Self { kind }
+    }
+
+    /// Makes an edit that sets the document selection.
+    pub(crate) fn selection(selection: Option<StoredSelection>) -> Self {
+        Self::new(EditKind::Selection(selection.map(Box::new)))
     }
 
     /// Returns the approximate heap memory of the edit in bytes. The
@@ -108,6 +118,7 @@ impl Edit {
             EditKind::Mask { mask, .. } => mask.as_ref().map_or(0, |m| size_of_val(m.image.data())),
             EditKind::PixelPatch { data, .. } => size_of_val(data.as_slice()),
             EditKind::MaskPatch { data, .. } => size_of_val(data.as_slice()),
+            EditKind::Selection(s) => s.as_ref().map_or(0, |s| s.memory_bytes()),
             EditKind::Remove { .. }
             | EditKind::Move { .. }
             | EditKind::Isolation { .. }
@@ -203,8 +214,20 @@ impl Document {
     /// the same values as before, so its old versions are still correct.
     /// A move (translate) keeps the versions, because the values do not
     /// change (only the offsets).
+    ///
+    /// A selection edit gives the document a new selection version, but it
+    /// keeps the revision: the selection does not change the composite, so
+    /// caches that use the revision stay valid.
     pub(crate) fn apply_edit(&mut self, edit: Edit) -> EditorResult<Edit> {
         let inverse = match edit.kind {
+            EditKind::Selection(stored) => {
+                // Expand first: if it fails, the document did not change.
+                let new = match stored {
+                    Some(s) => Some(s.expand(self.width(), self.height())?),
+                    None => None,
+                };
+                return Ok(self.replace_selection(new));
+            }
             EditKind::Insert { at, layer } => self.raw_insert(at, *layer)?,
             EditKind::Remove { id } => self.raw_remove(id)?,
             EditKind::Move { id, to } => self.raw_move(id, to)?,
