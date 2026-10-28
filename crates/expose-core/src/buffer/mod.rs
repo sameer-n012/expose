@@ -7,10 +7,13 @@
 //! - [`Rect`]: a pixel rectangle for tiles and crops.
 //! - [`resize`] and [`fit_size`]: high-quality resampling (Lanczos-3 in
 //!   linear light) and output size computation for export.
+//! - [`trace_contours`]: outline polygons ([`Contour`]) of a [`GrayImage`]
+//!   (marching squares), for example for the selection outline.
 //!
 //! Convert I/O images to the working format with [`Image::to_working`], and
 //! back with [`WorkingImage::to_image`].
 
+mod contour;
 mod convert;
 mod encode_lut;
 mod gray;
@@ -20,6 +23,7 @@ mod rect;
 mod resample;
 mod working;
 
+pub use contour::{Contour, trace_contours};
 pub use gray::GrayImage;
 pub use io::{ChannelLayout, Image, Image8, Image16, Sample};
 pub use orientation::Orientation;
