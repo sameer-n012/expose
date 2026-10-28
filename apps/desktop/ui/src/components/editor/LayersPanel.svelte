@@ -63,9 +63,14 @@
     action();
   }
 
-  /** Shift+click on the chip turns the mask on or off. Other clicks select the layer. */
+  /**
+   * Shift+click on the chip turns the mask on or off. Alt+click shows or
+   * hides the mask on the canvas. Other clicks select the layer.
+   */
   function onChip(event: MouseEvent, layer: LayerInfo): void {
-    if (event.shiftKey) {
+    if (event.altKey) {
+      editor.toggleShowMask(layer.id);
+    } else if (event.shiftKey) {
       editor.setMaskEnabled(layer.id, !layer.maskEnabled);
     } else {
       editor.select(layer.id);
@@ -210,6 +215,15 @@
             >
               {selected?.hasMask && !selected.maskEnabled ? 'Enable Mask' : 'Disable Mask'}
             </button>
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={editor.showMask}
+              disabled={selected?.hasMask !== true}
+              onclick={() => maskMenu(() => editor.toggleShowMask())}
+            >
+              {editor.showMask ? '✓ ' : ''}Show Mask
+            </button>
             <button type="button" role="menuitem" disabled={!maskCmd.canDelete} onclick={() => maskMenu(() => editor.deleteMask())}>
               Delete Mask
             </button>
@@ -292,6 +306,7 @@
                 type="button"
                 class="mask-chip"
                 class:off={!layer.maskEnabled}
+                class:shown={editor.showMaskLayerId === layer.id}
                 aria-label={layer.maskEnabled ? `Mask of ${layer.name} is on` : `Mask of ${layer.name} is off`}
                 title={maskChipTitle(layer)}
                 onclick={(e) => onChip(e, layer)}
@@ -519,6 +534,10 @@
   .mask-chip.off {
     background: var(--color-bg-panel-raised);
     opacity: 0.7;
+  }
+  .mask-chip.shown {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
   }
   .mask-chip .x {
     position: absolute;

@@ -167,6 +167,8 @@ export interface RenderArea {
   /** Output size in pixels. */
   width: number;
   height: number;
+  /** Id of a layer with a mask: the frame shows its mask as a gray image. Absent or null: the composite. */
+  showMaskLayerId?: number | null;
 }
 
 /** The backend calls of the Editor. Tests replace them. */

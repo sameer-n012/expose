@@ -102,6 +102,8 @@ export class EditorStore {
   loadError = $state<string | null>(null);
   /** The selected layer id, or null. */
   selectedId = $state<number | null>(null);
+  /** The layer that the user asked to show the mask of (see `showMaskLayerId`). */
+  #maskTarget = $state<number | null>(null);
   /** Ids of the expanded groups. */
   expanded = $state.raw<ReadonlySet<number>>(new Set());
   /** The canvas view, or null until the document and the viewport are known. */
@@ -175,6 +177,45 @@ export class EditorStore {
     const focus = this.#library.focusIndex;
     const focused = focus === null ? undefined : this.#library.photoAt(focus);
     return focused?.id ?? this.#library.selectedIds[0] ?? null;
+  }
+
+  /**
+   * The layer whose mask the canvas shows as a gray image, or null. It is
+   * the selected layer, and only while that layer has a mask. A change of the
+   * selection, a lost mask, or a new document turns the mask view off.
+   */
+  get showMaskLayerId(): number | null {
+    const target = this.#maskTarget;
+    if (target === null || target !== this.selectedId) {
+      return null;
+    }
+    return this.selected?.hasMask === true ? target : null;
+  }
+
+  /** True while the canvas shows a mask. */
+  get showMask(): boolean {
+    return this.showMaskLayerId !== null;
+  }
+
+  /**
+   * Turns the mask view on or off for `layerId` (default: the selected
+   * layer). Does nothing if the layer has no mask. A layer that is not
+   * selected becomes selected first.
+   */
+  toggleShowMask(layerId: number | null = this.selectedId): void {
+    const info = this.info;
+    if (info === null || layerId === null) {
+      return;
+    }
+    if (findLayer(info.layers, layerId)?.hasMask !== true) {
+      return;
+    }
+    if (layerId === this.showMaskLayerId) {
+      this.#maskTarget = null;
+      return;
+    }
+    this.selectedId = layerId;
+    this.#maskTarget = layerId;
   }
 
   get selected(): LayerInfo | null {
@@ -309,6 +350,7 @@ export class EditorStore {
     this.view = null;
     this.fit = true;
     this.selectedId = null;
+    this.#maskTarget = null;
     this.expanded = new Set();
     this.status = 'loading';
     this.loadError = null;
@@ -350,6 +392,7 @@ export class EditorStore {
     const old = this.info;
     this.#live.clear();
     this.info = null;
+    this.#maskTarget = null;
     this.view = null;
     this.status = 'empty';
     this.photoId = null;
@@ -506,6 +549,9 @@ export class EditorStore {
   // ---- Selection ----
 
   select(id: number | null): void {
+    if (id !== this.#maskTarget) {
+      this.#maskTarget = null;
+    }
     this.selectedId = id;
   }
 
@@ -533,6 +579,7 @@ export class EditorStore {
         const added = newLayerIds(before, next.layers);
         const top = added[added.length - 1];
         if (top !== undefined) {
+          this.#maskTarget = null;
           this.selectedId = top;
         }
       }
@@ -716,6 +763,10 @@ export class EditorStore {
     const ids = allLayerIds(next.layers);
     if (this.selectedId !== null && !ids.has(this.selectedId)) {
       this.selectedId = null;
+    }
+    // Forget the mask target when its layer is gone or has lost its mask.
+    if (this.#maskTarget !== null && findLayer(next.layers, this.#maskTarget)?.hasMask !== true) {
+      this.#maskTarget = null;
     }
     if ([...this.expanded].some((id) => !ids.has(id))) {
       this.expanded = new Set([...this.expanded].filter((id) => ids.has(id)));

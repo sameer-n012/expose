@@ -128,8 +128,9 @@
       return;
     }
     void info.revision;
+    const showMaskLayerId = editor.showMaskLayerId;
     const ratio = typeof window === 'undefined' ? 1 : window.devicePixelRatio;
-    client.request(renderArea(view, viewport, ratio));
+    client.request({ ...renderArea(view, viewport, ratio), showMaskLayerId });
   });
 
   $effect(() => {
@@ -267,6 +268,9 @@
       style:height="{frameStyle?.height ?? 0}px"
       aria-label="Document canvas"
     ></canvas>
+    {#if editor.showMask}
+      <div class="mask-badge" data-testid="mask-badge">Mask: {editor.selected?.name ?? ''}</div>
+    {/if}
     {#if editor.zoomPercent !== null}
       <div class="zoom" aria-live="off">{editor.zoomPercent} %</div>
     {/if}
@@ -326,6 +330,17 @@
     border-radius: var(--radius-sm);
     background: var(--color-bg-panel);
     color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
+    pointer-events: none;
+  }
+  .mask-badge {
+    position: absolute;
+    left: var(--space-3);
+    top: var(--space-3);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-panel);
+    color: var(--color-text);
     font-size: var(--font-size-sm);
     pointer-events: none;
   }
