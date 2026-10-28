@@ -10,10 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- **editor-gpu-f16** (O, agent) — `rgba16float` textures in `GpuCompositor` to cut GPU memory (memory part of editor-gpu-followups-2).
-- **editor-selection-model** (O, agent) — document selection in `expose-editor`: shapes, modes, feather, invert, mask from selection, undo; `selection_version` (ADR 0016 step 2).
-- **core-contour** (O, agent) — `expose_core::buffer::trace_contours` (marching squares) for the selection outline.
-- Then: shell + UI for selections (tools, outline overlay), after both merge.
+- (none — all agent branches are merged; no worktrees; 2026-10-27)
 
 ## Next (suggested order)
 
@@ -21,13 +18,14 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 1. [ ] **editor-layers-check** (operator) — check in the real webview: New layer (`Mod+Shift+N`), lock toggles (the `all` lock disables opacity/fill/blend), New document (`Mod+N`; first Save opens Save As), Levels and Curves editors. After the check, mark in `FEATURES.md`: new document, lock UI, Levels, Curves (ADR 0017).
 2. [ ] **editor-masks-check** (operator) — check in the real webview: Add mask (click = reveal all, Alt+click = hide all), Mask menu, mask chip (Shift+click enables/disables, Alt+click shows the mask), `\` shows the mask, the "Mask: <name>" badge, undo of each mask edit, locks. After the check, mark the layer masks item in `FEATURES.md` (ADR 0018).
-3. [ ] **editor-tools** (O) — (a) layer masks in the UI is done (ADR 0018); next: (c) selections (rect/ellipse/lasso, selection as a mask, mask from selection), then (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke). Design: ADR 0016 (Accepted) — order masks UI → selections → brushes; points (not pixels) over the IPC; selection outline as polygons; partial uploads from per-layer changed rectangles.
-4. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
-5. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); the auto-open of the focused library photo can run while the New document dialog shows; dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
+3. [ ] **editor-selections-ui** (shell S + UI S, shared contract; start here) — the crate model (`Document::select_shape` etc.) and `expose_core::buffer::trace_contours` are merged (ADR 0019). Shell: selection edits as `EditDto` variants (shape, mode, anti-alias, feather; select all, deselect, invert, feather, mask from selection), outline polygons from `trace_contours` on the selection at the view scale (`step` from the zoom, `max_points` cap) returned with the change and on zoom; `DocumentInfo.hasSelection`. UI: rectangle / ellipse / polygon lasso tools (Shift = add, Alt = subtract, Shift+Alt = intersect), SVG outline overlay with an animated dash, `Mod+A`, `Mod+D`, `Mod+Shift+I`, feather dialog, "Mask from selection" in the Mask menu (the "Add mask" button uses the selection when one exists). Note: `feather_selection` takes about 200 ms at 4096² with a 20 px radius (speed-up: blur only the edge band).
+4. [ ] **editor-tools** (O) — (a) layer masks in the UI is done (ADR 0018); (c) selections: crate done (ADR 0019), UI is item 3; then (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke). Design: ADR 0016 (Accepted) — order masks UI → selections → brushes; points (not pixels) over the IPC; selection outline as polygons; partial uploads from per-layer changed rectangles.
+5. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
+6. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); the auto-open of the focused library photo can run while the New document dialog shows; dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
-- [ ] **editor-gpu-followups-2** — the first step on a new layer is a full composite (70–79 ms); composite and rebuild the pyramid only in the changed area; GPU memory about 2.6 GiB for a 4096² 10-layer document (sparse tiles; `rgba16float` fails the 5e-5 CPU tolerance at 2.6e-4 — operator decision 2026-10-27: a looser tolerance is acceptable; memory part in progress as editor-gpu-f16). The changed-area composite comes with brushes (ADR 0016 "Partial uploads").
+- [ ] **editor-gpu-followups-3** — the first slider step on a new layer is a full composite (61–64 ms at 4096²); idea: `GpuCompositor::prepare_below(document, layer_id)` when a layer is selected, so the below snapshot builds while idle. Composite and rebuild the pyramid only in the changed area (comes with brushes, ADR 0016 "Partial uploads"). Remaining GPU memory (about 1.7 GiB at 4096², 10 layers) is mostly the f32 pool + view composite + below snapshot (3 × 256 MiB); f16 working buffers need explicit rounding in every kernel (ADR 0020) — operator decision if wanted.
 
 ### Follow-ups from merged work
 
@@ -57,6 +55,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 ## Done
 
+- [x] **editor-selection-model + core-contour** (PRs #64, #66, ADR 0019) — `Document` selection (`select_shape` rect/ellipse/polygon, modes, anti-alias, feather, select all, deselect, invert, `mask_from_selection`, undo; `selection_version`, `revision` unchanged); `EditorError::NoSelection`; `expose_core::buffer::trace_contours` (marching squares, 4096² ellipse 8.45 ms).
+- [x] **editor-gpu-f16** (PR #65, ADR 0020; memory part of editor-gpu-followups-2) — layer/mask textures, view pyramid, and mask view in `rgba16float`; GPU cache at 4096², 10 layers 2567 → 1699 MiB; slider step 30–33 → 26–27 ms.
 - [x] **editor-masks-ui** (PRs #61–#63, ADR 0018; operator check pending: editor-masks-check) — `GpuCompositor::render_mask_view` (gray mask view with its own cache); edits `addMask` (reveal/hide), `deleteMask`, `setMaskEnabled`, `LayerInfo.maskEnabled`; `editor_render` `showMaskLayerId`; Layers panel Add mask button, Mask menu, mask chip, show mask (`\`).
 
 - [x] **editor-layers-ui** (PRs #57–#59, ADR 0017; operator check pending: editor-layers-check) — Levels and Curves editors; `addPixelLayer` and `setLocks` edits, `LayerInfo.locks`, `DocumentInfo.sourcePhotoId`, `editor_new`; New layer button, lock toggles, New document dialog, first save of a new document opens Save As.
