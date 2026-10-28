@@ -14,6 +14,7 @@ use expose_core::buffer::{GrayImage, Rect, WorkingImage};
 
 use crate::adjust::Adjustment;
 use crate::blend::BlendMode;
+use crate::changes::{ChangeLog, Changes};
 use crate::document::check_size;
 use crate::error::{EditorError, EditorResult};
 use crate::version::next_stamp;
@@ -423,6 +424,10 @@ pub struct Layer {
     pixel_version: u64,
     /// Stamp of the last change of the mask values or of the mask itself.
     mask_version: u64,
+    /// The changed rectangles of the pixel values (see [`crate::changes`]).
+    pixel_log: ChangeLog,
+    /// The changed rectangles of the mask values.
+    mask_log: ChangeLog,
 }
 
 impl PartialEq for Layer {
@@ -444,6 +449,8 @@ impl Layer {
             kind,
             pixel_version: stamp,
             mask_version: stamp,
+            pixel_log: ChangeLog::new(stamp),
+            mask_log: ChangeLog::new(stamp),
         }
     }
 
@@ -466,14 +473,45 @@ impl Layer {
         self.mask_version
     }
 
-    /// Gives the pixel values a new version.
+    /// Gives the pixel values a new version after a change without a known
+    /// rectangle. This clears the pixel change log.
     pub(crate) fn touch_pixels(&mut self) {
         self.pixel_version = next_stamp();
+        self.pixel_log.reset(self.pixel_version);
     }
 
-    /// Gives the mask a new version.
+    /// Gives the pixel values a new version after a change inside `rect`
+    /// (layer pixel coordinates), and records the change in the log.
+    pub(crate) fn touch_pixels_in(&mut self, rect: Rect) {
+        self.pixel_version = next_stamp();
+        self.pixel_log.push(self.pixel_version, rect);
+    }
+
+    /// Gives the mask a new version after a change without a known
+    /// rectangle (also a new, replaced, or removed mask). This clears the
+    /// mask change log.
     pub(crate) fn touch_mask(&mut self) {
         self.mask_version = next_stamp();
+        self.mask_log.reset(self.mask_version);
+    }
+
+    /// Gives the mask a new version after a change inside `rect` (mask
+    /// pixel coordinates), and records the change in the log.
+    pub(crate) fn touch_mask_in(&mut self, rect: Rect) {
+        self.mask_version = next_stamp();
+        self.mask_log.push(self.mask_version, rect);
+    }
+
+    /// Returns the area of the pixel values (layer pixel coordinates) that
+    /// changed after pixel version `version`. See [`ChangeLog::since`].
+    pub(crate) fn pixel_changes_since(&self, version: u64) -> Changes {
+        self.pixel_log.since(version)
+    }
+
+    /// Returns the area of the mask values (mask pixel coordinates) that
+    /// changed after mask version `version`. See [`ChangeLog::since`].
+    pub(crate) fn mask_changes_since(&self, version: u64) -> Changes {
+        self.mask_log.since(version)
     }
 
     /// Returns the ID.

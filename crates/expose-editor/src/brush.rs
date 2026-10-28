@@ -457,6 +457,19 @@ impl Bounds {
             }
         }
     }
+
+    /// Returns the area as a rectangle in buffer coordinates. The values
+    /// are buffer indices, so they are not negative and fit in `u32`. If
+    /// they do not, the function returns `None` (the area is then not
+    /// known, and the caller clears the change log).
+    fn local_rect(self) -> Option<Rect> {
+        Some(Rect::new(
+            u32::try_from(self.x0).ok()?,
+            u32::try_from(self.y0).ok()?,
+            u32::try_from(self.x1 - self.x0).ok()?,
+            u32::try_from(self.y1 - self.y0).ok()?,
+        ))
+    }
 }
 
 /// The fixed inputs of one dab application.
@@ -731,7 +744,7 @@ impl Stroke {
         let Some(b) = changed else {
             return Ok(None);
         };
-        self.touch(doc)?;
+        self.touch(doc, b.local_rect())?;
         let (ox, oy) = (
             i64::from(self.expected.offset.0),
             i64::from(self.expected.offset.1),
@@ -788,7 +801,9 @@ impl Stroke {
             }
         };
         if changed {
-            self.touch(doc)?;
+            // The restored area is not tracked: the change logs are
+            // cleared, so caches load all values again (a cancel is rare).
+            self.touch(doc, None)?;
         }
         Ok(())
     }
@@ -806,14 +821,21 @@ impl Stroke {
     }
 
     /// Gives the layer a new content version and the document a new
-    /// revision, and records the new version.
-    fn touch(&mut self, doc: &mut Document) -> EditorResult<()> {
+    /// revision, and records the new version. `rect` is the changed area
+    /// in layer (or mask) pixel coordinates, or `None` if it is not known.
+    fn touch(&mut self, doc: &mut Document, rect: Option<Rect>) -> EditorResult<()> {
         let layer = doc.layer_mut(self.layer)?;
         let version = if matches!(self.mode, Mode::Mask { .. }) {
-            layer.touch_mask();
+            match rect {
+                Some(r) => layer.touch_mask_in(r),
+                None => layer.touch_mask(),
+            }
             layer.mask_version()
         } else {
-            layer.touch_pixels();
+            match rect {
+                Some(r) => layer.touch_pixels_in(r),
+                None => layer.touch_pixels(),
+            }
             layer.pixel_version()
         };
         self.expected.version = version;

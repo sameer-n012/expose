@@ -22,6 +22,7 @@ use expose_core::buffer::{Rect, Rgba};
 
 use crate::adjust::Adjustment;
 use crate::blend::{BlendMode, BlendSpace};
+use crate::changes::union;
 use crate::document::Document;
 use crate::error::{EditorError, EditorResult, check_range};
 use crate::layer::{
@@ -248,6 +249,10 @@ impl Document {
     /// A move (translate) keeps the versions, because the values do not
     /// change (only the offsets).
     ///
+    /// Pixel and mask patches and tiles also record their rectangles in the
+    /// change log of the layer (see [`crate::changes`]). A mask replacement
+    /// clears the mask change log.
+    ///
     /// A selection edit gives the document a new selection version, but it
     /// keeps the revision: the selection does not change the composite, so
     /// caches that use the revision stay valid.
@@ -314,7 +319,7 @@ impl Document {
                 check_patch(rect, img.bounds(), data.len())?;
                 let w = img.width();
                 swap_rect(img.pixels_mut(), w, rect, &mut data);
-                layer.touch_pixels();
+                layer.touch_pixels_in(rect);
                 EditKind::PixelPatch { id, rect, data }
             }
             EditKind::MaskPatch { id, rect, mut data } => {
@@ -323,7 +328,7 @@ impl Document {
                 check_patch(rect, m.image.bounds(), data.len())?;
                 let w = m.image.width();
                 swap_rect(m.image.data_mut(), w, rect, &mut data);
-                layer.touch_mask();
+                layer.touch_mask_in(rect);
                 EditKind::MaskPatch { id, rect, data }
             }
             EditKind::PixelTiles { id, tiles } => self.raw_pixel_tiles(id, tiles)?,
@@ -354,10 +359,14 @@ impl Document {
             check_patch(*rect, img.bounds(), data.len())?;
         }
         let w = img.width();
+        let mut changed = None;
         for (rect, data) in &mut tiles {
             swap_rect(img.pixels_mut(), w, *rect, data);
+            changed = union(changed, *rect);
         }
-        layer.touch_pixels();
+        // An empty tile list changes no value, but it still gets a new
+        // version: record an empty change.
+        layer.touch_pixels_in(changed.unwrap_or_default());
         Ok(EditKind::PixelTiles { id, tiles })
     }
 
@@ -374,10 +383,12 @@ impl Document {
             check_patch(*rect, m.image.bounds(), data.len())?;
         }
         let w = m.image.width();
+        let mut changed = None;
         for (rect, data) in &mut tiles {
             swap_rect(m.image.data_mut(), w, *rect, data);
+            changed = union(changed, *rect);
         }
-        layer.touch_mask();
+        layer.touch_mask_in(changed.unwrap_or_default());
         Ok(EditKind::MaskTiles { id, tiles })
     }
 

@@ -47,11 +47,14 @@
 //!   uploads it again. If the canvas part is larger than the device texture
 //!   limit, only the part inside the region is cached.
 //! - A property change (opacity, blend mode, visibility, mask enable) does
-//!   not upload. A pixel write, a mask write, or a new mask uploads that
-//!   texture again (the full canvas part, once).
+//!   not upload. A pixel write or a mask write (also a brush batch, an
+//!   undo, and a redo) updates only the changed area of the texture (see
+//!   "Partial updates"). A new mask, or a change that the change log does
+//!   not know, uploads the texture again (the full canvas part, once).
 //! - At each composite, the cache drops the entries of layers that are no
-//!   longer in the document, and the textures with an old version. A
-//!   deleted layer that comes back by undo is uploaded again.
+//!   longer in the document, and the textures with an old version that
+//!   cannot get a partial update. A deleted layer that comes back by undo
+//!   is uploaded again.
 //! - Content versions are unique in the process (see [`crate::version`]),
 //!   so one compositor can serve many documents and clones.
 //!
@@ -111,6 +114,39 @@
 //! The result is the same as a full composite: the same kernels run on
 //! the same buffers in the same order.
 //!
+//! # Partial updates
+//!
+//! Each layer has a change log for its pixel values and one for its mask
+//! values (the private module `changes`). The log records the changed rectangle
+//! of each content version (brush batches, pixel and mask patches and
+//! tiles, and their undo and redo).
+//!
+//! - **Layer textures.** If a cached texture has an old version and the
+//!   log knows the changes after that version, the cache uploads only the
+//!   union of the changed rectangles (inside the cached part). The upload
+//!   uses the same CPU conversion to `f16` as a full upload. For masks,
+//!   the area extends to whole texels (four values). Otherwise (a new
+//!   mask, a cancelled stroke, more than 64 changes, a different
+//!   cached part), the cache uploads the full canvas part as before.
+//! - **View composite.** [`GpuCompositor::render_view`] compares the layer
+//!   keys with the keys of its last composite. If only the pixel or the
+//!   mask values of one layer changed, the log knows the changed area, and
+//!   the area is at most half of the canvas, it composites all layers only
+//!   in that canvas area, puts the result into the old composite, and
+//!   builds the pyramid again. All composite steps work per pixel, so the
+//!   result is bit-equal to a full composite. A change outside the canvas
+//!   does not composite. All other changes use the full composite (with
+//!   the "below" snapshot).
+//! - `expose-gpu` has no upload to a part of a texture, and a kernel cannot
+//!   write to one of its inputs. Thus a partial update uploads the changed
+//!   area as a small texture, and the patch kernel copies the old texture
+//!   with the small texture in the changed area to a second texture of the
+//!   same size. The old texture becomes a spare (the layer cache keeps at
+//!   most two spares; the view composite uses the buffer pool). The copy
+//!   reads and writes the full texture: measured at 4096 x 4096, about
+//!   2.6 ms for a layer texture, 4.8 ms for the view composite, and 3.5 ms
+//!   for the pyramid build.
+//!
 //! # Texture formats
 //!
 //! All kernels read their inputs as `f32` and do all math in `f32`. Only
@@ -147,6 +183,10 @@
 //! - for each pixel layer: 8 bytes for each pixel of its canvas part
 //!   (`8 N` for a canvas-size layer);
 //! - for each mask: 2 bytes for each pixel of its canvas part;
+//! - after partial updates: at most two spare layer textures (for example
+//!   `8 N` for a canvas-size layer that a brush changes), and the free
+//!   buffers of the last patch composite (16 bytes for each pixel of the
+//!   changed area);
 //! - free composite buffers: `16 N` each, normally one or two (one more
 //!   for each level of nested groups);
 //! - with [`GpuCompositor::render_view`]: the composite (`16 N`), the
@@ -196,7 +236,7 @@
 //!   the branches of some blend modes) can give a different result when a
 //!   value is within float error of the step.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bytemuck::{Pod, Zeroable};
 use expose_core::buffer::{Rect, WorkingImage};
@@ -204,6 +244,7 @@ use expose_gpu::{CHANNELS, GpuContext, GpuImage, ImageFormat, Kernel};
 
 use crate::adjust::{Adjustment, Curves, MonotoneCubic, Prepared, PreparedAdjustment};
 use crate::blend::{BlendMode, BlendSpace};
+use crate::changes::Changes;
 use crate::document::Document;
 use crate::error::{EditorError, EditorResult};
 use crate::layer::{
@@ -284,6 +325,22 @@ const MASK_VIEW_KERNEL: Kernel = Kernel {
         include_str!("shaders/mask_view.wgsl")
     ),
 };
+
+/// Copies a texture and replaces one rectangle with a patch texture (see
+/// "Partial updates" in the module documentation).
+const PATCH_KERNEL: Kernel = Kernel {
+    name: "expose-editor/patch",
+    source: include_str!("shaders/patch.wgsl"),
+};
+
+/// The parameter block of [`PATCH_KERNEL`]. It agrees with `PatchParams`
+/// in `shaders/patch.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct PatchParams {
+    /// Texel position and size of the patch in the output.
+    rect: [i32; 4],
+}
 
 /// Adjustment kinds in the kernel (`params.flags.w`).
 const ADJUST_BRIGHTNESS_CONTRAST: u32 = 0;
@@ -524,8 +581,19 @@ struct LayerEntry {
 #[derive(Debug, Default)]
 struct LayerCache {
     entries: HashMap<LayerId, LayerEntry>,
-    /// The number of pixel and mask uploads since the compositor was made.
+    /// Free layer-format textures for partial updates (at most
+    /// [`MAX_SPARES`]).
+    spares: Vec<GpuImage>,
+    /// The number of full pixel and mask uploads since the compositor was
+    /// made.
     uploads: u64,
+    /// The number of partial pixel and mask updates since the compositor
+    /// was made.
+    partial_uploads: u64,
+    /// If `true`, the cache and the view composite do no partial updates.
+    /// Only the tests and the benchmark set it, to compare with the full
+    /// updates.
+    no_partial: bool,
     /// The number of curve table uploads since the compositor was made.
     curve_uploads: u64,
 }
@@ -646,6 +714,153 @@ fn layer_key(layer: &Layer) -> LayerKey {
     }
 }
 
+/// One content change of one layer: its pixel values or its mask values
+/// changed, and nothing else in the layer stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentChange {
+    /// The pixel values of layer `id` changed after pixel version `old`.
+    Pixels { id: LayerId, old: u64 },
+    /// The mask values of layer `id` changed after mask version `old`.
+    Mask { id: LayerId, old: u64 },
+}
+
+/// The difference between two layer key lists (see [`diff_lists`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyDiff {
+    /// The keys are equal.
+    Same,
+    /// Only one content of one layer changed.
+    One(ContentChange),
+    /// Other changes, or more than one change.
+    Other,
+}
+
+impl KeyDiff {
+    /// Combines the differences of two disjoint parts of a layer stack.
+    const fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (d, Self::Same) | (Self::Same, d) => d,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Compares the key lists `old` and `new` of one layer list.
+fn diff_lists(old: &[LayerKey], new: &[LayerKey]) -> KeyDiff {
+    if old.len() != new.len() {
+        return KeyDiff::Other;
+    }
+    let mut diff = KeyDiff::Same;
+    for (a, b) in old.iter().zip(new) {
+        diff = diff.and(diff_key(a, b));
+        if diff == KeyDiff::Other {
+            break;
+        }
+    }
+    diff
+}
+
+/// Compares the keys of one layer (and of its children). The function
+/// destructures the key fully, so a new field gives a compile error here.
+fn diff_key(old: &LayerKey, new: &LayerKey) -> KeyDiff {
+    let LayerKey {
+        id,
+        pixel_version,
+        mask_version,
+        visible,
+        opacity,
+        fill_opacity,
+        blend_mode,
+        mask,
+        kind,
+    } = old;
+    let same_props = *id == new.id
+        && *visible == new.visible
+        && *opacity == new.opacity
+        && *fill_opacity == new.fill_opacity
+        && *blend_mode == new.blend_mode
+        && *mask == new.mask;
+    if !same_props {
+        return KeyDiff::Other;
+    }
+    let children = match (kind, &new.kind) {
+        (
+            KindKey::Group {
+                isolation: a,
+                children: ca,
+            },
+            KindKey::Group {
+                isolation: b,
+                children: cb,
+            },
+        ) if a == b => diff_lists(ca, cb),
+        (a, b) if a == b => KeyDiff::Same,
+        _ => KeyDiff::Other,
+    };
+    let own = match (
+        *pixel_version != new.pixel_version,
+        *mask_version != new.mask_version,
+    ) {
+        (false, false) => KeyDiff::Same,
+        (true, false) => KeyDiff::One(ContentChange::Pixels {
+            id: *id,
+            old: *pixel_version,
+        }),
+        (false, true) => KeyDiff::One(ContentChange::Mask {
+            id: *id,
+            old: *mask_version,
+        }),
+        (true, true) => KeyDiff::Other,
+    };
+    own.and(children)
+}
+
+/// Returns the canvas area of a change `rect` of a buffer at `offset`,
+/// clipped to `canvas`. Returns [`Changes::Unknown`] if the position
+/// overflows, and [`Changes::Nothing`] if the area is outside the canvas.
+fn changed_canvas_part(canvas: Rect, offset: (i32, i32), rect: Rect) -> Changes {
+    let position = i32::try_from(rect.x)
+        .ok()
+        .and_then(|x| offset.0.checked_add(x))
+        .zip(
+            i32::try_from(rect.y)
+                .ok()
+                .and_then(|y| offset.1.checked_add(y)),
+        );
+    let Some((x, y)) = position else {
+        return Changes::Unknown;
+    };
+    canvas
+        .intersection_signed(x, y, rect.width, rect.height)
+        .map_or(Changes::Nothing, Changes::Area)
+}
+
+/// Returns the canvas area that `change` changed in the composite.
+/// [`Changes::Unknown`] means that the change log does not know the old
+/// version (or the layer is not as expected).
+///
+/// All composite steps work per pixel, so a change of the values of one
+/// layer changes the composite only in the canvas area of the changed
+/// values.
+fn changed_canvas_area(document: &Document, change: ContentChange) -> Changes {
+    let canvas = document.bounds();
+    let found = match change {
+        ContentChange::Pixels { id, old } => document.layer(id).and_then(|layer| {
+            let pixels = layer.as_pixel()?;
+            Some((pixels.offset(), layer.pixel_changes_since(old)))
+        }),
+        ContentChange::Mask { id, old } => document.layer(id).and_then(|layer| {
+            let mask = layer.mask()?;
+            Some((mask.offset, layer.mask_changes_since(old)))
+        }),
+    };
+    match found {
+        None => Changes::Unknown,
+        Some((offset, Changes::Area(rect))) => changed_canvas_part(canvas, offset, rect),
+        Some((_, changes)) => changes,
+    }
+}
+
 /// The composite of the bottom top-level layers of the canvas: the
 /// "below" snapshot of [`GpuCompositor::render_view`].
 #[derive(Debug)]
@@ -696,6 +911,11 @@ pub struct GpuCompositor {
     below: Option<BelowCache>,
     /// The number of view composites that started from the snapshot.
     view_partial_builds: u64,
+    /// Free buffers for the patch composites of
+    /// [`GpuCompositor::render_view`] (the size of the last patch).
+    patch_pool: Vec<GpuImage>,
+    /// The number of view composites that composited only a changed area.
+    view_patch_builds: u64,
     /// The gray image of the last mask for
     /// [`GpuCompositor::render_mask_view`].
     mask_view: Option<MaskViewCache>,
@@ -715,6 +935,8 @@ impl GpuCompositor {
             view_builds: 0,
             below: None,
             view_partial_builds: 0,
+            patch_pool: Vec::new(),
+            view_patch_builds: 0,
             mask_view: None,
             mask_view_builds: 0,
         })
@@ -726,7 +948,9 @@ impl GpuCompositor {
     /// and composites again.
     pub fn clear_cache(&mut self) {
         self.cache.entries.clear();
+        self.cache.spares.clear();
         self.pool.clear();
+        self.patch_pool.clear();
         self.view = None;
         self.view_output = None;
         self.below = None;
@@ -754,6 +978,14 @@ impl GpuCompositor {
         self.cache.uploads
     }
 
+    /// Returns the number of partial layer and mask updates since the
+    /// compositor was made. A partial update uploads only the area that
+    /// changed after the cached version (see "Partial updates" in the
+    /// module documentation). [`Self::layer_uploads`] does not count them.
+    pub const fn layer_partial_uploads(&self) -> u64 {
+        self.cache.partial_uploads
+    }
+
     /// Returns the number of curve table uploads since the compositor was
     /// made. A curves layer uploads its table only when its curves change.
     pub const fn curve_uploads(&self) -> u64 {
@@ -774,6 +1006,13 @@ impl GpuCompositor {
         self.view_partial_builds
     }
 
+    /// Returns the number of the view composites of
+    /// [`Self::view_composites`] that composited only the changed area of
+    /// one layer (see "Partial updates" in the module documentation).
+    pub const fn view_patch_composites(&self) -> u64 {
+        self.view_patch_builds
+    }
+
     /// Returns the approximate GPU memory that the compositor keeps
     /// between calls, in bytes (all textures, the placeholder included).
     pub fn cache_memory_bytes(&self) -> u64 {
@@ -790,6 +1029,7 @@ impl GpuCompositor {
                 .chain(e.curve.iter().map(|c| &c.image))
                 .map(bytes)
         });
+        let spares = self.cache.spares.iter().map(bytes);
         let view = self
             .view
             .iter()
@@ -804,7 +1044,9 @@ impl GpuCompositor {
         bytes(&self.placeholder)
             + below.sum::<u64>()
             + parts.sum::<u64>()
+            + spares.sum::<u64>()
             + self.pool.iter().map(bytes).sum::<u64>()
+            + self.patch_pool.iter().map(bytes).sum::<u64>()
             + view.sum::<u64>()
             + self.view_output.iter().map(bytes).sum::<u64>()
     }
@@ -1043,6 +1285,9 @@ impl GpuCompositor {
                 return Ok(cache);
             }
             if same_size {
+                if let Some((keys, area)) = self.single_content_change(document) {
+                    return self.patch_view(ctx, document, cache, keys, area).await;
+                }
                 // The new composite replaces the old one, so the old buffer
                 // can take the new composite. The pyramid textures stay.
                 self.pool.push(cache.composite);
@@ -1052,6 +1297,112 @@ impl GpuCompositor {
         self.view_builds += 1;
         let composite = self.composite_canvas(ctx, document).await?;
         build_pyramid(ctx, document.revision(), composite, mips).await
+    }
+
+    /// Checks if the view composite can get a patch (see "Partial updates"
+    /// in the module documentation): since the last view composite, only
+    /// the pixel or mask values of one layer changed, the change log knows
+    /// the changed area, and the area is at most [`MAX_PATCH_FRACTION`] of
+    /// the canvas.
+    ///
+    /// Returns the keys of the top-level layers now and the changed canvas
+    /// area (`None`: no canvas pixel changed), or `None` if a full
+    /// composite is necessary.
+    fn single_content_change(&self, document: &Document) -> Option<(Vec<LayerKey>, Option<Rect>)> {
+        if self.cache.no_partial {
+            return None;
+        }
+        let bounds = document.bounds();
+        // `below.last` holds the keys of the view composite: each view
+        // composite sets it, and a failed composite drops it.
+        let below = self.below.as_ref()?;
+        if below.size != (bounds.width, bounds.height) || below.space != document.blend_space() {
+            return None;
+        }
+        let keys: Vec<LayerKey> = document.layers().iter().map(layer_key).collect();
+        let KeyDiff::One(change) = diff_lists(&below.last, &keys) else {
+            return None;
+        };
+        match changed_canvas_area(document, change) {
+            Changes::Nothing => Some((keys, None)),
+            Changes::Area(rect) if rect.area() <= bounds.area() / MAX_PATCH_FRACTION => {
+                Some((keys, Some(rect)))
+            }
+            // Not known, or too large.
+            Changes::Unknown | Changes::Area(_) => None,
+        }
+    }
+
+    /// Updates the view composite in `cache` after one content change
+    /// (see [`Self::single_content_change`]): composites all layers only in
+    /// `area`, puts the result into a copy of the old composite (patch
+    /// kernel), and builds the pyramid again. `keys` are the keys of the
+    /// top-level layers now.
+    ///
+    /// The result is equal to a full composite: the composite steps work
+    /// per pixel, and they run with the same inputs in the same order.
+    async fn patch_view(
+        &mut self,
+        ctx: &GpuContext,
+        document: &Document,
+        cache: ViewCache,
+        keys: Vec<LayerKey>,
+        area: Option<Rect>,
+    ) -> EditorResult<ViewCache> {
+        let ViewCache {
+            composite, mips, ..
+        } = cache;
+        let Some(rect) = area else {
+            // No canvas pixel changed: the composite stays.
+            if let Some(below) = self.below.as_mut() {
+                below.last = keys;
+            }
+            return Ok(ViewCache {
+                revision: document.revision(),
+                composite,
+                mips,
+            });
+        };
+        self.view_builds += 1;
+        self.view_patch_builds += 1;
+        let mut run = Run::new(
+            ctx,
+            &mut self.cache,
+            &mut self.patch_pool,
+            &self.placeholder,
+            document,
+            rect,
+        )?;
+        let start = run.bufs.take_clear(run.placeholder).await?;
+        let result = run
+            .composite_list(document.layers(), Buf::Owned(start))
+            .await?;
+        let small = run.bufs.into_image(result).await?;
+
+        let (w, h) = (composite.width(), composite.height());
+        let out = match self
+            .pool
+            .iter()
+            .position(|b| b.width() == w && b.height() == h)
+        {
+            Some(i) => self.pool.swap_remove(i),
+            None => GpuImage::new(ctx, w, h, FORMAT).await?,
+        };
+        let params = PatchParams {
+            rect: rect_param(rect)?,
+        };
+        ctx.run_kernel_multi(&PATCH_KERNEL, &params, &[&composite, &small], &out)
+            .await?;
+        self.patch_pool.push(small);
+        // The old composite is a free canvas-size buffer now.
+        self.pool.push(composite);
+        // The snapshot stays: if the changed layer is in it, its keys are
+        // no longer a prefix of the keys, and the next full composite drops
+        // it.
+        if let Some(below) = self.below.as_mut() {
+            below.last = keys;
+        }
+        build_pyramid(ctx, document.revision(), out, mips).await
     }
 
     /// Composites the full canvas like [`Self::composite_gpu`], with the
@@ -1325,39 +1676,49 @@ fn canvas_param(rect: Rect, offset: (i32, i32)) -> EditorResult<[i32; 4]> {
 
 impl LayerCache {
     /// Drops the entries of layers that are no longer in `document`, and
-    /// the textures whose values changed.
+    /// the textures whose values changed and cannot get a partial update
+    /// (see "Partial updates" in the module documentation).
     fn prune(&mut self, document: &Document) {
-        // Layer ID -> (pixel version if a pixel layer, mask version if the
-        // layer has a mask, curves if a curves layer). `visit` gives
-        // short-lived references, so the curves are copied (a few points).
-        type Live = (Option<u64>, Option<u64>, Option<Curves>);
-        let mut live: HashMap<LayerId, Live> = HashMap::new();
+        let mut live: HashSet<LayerId> = HashSet::new();
+        let partial = !self.no_partial;
         for layer in document.layers() {
             layer.visit(&mut |l| {
-                let pixels = l.as_pixel().map(|_| l.pixel_version());
-                let mask = l.mask().map(|_| l.mask_version());
-                let curves = match l.kind() {
-                    LayerKind::Adjustment(Adjustment::Curves(c)) => Some(c.clone()),
-                    _ => None,
+                live.insert(l.id());
+                let Some(entry) = self.entries.get_mut(&l.id()) else {
+                    return;
                 };
-                live.insert(l.id(), (pixels, mask, curves));
+                // A part stays if it has the current values, or if the
+                // change log knows the changes after its version.
+                let keep_pixels = entry.pixels.as_ref().is_some_and(|p| {
+                    l.as_pixel().is_some()
+                        && (p.version == l.pixel_version()
+                            || (partial && l.pixel_changes_since(p.version).is_known()))
+                });
+                if !keep_pixels {
+                    entry.pixels = None;
+                }
+                let keep_mask = entry.mask.as_ref().is_some_and(|m| {
+                    l.mask().is_some()
+                        && (m.version == l.mask_version()
+                            || (partial && l.mask_changes_since(m.version).is_known()))
+                });
+                if !keep_mask {
+                    entry.mask = None;
+                }
+                let keep_curve = match (entry.curve.as_ref(), l.kind()) {
+                    (Some(table), LayerKind::Adjustment(Adjustment::Curves(c))) => {
+                        table.curves == *c
+                    }
+                    _ => false,
+                };
+                if !keep_curve {
+                    entry.curve = None;
+                }
             });
         }
         self.entries.retain(|id, entry| {
-            let Some((pixels, mask, curves)) = live.get(id) else {
-                return false;
-            };
-            let (pixels, mask, curves) = (*pixels, *mask, curves.as_ref());
-            if entry.pixels.as_ref().map(|p| p.version) != pixels {
-                entry.pixels = None;
-            }
-            if entry.mask.as_ref().map(|m| m.version) != mask {
-                entry.mask = None;
-            }
-            if entry.curve.as_ref().map(|c| &c.curves) != curves {
-                entry.curve = None;
-            }
-            entry.pixels.is_some() || entry.mask.is_some() || entry.curve.is_some()
+            live.contains(id)
+                && (entry.pixels.is_some() || entry.mask.is_some() || entry.curve.is_some())
         });
     }
 
@@ -1376,8 +1737,19 @@ impl LayerCache {
         area: Area,
     ) -> EditorResult<StepTextures<'s>> {
         let Self {
-            entries, uploads, ..
+            entries,
+            uploads,
+            partial_uploads,
+            spares,
+            no_partial,
+            ..
         } = self;
+        let mut counts = UploadCounts {
+            full: uploads,
+            partial: partial_uploads,
+            spares,
+            allow_partial: !*no_partial,
+        };
         let entry = entries.entry(layer.id()).or_default();
         let source = match layer.as_pixel() {
             Some(p) => {
@@ -1401,9 +1773,10 @@ impl LayerCache {
                 let part = ensure_part(
                     ctx,
                     &mut entry.pixels,
-                    uploads,
+                    &mut counts,
                     wanted,
                     PartData::Pixels(img),
+                    &|v| layer.pixel_changes_since(v),
                     area,
                 )
                 .await?;
@@ -1428,9 +1801,10 @@ impl LayerCache {
                         let part = ensure_part(
                             ctx,
                             &mut entry.mask,
-                            uploads,
+                            &mut counts,
                             wanted,
                             PartData::Mask(img),
+                            &|v| layer.mask_changes_since(v),
                             area,
                         )
                         .await?;
@@ -1553,9 +1927,24 @@ struct StepTextures<'a> {
     table: Option<&'a GpuImage>,
 }
 
+/// The upload counters of the layer cache, and its spare textures.
+struct UploadCounts<'a> {
+    full: &'a mut u64,
+    partial: &'a mut u64,
+    spares: &'a mut Vec<GpuImage>,
+    /// `false` if partial updates are off (see `LayerCache::no_partial`).
+    allow_partial: bool,
+}
+
+/// The change log query of one content of a layer (see
+/// [`Layer::pixel_changes_since`]).
+type ChangesSince<'a> = dyn Fn(u64) -> Changes + Sync + 'a;
+
 /// Returns the cached part in `slot` if it has the wanted version and
-/// covers the needed part. Else uploads a new part and stores it in
-/// `slot`.
+/// covers the needed part. If it covers the needed part and the change log
+/// (`changes`) knows the changes after its version, updates only the
+/// changed area (see [`patch_part`]). Else uploads a new part and stores
+/// it in `slot`.
 ///
 /// A new part is the part of the buffer inside the canvas, so that a later
 /// call with a different region can use it again. If that part is larger
@@ -1563,14 +1952,26 @@ struct StepTextures<'a> {
 async fn ensure_part<'e>(
     ctx: &GpuContext,
     slot: &'e mut Option<CachedPart>,
-    uploads: &mut u64,
+    counts: &mut UploadCounts<'_>,
     wanted: Wanted,
     data: PartData<'_>,
+    changes: &ChangesSince<'_>,
     area: Area,
 ) -> EditorResult<&'e CachedPart> {
     let local = to_local(wanted.needed, wanted.offset)?;
     let part = match slot.take() {
         Some(part) if part.version == wanted.version && part.rect.contains_rect(&local) => part,
+        Some(part)
+            if counts.allow_partial
+                && part.rect.contains_rect(&local)
+                && changes(part.version).is_known() =>
+        {
+            // The check above makes sure that the log knows the changes:
+            // `None` here means that no value changed.
+            let changed = changes(part.version).area();
+            *counts.partial += 1;
+            patch_part(ctx, part, changed, wanted.version, data, counts.spares).await?
+        }
         // An old part is dropped here, before the new texture is made.
         _ => {
             let (w, h) = data.size();
@@ -1587,7 +1988,7 @@ async fn ensure_part<'e>(
             let chosen = if fits { cover } else { wanted.needed };
             let rect = to_local(chosen, wanted.offset)?;
             let image = data.upload(ctx, rect).await?;
-            *uploads += 1;
+            *counts.full += 1;
             CachedPart {
                 version: wanted.version,
                 rect,
@@ -1596,6 +1997,90 @@ async fn ensure_part<'e>(
         }
     };
     Ok(slot.insert(part))
+}
+
+/// A view composite gets a patch only if the changed area is at most
+/// `1 / MAX_PATCH_FRACTION` of the canvas. For a larger area, a full
+/// composite from the "below" snapshot can be faster, because it does not
+/// composite the layers below the changed layer.
+const MAX_PATCH_FRACTION: u64 = 2;
+
+/// The maximum number of spare textures in the layer cache. One spare is
+/// sufficient for repeated partial updates of one layer (the old texture of
+/// one update is the output of the next). A second one covers a pixel layer
+/// and a mask in the same frame.
+const MAX_SPARES: usize = 2;
+
+/// Updates the area `changed` (buffer coordinates, `None`: no area) of a
+/// cached part to the values of `data`, and gives it the version
+/// `version`.
+///
+/// `expose-gpu` has no upload to a part of a texture, and a kernel cannot
+/// write its input. Thus the function uploads the changed area as a small
+/// texture, and the patch kernel copies the old texture with the small
+/// texture in the changed area to a spare texture of the same size. The
+/// old texture becomes a spare. The values are the same as after a full
+/// upload: the same CPU conversion to `f16` makes them, and the kernel only
+/// copies them.
+///
+/// Masks have four values in each texel. The function extends the changed
+/// area to whole texels of the part, so that the small texture has the
+/// same texel grid (and the same zero padding in the last texel) as a full
+/// upload.
+async fn patch_part(
+    ctx: &GpuContext,
+    part: CachedPart,
+    changed: Option<Rect>,
+    version: u64,
+    data: PartData<'_>,
+    spares: &mut Vec<GpuImage>,
+) -> EditorResult<CachedPart> {
+    let Some(r) = changed.and_then(|c| c.intersection(&part.rect)) else {
+        // No value of the part changed.
+        return Ok(CachedPart { version, ..part });
+    };
+    // Position in the part, in values. `r` is inside `part.rect`.
+    let (mut px, py) = (r.x - part.rect.x, r.y - part.rect.y);
+    let mut width = r.width;
+    if let PartData::Mask(_) = data {
+        let end = (px + width).next_multiple_of(4).min(part.rect.width);
+        px -= px % 4;
+        width = end - px;
+    }
+    let upload_rect = Rect::new(part.rect.x + px, part.rect.y + py, width, r.height);
+    let small = data.upload(ctx, upload_rect).await?;
+    let texel_x = match data {
+        PartData::Pixels(_) => px,
+        PartData::Mask(_) => px / 4,
+    };
+    let params = PatchParams {
+        rect: [
+            to_i32(texel_x)?,
+            to_i32(py)?,
+            to_i32(small.width())?,
+            to_i32(small.height())?,
+        ],
+    };
+    let (w, h) = (part.image.width(), part.image.height());
+    let out = match spares
+        .iter()
+        .position(|s| s.width() == w && s.height() == h && s.format() == LAYER_FORMAT)
+    {
+        Some(i) => spares.swap_remove(i),
+        None => GpuImage::new(ctx, w, h, LAYER_FORMAT).await?,
+    };
+    ctx.run_kernel_multi(&PATCH_KERNEL, &params, &[&part.image, &small], &out)
+        .await?;
+    spares.push(part.image);
+    if spares.len() > MAX_SPARES {
+        // The oldest spare has the least chance to match the next update.
+        spares.remove(0);
+    }
+    Ok(CachedPart {
+        version,
+        rect: part.rect,
+        image: out,
+    })
 }
 
 /// Sets the mask parameters of a layer step. Returns the mask texture, or
@@ -1914,6 +2399,9 @@ mod tests {
     /// relative), and the test layers with values that are not `f16`
     /// values add one more rounding. Measured: at most about 2.4e-4.
     const VIEW_TOL: f32 = 5e-4;
+
+    /// Tests of the partial updates (`src/gpu/tests/partial.rs`).
+    mod partial;
 
     fn context() -> Option<GpuContext> {
         match pollster::block_on(GpuContext::new(GpuContextOptions::default())) {
@@ -2578,18 +3066,21 @@ mod tests {
         check(&mut comp, &doc, "props back");
         assert_eq!(comp.layer_uploads(), uploads);
 
-        // A pixel write uploads the layer once; a mask write the mask once.
+        // A pixel write updates the changed area of the layer once (a
+        // partial update); a mask write the mask once.
         let written = [0.3, 0.2, 0.1, 0.5].map(to_f16);
         doc.write_pixels(b, Rect::new(2, 3, 4, 2), &[written; 8])
             .unwrap();
         check(&mut comp, &doc, "pixel write");
-        uploads += 1;
+        let mut partial = 1;
         assert_eq!(comp.layer_uploads(), uploads);
+        assert_eq!(comp.layer_partial_uploads(), partial);
         doc.write_mask(g, Rect::new(10, 10, 5, 5), &[0.25; 25])
             .unwrap();
         check(&mut comp, &doc, "mask write");
-        uploads += 1;
+        partial += 1;
         assert_eq!(comp.layer_uploads(), uploads);
+        assert_eq!(comp.layer_partial_uploads(), partial);
 
         // A move inside the canvas does not upload. A move of a layer that
         // is partly outside the canvas changes its canvas part: one upload.
@@ -2612,15 +3103,25 @@ mod tests {
         uploads += 1;
         assert_eq!(comp.layer_uploads(), uploads);
 
-        // Undo of a pixel write gives new values: one upload.
+        // A write and its undo give new values: one partial update.
         let e = doc
             .write_pixels(a, Rect::new(0, 0, 2, 2), &[[0.0, 0.0, 0.0, 1.0]; 4])
             .unwrap();
         history.push("Write", vec![e]);
         history.undo(&mut doc).unwrap();
         check(&mut comp, &doc, "undo write");
+        partial += 1;
+        assert_eq!(comp.layer_uploads(), uploads);
+        assert_eq!(comp.layer_partial_uploads(), partial);
+
+        // A new mask has no known changed area: one full upload.
+        let mask = MaskImage::new_filled(40, 30, 0.5).unwrap();
+        doc.set_mask(g, Some(Mask::new(mask, (0, 0), MaskFill::White)))
+            .unwrap();
+        check(&mut comp, &doc, "mask replaced");
         uploads += 1;
         assert_eq!(comp.layer_uploads(), uploads);
+        assert_eq!(comp.layer_partial_uploads(), partial);
 
         // Mask removal does not upload.
         doc.set_mask(b, None).unwrap();
@@ -3259,20 +3760,24 @@ mod tests {
         step(&mut comp, &doc, false, Some(3), "child 1");
         doc.set_blend_mode(child, BlendMode::Difference).unwrap();
         step(&mut comp, &doc, true, Some(3), "child 2");
-        // A mask write and a pixel write below discard the snapshot. A
-        // change of layer 0 keeps no snapshot.
+        // A small mask write and pixel write get a patch composite (see
+        // "Partial updates"). The patch does not change the snapshot, but
+        // its keys are no longer a prefix of the keys.
         doc.write_mask(p1, Rect::new(2, 2, 3, 3), &[0.5; 9])
             .unwrap();
-        step(&mut comp, &doc, false, Some(1), "mask write");
+        step(&mut comp, &doc, false, Some(3), "mask write");
         let mut history = History::default();
         let e = doc
             .write_pixels(base, Rect::new(1, 1, 2, 2), &[[0.1, 0.2, 0.3, 1.0]; 4])
             .unwrap();
         history.push("Write", vec![e]);
-        step(&mut comp, &doc, false, None, "pixel write");
+        step(&mut comp, &doc, false, Some(3), "pixel write");
         history.undo(&mut doc).unwrap();
-        step(&mut comp, &doc, false, None, "undo write");
-        // The hidden top layer: no step runs below it, then it shows.
+        step(&mut comp, &doc, false, Some(3), "undo write");
+        assert_eq!(comp.view_patch_composites(), 3);
+        // The hidden top layer: no step runs below it, then it shows. The
+        // full composite discards the old snapshot (the writes were below
+        // it).
         doc.set_visible(p6, true).unwrap();
         step(&mut comp, &doc, false, Some(6), "show top");
         doc.set_opacity(p6, 0.5).unwrap();
