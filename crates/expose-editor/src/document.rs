@@ -7,7 +7,9 @@ use expose_core::buffer::{Rect, WorkingImage};
 
 use crate::blend::BlendSpace;
 use crate::error::{EditorError, EditorResult, check_range};
-use crate::layer::{Layer, LayerId, LayerKind, LayerProps, Locks, PixelLayer, Placement};
+use crate::layer::{
+    Layer, LayerId, LayerKind, LayerProps, Locks, MaskImage, PixelLayer, Placement,
+};
 use crate::version::next_stamp;
 
 /// The largest permitted width or height of a document, a layer, or a
@@ -154,9 +156,9 @@ impl DocumentSpec {
 /// extend outside the canvas. The root layer list has index 0 at the
 /// bottom.
 ///
-/// Equality compares the settings and the layer tree. It ignores the
-/// revision and the layer content versions (they are change stamps, not
-/// content).
+/// Equality compares the settings, the layer tree, and the selection. It
+/// ignores the revision, the selection version, and the layer content
+/// versions (they are change stamps, not content).
 #[derive(Debug, Clone)]
 pub struct Document {
     width: u32,
@@ -167,8 +169,14 @@ pub struct Document {
     pub(crate) blend_space: BlendSpace,
     pub(crate) layers: Vec<Layer>,
     next_id: u64,
-    /// Stamp of the last change (see [`crate::version`]).
+    /// Stamp of the last change (see [`crate::version`]). Selection
+    /// changes do not change it.
     revision: u64,
+    /// The selection (see [`crate::selection`]). `None` means "no
+    /// selection".
+    pub(crate) selection: Option<MaskImage>,
+    /// Stamp of the last selection change.
+    pub(crate) selection_version: u64,
 }
 
 impl PartialEq for Document {
@@ -181,6 +189,7 @@ impl PartialEq for Document {
             && self.blend_space == other.blend_space
             && self.layers == other.layers
             && self.next_id == other.next_id
+            && self.selection == other.selection
     }
 }
 
@@ -284,6 +293,8 @@ impl Document {
             layers: Vec::new(),
             next_id: 1,
             revision: next_stamp(),
+            selection: None,
+            selection_version: next_stamp(),
         })
     }
 

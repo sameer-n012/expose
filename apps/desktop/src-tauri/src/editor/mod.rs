@@ -111,6 +111,7 @@ fn editor_error_kind(error: &EditorError) -> ErrorKind {
         | EditorError::NotAPixelLayer(_)
         | EditorError::NotAnAdjustmentLayer(_)
         | EditorError::NoMask(_)
+        | EditorError::NoSelection
         | EditorError::Cycle(_)
         | EditorError::IndexOutOfRange { .. }
         | EditorError::Locked { .. }

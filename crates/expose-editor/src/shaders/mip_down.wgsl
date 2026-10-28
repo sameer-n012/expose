@@ -5,9 +5,19 @@
 // input. The missing texels are outside the canvas, so they count as
 // transparent (zero). The mean thus stays a true area mean, in which the
 // area outside the canvas is transparent.
+//
+// The output is `rgba16float` (`VIEW_FORMAT` in `gpu.rs`). A store of an
+// `f32` value to that format can round toward zero on some GPUs, and the
+// error then adds up from level to level. Thus the kernel first rounds
+// the value to the nearest `f16` value (an `f16` value stores without
+// change).
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var output: texture_storage_2d<OUTPUT_FORMAT, write>;
+
+// The largest finite `f16` value. `quantizeToF16` has no defined result
+// for values outside the finite `f16` range.
+const F16_MAX: f32 = 65504.0;
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -26,5 +36,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
-    textureStore(output, vec2<i32>(gid.xy), sum * 0.25);
+    let mean = clamp(sum * 0.25, vec4<f32>(-F16_MAX), vec4<f32>(F16_MAX));
+    textureStore(output, vec2<i32>(gid.xy), quantizeToF16(mean));
 }

@@ -24,6 +24,9 @@ thiserror.workspace = true
 [dev-dependencies]
 # MIT OR Apache-2.0. Blocking executor for GPU tests only.
 pollster = "0.4"
+# MIT OR Apache-2.0. Rounds test values to `f16` (the GPU layer cache
+# format). Already in the tree through `expose-gpu`.
+half = "2"
 
 [lints]
 workspace = true

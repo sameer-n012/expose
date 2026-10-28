@@ -146,6 +146,11 @@ pub enum EditorError {
     #[error("invalid view: {0}")]
     InvalidView(&'static str),
 
+    /// The operation needs a selection, but the document has no selection
+    /// (see [`crate::selection`]).
+    #[error("the document has no selection")]
+    NoSelection,
+
     /// A document file cannot be read or written (see [`crate::file`]).
     #[error("document file: {0}")]
     File(#[from] FileError),

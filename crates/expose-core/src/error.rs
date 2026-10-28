@@ -96,6 +96,13 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    /// The outlines of an image have more points than the permitted limit.
+    #[error("the outline has more than {limit} points")]
+    ContourTooLarge {
+        /// The permitted number of points.
+        limit: usize,
+    },
+
     /// The settings come from a newer schema version than this build supports.
     #[error("settings version {found} is newer than the supported version {supported}")]
     UnsupportedVersion {

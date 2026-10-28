@@ -1010,6 +1010,7 @@ dependencies = [
  "crc32fast",
  "expose-core",
  "expose-gpu",
+ "half",
  "miniz_oxide 0.9.1",
  "pollster",
  "serde",
