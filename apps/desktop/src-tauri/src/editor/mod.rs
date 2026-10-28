@@ -38,9 +38,9 @@ use expose_editor::EditorError;
 use expose_gpu::GpuError;
 
 pub use dto::{
-    AdjustmentDto, BackgroundId, BlendModeId, CurvePointDto, DocumentId, DocumentInfo, EditDto,
-    LayerInfo, LayerKindId, LevelsChannelDto, LocksDto, NewDocumentSpec, SaveResult,
-    SelectionModeId, SelectionOutline, SelectionShapeDto,
+    AdjustmentDto, BackgroundId, BlendModeId, BrushSettingsDto, CurvePointDto, DocumentId,
+    DocumentInfo, EditDto, LayerInfo, LayerKindId, LevelsChannelDto, LocksDto, NewDocumentSpec,
+    SaveResult, SelectionModeId, SelectionOutline, SelectionShapeDto, StrokeTargetDto,
 };
 pub use engine::{EditorEngine, MAX_VIEW_SIDE, RenderRequest, SaveGuard};
 pub use outline::{MAX_OUTLINE_POINTS, selection_outline};
@@ -68,6 +68,13 @@ pub enum EditorEngineError {
     /// The layer has a mask already. The edit does not replace it.
     #[error("the layer {0} has a mask already")]
     MaskExists(u64),
+    /// The stroke ID is not the ID of the active stroke of the document
+    /// (the stroke ended, or the ID is wrong).
+    #[error("stroke {0} is not the active stroke")]
+    StrokeNotActive(u64),
+    /// The point list of a stroke call is not valid.
+    #[error("invalid stroke points: {0}")]
+    InvalidStrokePoints(&'static str),
     /// The requested view size is not valid.
     #[error("the view size {width}x{height} is not in 1..={MAX_VIEW_SIDE}")]
     InvalidViewSize {
@@ -143,6 +150,8 @@ impl From<EditorEngineError> for CommandError {
             EditorEngineError::InvalidViewSize { .. }
             | EditorEngineError::InvalidStep
             | EditorEngineError::MaskExists(_)
+            | EditorEngineError::StrokeNotActive(_)
+            | EditorEngineError::InvalidStrokePoints(_)
             | EditorEngineError::SaveInProgress(_) => ErrorKind::InvalidInput,
             EditorEngineError::Editor(inner) => editor_error_kind(inner),
             EditorEngineError::GpuUnavailable(_) => ErrorKind::Unavailable,

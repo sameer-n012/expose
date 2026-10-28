@@ -4,8 +4,8 @@
 
 use expose_core::buffer::WorkingImage;
 use expose_editor::{
-    Adjustment, Document, DocumentSpec, Edit, History, LayerContent, LayerId, Mask, MaskFill,
-    MaskImage, PixelLayer, Placement,
+    Adjustment, BrushSettings, Document, DocumentSpec, Edit, History, LayerContent, LayerId, Mask,
+    MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
 };
 
 use super::EditorEngineError;
@@ -46,6 +46,27 @@ pub struct EditSession {
     origin: DocumentOrigin,
     /// The document revision at the last save, or at the open.
     saved_revision: u64,
+    /// The stroke that the user draws now, if any.
+    stroke: Option<ActiveStroke>,
+    /// The ID of the next stroke. IDs start at 1 and stay far below 2^53.
+    next_stroke_id: u64,
+}
+
+/// A stroke in progress, with its ID and the name of its history step.
+#[derive(Debug)]
+struct ActiveStroke {
+    id: u64,
+    name: &'static str,
+    stroke: Stroke,
+}
+
+/// The name of the history step of a stroke with `target`.
+const fn stroke_step_name(target: &StrokeTarget) -> &'static str {
+    match target {
+        StrokeTarget::Paint { .. } => "Brush",
+        StrokeTarget::Erase => "Eraser",
+        StrokeTarget::Mask { .. } => "Mask Brush",
+    }
 }
 
 impl EditSession {
@@ -78,7 +99,112 @@ impl EditSession {
             history,
             origin,
             saved_revision,
+            stroke: None,
+            next_stroke_id: 1,
         })
+    }
+
+    /// `true` if a stroke is active.
+    pub const fn has_stroke(&self) -> bool {
+        self.stroke.is_some()
+    }
+
+    /// Starts a stroke on the layer with the number `layer`. An active
+    /// stroke ends first (it is committed as one history step). Returns the
+    /// ID of the new stroke.
+    ///
+    /// # Errors
+    ///
+    /// - [`EditorEngineError::LayerNotFound`] if `layer` is not in the
+    ///   document.
+    /// - [`EditorEngineError::Editor`] for bad settings, a layer of the
+    ///   wrong kind, a missing mask, or a lock.
+    /// - The errors of [`Self::commit_stroke`].
+    pub fn stroke_begin(
+        &mut self,
+        layer: u64,
+        target: StrokeTarget,
+        settings: BrushSettings,
+    ) -> Result<u64, EditorEngineError> {
+        self.commit_stroke()?;
+        let layer = resolve(&self.document, layer)?;
+        let name = stroke_step_name(&target);
+        let stroke = Stroke::begin(&self.document, layer, target, settings)?;
+        let id = self.next_stroke_id;
+        self.next_stroke_id += 1;
+        self.stroke = Some(ActiveStroke { id, name, stroke });
+        Ok(id)
+    }
+
+    /// Adds points to the active stroke. The layer changes in place.
+    ///
+    /// # Errors
+    ///
+    /// - [`EditorEngineError::StrokeNotActive`] if `id` is not the ID of the
+    ///   active stroke.
+    /// - [`EditorEngineError::Editor`] if the stroke rejects the points. The
+    ///   stroke stays active.
+    pub fn stroke_points(
+        &mut self,
+        id: u64,
+        points: &[StrokePoint],
+    ) -> Result<(), EditorEngineError> {
+        match self.stroke.as_mut() {
+            Some(active) if active.id == id => {
+                active.stroke.add_points(&mut self.document, points)?;
+                Ok(())
+            }
+            _ => Err(EditorEngineError::StrokeNotActive(id)),
+        }
+    }
+
+    /// Ends the stroke `id` and records one history step.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::StrokeNotActive`] and the errors of
+    /// [`Self::commit_stroke`].
+    pub fn stroke_end(&mut self, id: u64) -> Result<(), EditorEngineError> {
+        self.active_stroke(id)?;
+        self.commit_stroke()
+    }
+
+    /// Cancels the stroke `id`. The layer returns to its state before the
+    /// stroke. No history step is recorded.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::StrokeNotActive`] and
+    /// [`EditorEngineError::Editor`] if the restore fails.
+    pub fn stroke_cancel(&mut self, id: u64) -> Result<(), EditorEngineError> {
+        self.active_stroke(id)?;
+        if let Some(active) = self.stroke.take() {
+            active.stroke.cancel(&mut self.document)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the active stroke, if any, and records it as one history step.
+    /// Every operation that is not a stroke call runs this first.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::Editor`] if the stroke cannot end. The stroke is
+    /// then gone.
+    pub fn commit_stroke(&mut self) -> Result<(), EditorEngineError> {
+        if let Some(active) = self.stroke.take() {
+            if let Some(edit) = active.stroke.end(&mut self.document)? {
+                self.history.push(active.name, vec![edit]);
+            }
+        }
+        Ok(())
+    }
+
+    fn active_stroke(&self, id: u64) -> Result<&ActiveStroke, EditorEngineError> {
+        match self.stroke.as_ref() {
+            Some(active) if active.id == id => Ok(active),
+            _ => Err(EditorEngineError::StrokeNotActive(id)),
+        }
     }
 
     /// The document.
@@ -135,6 +261,7 @@ impl EditSession {
     ///   example, an opacity out of range, a lock, or a move into a
     ///   descendant).
     pub fn edit(&mut self, edit: EditDto, gesture: Option<u64>) -> Result<(), EditorEngineError> {
+        self.commit_stroke()?;
         let name = edit.step_name();
         let undo = apply(&mut self.document, edit)?;
         match gesture {
@@ -151,6 +278,7 @@ impl EditSession {
     /// [`EditorEngineError::History`] if the step fails (a bug; the history
     /// restores the state before the step).
     pub fn undo(&mut self) -> Result<(), EditorEngineError> {
+        self.commit_stroke()?;
         self.history
             .undo(&mut self.document)
             .map(drop)
@@ -163,6 +291,7 @@ impl EditSession {
     ///
     /// [`EditorEngineError::History`] if the step fails.
     pub fn redo(&mut self) -> Result<(), EditorEngineError> {
+        self.commit_stroke()?;
         self.history
             .redo(&mut self.document)
             .map(drop)
@@ -1058,5 +1187,222 @@ mod tests {
         };
         let s = EditSession::with_origin(build_document(image).unwrap(), origin).unwrap();
         assert_eq!(s.info(1).source_photo_id, Some(expose_catalog::PhotoId(5)));
+    }
+
+    fn brush() -> BrushSettings {
+        BrushSettings {
+            size: 3.0,
+            hardness: 1.0,
+            opacity: 1.0,
+            flow: 1.0,
+            spacing: 0.25,
+            pressure_size: false,
+            pressure_opacity: false,
+        }
+    }
+
+    fn white() -> StrokeTarget {
+        StrokeTarget::Paint {
+            color: [1.0, 1.0, 1.0],
+        }
+    }
+
+    fn pixels(s: &EditSession) -> Vec<[f32; 4]> {
+        s.document().layers()[0]
+            .as_pixel()
+            .unwrap()
+            .image()
+            .pixels()
+            .to_vec()
+    }
+
+    fn dabs() -> Vec<StrokePoint> {
+        vec![
+            StrokePoint::new(1.5, 1.5, 1.0),
+            StrokePoint::new(2.5, 1.5, 1.0),
+        ]
+    }
+
+    #[test]
+    fn stroke_is_one_undo_step() {
+        let mut s = session();
+        let bg = background(&s);
+        let before = pixels(&s);
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        assert_ne!(pixels(&s), before);
+        s.stroke_end(id).unwrap();
+        let info = s.info(1);
+        assert!(info.can_undo && info.dirty);
+        s.undo().unwrap();
+        assert_eq!(pixels(&s), before);
+        // The stroke was the only step.
+        assert!(!s.info(1).can_undo);
+        s.redo().unwrap();
+        assert_ne!(pixels(&s), before);
+    }
+
+    #[test]
+    fn stroke_cancel_restores_and_adds_no_step() {
+        let mut s = session();
+        let bg = background(&s);
+        let before = pixels(&s);
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        s.stroke_cancel(id).unwrap();
+        assert_eq!(pixels(&s), before);
+        assert!(!s.info(1).can_undo);
+        assert!(!s.has_stroke());
+    }
+
+    #[test]
+    fn old_stroke_id_is_rejected() {
+        let mut s = session();
+        let bg = background(&s);
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        s.stroke_end(id).unwrap();
+        assert!(matches!(
+            s.stroke_points(id, &dabs()),
+            Err(EditorEngineError::StrokeNotActive(i)) if i == id
+        ));
+        assert!(matches!(
+            s.stroke_end(id),
+            Err(EditorEngineError::StrokeNotActive(_))
+        ));
+        assert!(matches!(
+            s.stroke_cancel(id),
+            Err(EditorEngineError::StrokeNotActive(_))
+        ));
+        assert!(matches!(
+            s.stroke_points(id + 99, &dabs()),
+            Err(EditorEngineError::StrokeNotActive(_))
+        ));
+    }
+
+    #[test]
+    fn stroke_on_an_adjustment_layer_fails() {
+        let mut s = session();
+        s.edit(
+            EditDto::AddAdjustment {
+                adjustment: bc(0.2),
+                above_layer_id: None,
+            },
+            None,
+        )
+        .unwrap();
+        let adj = s
+            .document()
+            .layers()
+            .iter()
+            .find(|l| l.as_pixel().is_none())
+            .unwrap()
+            .id()
+            .get();
+        assert!(matches!(
+            s.stroke_begin(adj, white(), brush()),
+            Err(EditorEngineError::Editor(EditorError::NotAPixelLayer(_)))
+        ));
+        assert!(!s.has_stroke());
+    }
+
+    #[test]
+    fn mask_stroke_needs_a_mask() {
+        let mut s = session();
+        let bg = background(&s);
+        let target = StrokeTarget::Mask { value: 0.0 };
+        assert!(matches!(
+            s.stroke_begin(bg, target, brush()),
+            Err(EditorEngineError::Editor(EditorError::NoMask(_)))
+        ));
+        s.edit(
+            EditDto::AddMask {
+                layer_id: bg,
+                fill: MaskFillId::Reveal,
+            },
+            None,
+        )
+        .unwrap();
+        let id = s.stroke_begin(bg, target, brush()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        s.stroke_end(id).unwrap();
+        s.undo().unwrap();
+        // The mask is still there; only the stroke is undone.
+        assert!(s.info(1).layers[0].has_mask);
+    }
+
+    #[test]
+    fn unknown_layer_is_not_found() {
+        let mut s = session();
+        assert!(matches!(
+            s.stroke_begin(9999, white(), brush()),
+            Err(EditorEngineError::LayerNotFound(9999))
+        ));
+    }
+
+    #[test]
+    fn undo_right_after_points_undoes_the_whole_stroke() {
+        let mut s = session();
+        let bg = background(&s);
+        let before = pixels(&s);
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        // No stroke_end: undo commits the stroke, then undoes it.
+        s.undo().unwrap();
+        assert!(!s.has_stroke());
+        assert_eq!(pixels(&s), before);
+        assert!(s.info(1).can_redo);
+    }
+
+    #[test]
+    fn edit_and_begin_and_redo_commit_the_stroke() {
+        let mut s = session();
+        let bg = background(&s);
+        let before = pixels(&s);
+        // Edit.
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        s.edit(
+            EditDto::AddAdjustment {
+                adjustment: bc(0.2),
+                above_layer_id: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(!s.has_stroke());
+        s.undo().unwrap(); // the adjustment
+        assert_ne!(pixels(&s), before);
+        s.undo().unwrap(); // the stroke
+        assert_eq!(pixels(&s), before);
+        // Begin.
+        let first = s.stroke_begin(bg, white(), brush()).unwrap();
+        s.stroke_points(first, &dabs()).unwrap();
+        let second = s.stroke_begin(bg, white(), brush()).unwrap();
+        assert_ne!(first, second);
+        assert!(matches!(
+            s.stroke_points(first, &dabs()),
+            Err(EditorEngineError::StrokeNotActive(_))
+        ));
+        s.stroke_cancel(second).unwrap();
+        s.undo().unwrap();
+        assert_eq!(pixels(&s), before);
+        // Redo.
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        s.redo().unwrap();
+        assert!(!s.has_stroke());
+        assert!(s.info(1).can_undo);
+    }
+
+    #[test]
+    fn stroke_changes_the_layer_content_version() {
+        let mut s = session();
+        let bg = background(&s);
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        let v0 = s.document().layers()[0].pixel_version();
+        s.stroke_points(id, &dabs()).unwrap();
+        assert_ne!(s.document().layers()[0].pixel_version(), v0);
     }
 }

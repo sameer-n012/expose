@@ -35,11 +35,11 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use expose_develop::{DisplayEncoder, DisplaySpace};
-use expose_editor::{Document, GpuCompositor, ViewSpec};
+use expose_editor::{BrushSettings, Document, GpuCompositor, StrokePoint, StrokeTarget, ViewSpec};
 use expose_gpu::{GpuContext, GpuContextOptions};
 
 use super::EditorEngineError;
-use super::dto::{DocumentId, DocumentInfo, EditDto, SelectionOutline};
+use super::dto::{DocumentId, DocumentInfo, EditDto, SelectionOutline, stroke_points};
 use super::outline::{MAX_OUTLINE_POINTS, selection_outline};
 use super::save::{DocumentOrigin, SaveSnapshot, SavedFiles};
 use super::session::EditSession;
@@ -88,6 +88,30 @@ enum Job {
         document: DocumentId,
         edit: EditDto,
         gesture: Option<u64>,
+        reply: Reply<DocumentInfo>,
+    },
+    /// Starts a brush stroke. The reply is the stroke ID.
+    StrokeBegin {
+        document: DocumentId,
+        layer: u64,
+        target: StrokeTarget,
+        settings: BrushSettings,
+        reply: Reply<u64>,
+    },
+    StrokePoints {
+        document: DocumentId,
+        stroke: u64,
+        points: Vec<StrokePoint>,
+        reply: Reply<()>,
+    },
+    StrokeEnd {
+        document: DocumentId,
+        stroke: u64,
+        reply: Reply<DocumentInfo>,
+    },
+    StrokeCancel {
+        document: DocumentId,
+        stroke: u64,
         reply: Reply<DocumentInfo>,
     },
     Undo {
@@ -266,6 +290,96 @@ impl EditorEngine {
             document,
             edit,
             gesture,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
+    /// Starts a brush stroke on a layer and waits for the stroke ID. An
+    /// active stroke of the document ends first (see
+    /// [`EditSession::stroke_begin`]).
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`],
+    /// [`EditorEngineError::LayerNotFound`], and the stroke errors.
+    pub async fn stroke_begin_async(
+        &self,
+        document: DocumentId,
+        layer: u64,
+        target: StrokeTarget,
+        settings: BrushSettings,
+    ) -> Result<u64, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::StrokeBegin {
+            document,
+            layer,
+            target,
+            settings,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
+    /// Adds points to a stroke and waits until the layer has them. `flat`
+    /// is `[x, y, pressure, ...]` in canvas pixels.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::InvalidStrokePoints`],
+    /// [`EditorEngineError::DocumentNotFound`],
+    /// [`EditorEngineError::StrokeNotActive`], and the stroke errors.
+    pub async fn stroke_points_async(
+        &self,
+        document: DocumentId,
+        stroke: u64,
+        flat: &[f64],
+    ) -> Result<(), EditorEngineError> {
+        let points = stroke_points(flat)?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::StrokePoints {
+            document,
+            stroke,
+            points,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
+    /// Ends a stroke (one history step) and waits for the new info.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`],
+    /// [`EditorEngineError::StrokeNotActive`], and the stroke errors.
+    pub async fn stroke_end_async(
+        &self,
+        document: DocumentId,
+        stroke: u64,
+    ) -> Result<DocumentInfo, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::StrokeEnd {
+            document,
+            stroke,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
+    /// Cancels a stroke (no history step) and waits for the new info.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::stroke_end_async`].
+    pub async fn stroke_cancel_async(
+        &self,
+        document: DocumentId,
+        stroke: u64,
+    ) -> Result<DocumentInfo, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::StrokeCancel {
+            document,
+            stroke,
             reply: reply_to(sender),
         });
         receive(receiver).await
@@ -476,9 +590,13 @@ fn fail_job(job: Job, error: &EditorEngineError) {
     match job {
         Job::Open { reply, .. }
         | Job::Edit { reply, .. }
+        | Job::StrokeEnd { reply, .. }
+        | Job::StrokeCancel { reply, .. }
         | Job::Undo { reply, .. }
         | Job::Redo { reply, .. } => reply(Err(error())),
         Job::Snapshot { reply, .. } => reply(Err(error())),
+        Job::StrokeBegin { reply, .. } => reply(Err(error())),
+        Job::StrokePoints { reply, .. } => reply(Err(error())),
         Job::Outline { reply, .. } => reply(Err(error())),
         Job::FinishSave { reply, .. } => {
             if let Some(reply) = reply {
@@ -619,6 +737,8 @@ impl Renderer {
         if doc.saving {
             return Err(EditorEngineError::SaveInProgress(id));
         }
+        // A stroke in progress is part of the saved state.
+        doc.session.commit_stroke()?;
         let Gpu {
             ctx, compositor, ..
         } = ensure_gpu(gpu)?;
@@ -749,6 +869,64 @@ impl Renderer {
         Ok(body)
     }
 
+    /// Runs a brush stroke job. Other jobs are a bug.
+    fn run_stroke_job(&mut self, job: Job) {
+        match job {
+            Job::StrokeBegin {
+                document,
+                layer,
+                target,
+                settings,
+                reply,
+            } => {
+                let result = guarded(self, |r| {
+                    r.session(document)?.stroke_begin(layer, target, settings)
+                });
+                reply(result);
+            }
+            Job::StrokePoints {
+                document,
+                stroke,
+                points,
+                reply,
+            } => {
+                let result = guarded(self, |r| {
+                    r.session(document)?.stroke_points(stroke, &points)
+                });
+                reply(result);
+            }
+            Job::StrokeEnd {
+                document,
+                stroke,
+                reply,
+            } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    session.stroke_end(stroke)?;
+                    Ok(session.info(document))
+                });
+                reply(result);
+            }
+            Job::StrokeCancel {
+                document,
+                stroke,
+                reply,
+            } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    session.stroke_cancel(stroke)?;
+                    Ok(session.info(document))
+                });
+                reply(result);
+            }
+            // `run_job` sends only stroke jobs here.
+            other => fail_job(
+                other,
+                &EditorEngineError::Internal("a job that is not a stroke job"),
+            ),
+        }
+    }
+
     fn run_job(&mut self, job: Job) {
         match job {
             Job::Close(id) => self.close(id),
@@ -790,6 +968,10 @@ impl Renderer {
                 });
                 reply(result);
             }
+            job @ (Job::StrokeBegin { .. }
+            | Job::StrokePoints { .. }
+            | Job::StrokeEnd { .. }
+            | Job::StrokeCancel { .. }) => self.run_stroke_job(job),
             Job::Undo { document, reply } => {
                 let result = guarded(self, |r| {
                     let session = r.session(document)?;
@@ -971,6 +1153,59 @@ mod tests {
         assert!(!undone.can_undo && undone.can_redo);
         let body = pollster::block_on(engine.render_async(request)).unwrap();
         assert_eq!(pixel(&body, 12, 4, 4), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn stroke_points_render_and_the_end_is_one_step() {
+        let Some((engine, info)) = engine_with_document(8, 8, [0.0, 0.0, 0.0, 1.0]) else {
+            return;
+        };
+        let id = info.document_id;
+        let request = RenderRequest {
+            document: id,
+            view: view(0.0, 1.0, 8, 8),
+            show_mask: None,
+        };
+        let black = pollster::block_on(engine.render_async(request)).unwrap();
+        assert_eq!(pixel(&black, 8, 4, 4), [0, 0, 0, 255]);
+        let brush = BrushSettings {
+            size: 4.0,
+            hardness: 1.0,
+            opacity: 1.0,
+            flow: 1.0,
+            spacing: 0.25,
+            pressure_size: false,
+            pressure_opacity: false,
+        };
+        let target = StrokeTarget::Paint {
+            color: [1.0, 1.0, 1.0],
+        };
+        let stroke =
+            pollster::block_on(engine.stroke_begin_async(id, info.layers[0].id, target, brush))
+                .unwrap();
+        pollster::block_on(engine.stroke_points_async(id, stroke, &[4.0, 4.0, 1.0])).unwrap();
+        // The next frame shows the dab before the stroke ends.
+        let painted = pollster::block_on(engine.render_async(request)).unwrap();
+        assert_eq!(pixel(&painted, 8, 4, 4), [255, 255, 255, 255]);
+        let ended = pollster::block_on(engine.stroke_end_async(id, stroke)).unwrap();
+        assert!(ended.can_undo && ended.dirty);
+        // An old stroke ID and a wrong point list fail.
+        assert!(matches!(
+            pollster::block_on(engine.stroke_end_async(id, stroke)),
+            Err(EditorEngineError::StrokeNotActive(_))
+        ));
+        assert!(matches!(
+            pollster::block_on(engine.stroke_points_async(id, stroke, &[1.0, 2.0])),
+            Err(EditorEngineError::InvalidStrokePoints(_))
+        ));
+        assert!(matches!(
+            pollster::block_on(engine.stroke_end_async(id + 50, stroke)),
+            Err(EditorEngineError::DocumentNotFound(_))
+        ));
+        let undone = pollster::block_on(engine.undo_async(id)).unwrap();
+        assert!(!undone.can_undo);
+        let body = pollster::block_on(engine.render_async(request)).unwrap();
+        assert_eq!(pixel(&body, 8, 4, 4), [0, 0, 0, 255]);
     }
 
     #[test]

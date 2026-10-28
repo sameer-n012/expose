@@ -19,9 +19,9 @@ use super::preview::DisplaySpaceArg;
 use super::{run_blocking, with_catalog};
 use crate::editor::save::{read_linked_document, save_snapshot};
 use crate::editor::{
-    DocumentId, DocumentInfo, DocumentOrigin, EditDto, EditorEngine, EditorEngineError,
-    NewDocumentSpec, RenderRequest, SaveGuard, SaveResult, SavedFiles, SelectionOutline,
-    build_document,
+    BrushSettingsDto, DocumentId, DocumentInfo, DocumentOrigin, EditDto, EditorEngine,
+    EditorEngineError, NewDocumentSpec, RenderRequest, SaveGuard, SaveResult, SavedFiles,
+    SelectionOutline, StrokeTargetDto, build_document,
 };
 use crate::error::{CommandError, ErrorKind};
 use crate::state::CatalogState;
@@ -363,6 +363,77 @@ pub async fn editor_edit(
     gesture: Option<u64>,
 ) -> Result<DocumentInfo, CommandError> {
     Ok(engine.edit_async(document_id, edit, gesture).await?)
+}
+
+/// Starts a brush stroke on a layer and returns the stroke ID. A stroke
+/// that is active in the document ends first (one history step).
+///
+/// `target.paint.color` is gamma-encoded sRGB (0 to 1). The brush value
+/// ranges are in `expose_editor::BrushSettings`.
+///
+/// Errors: `notFound` (document or layer), `invalidInput` (bad brush
+/// settings or color, a layer of the wrong kind, a mask stroke on a layer
+/// without a mask, a lock), `internal`.
+#[tauri::command]
+pub async fn editor_stroke_begin(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    layer_id: u64,
+    target: StrokeTargetDto,
+    brush: BrushSettingsDto,
+) -> Result<u64, CommandError> {
+    let target = target.to_target()?;
+    Ok(engine
+        .stroke_begin_async(document_id, layer_id, target, brush.into())
+        .await?)
+}
+
+/// Adds points to the active stroke. `points` is the flat list
+/// `[x, y, pressure, x, y, pressure, ...]` in canvas pixels: the length is
+/// a multiple of 3, with 1 to 3000 points. A frame that the engine renders
+/// after this call shows the new dabs.
+///
+/// Errors: `notFound` (document), `invalidInput` (a stroke ID that is
+/// not the active stroke, which is a normal race after a commit; a bad
+/// point list; a point out of range), `internal`.
+#[tauri::command]
+pub async fn editor_stroke_points(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    stroke_id: u64,
+    points: Vec<f64>,
+) -> Result<(), CommandError> {
+    Ok(engine
+        .stroke_points_async(document_id, stroke_id, &points)
+        .await?)
+}
+
+/// Ends the active stroke. The stroke is one history step ("Brush",
+/// "Eraser", or "Mask Brush"). Returns the new document info.
+///
+/// Errors: `notFound` (document), `invalidInput` (not the active
+/// stroke), `internal`.
+#[tauri::command]
+pub async fn editor_stroke_end(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    stroke_id: u64,
+) -> Result<DocumentInfo, CommandError> {
+    Ok(engine.stroke_end_async(document_id, stroke_id).await?)
+}
+
+/// Cancels the active stroke. The layer returns to its state before the
+/// stroke and no history step is recorded. Returns the new document info.
+///
+/// Errors: `notFound` (document), `invalidInput` (not the active
+/// stroke), `internal`.
+#[tauri::command]
+pub async fn editor_stroke_cancel(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    stroke_id: u64,
+) -> Result<DocumentInfo, CommandError> {
+    Ok(engine.stroke_cancel_async(document_id, stroke_id).await?)
 }
 
 /// Returns the outline of the selection of a document as closed polygons
