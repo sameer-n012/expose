@@ -1,6 +1,6 @@
 # 0016 — Editor: masks UI, selections, and brushes
 
-- **Status:** Proposed
+- **Status:** Accepted (operator review done; step 1 done in ADR 0018)
 - **Date:** 2026-10-25
 - **Decided by:** Claude (draft; the operator can change the scope or the order)
 
