@@ -118,6 +118,8 @@ fn editor_error_kind(error: &EditorError) -> ErrorKind {
         | EditorError::NotAnAdjustmentLayer(_)
         | EditorError::NoMask(_)
         | EditorError::NoSelection
+        // The layer changed during a stroke; the UI must start a new stroke.
+        | EditorError::StrokeConflict(_)
         | EditorError::Cycle(_)
         | EditorError::IndexOutOfRange { .. }
         | EditorError::Locked { .. }
