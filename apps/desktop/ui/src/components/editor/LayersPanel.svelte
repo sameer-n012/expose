@@ -77,7 +77,8 @@
 
   /**
    * Shift+click on the chip turns the mask on or off. Alt+click shows or
-   * hides the mask on the canvas. Other clicks select the layer.
+   * hides the mask on the canvas. Other clicks select the layer and its mask
+   * as the paint target.
    */
   function onChip(event: MouseEvent, layer: LayerInfo): void {
     if (event.altKey) {
@@ -85,7 +86,8 @@
     } else if (event.shiftKey) {
       editor.setMaskEnabled(layer.id, !layer.maskEnabled);
     } else {
-      editor.select(layer.id);
+      // A plain click chooses the mask as the paint target of the brush and the eraser.
+      editor.selectMaskTarget(layer.id);
     }
   }
 
@@ -324,8 +326,10 @@
                 class="mask-chip"
                 class:off={!layer.maskEnabled}
                 class:shown={editor.showMaskLayerId === layer.id}
+                class:paint={layer.id === editor.selectedId && editor.paintTarget === 'mask'}
+                data-paint-target={layer.id === editor.selectedId && editor.paintTarget === 'mask' ? 'true' : 'false'}
                 aria-label={layer.maskEnabled ? `Mask of ${layer.name} is on` : `Mask of ${layer.name} is off`}
-                title={maskChipTitle(layer)}
+                title="{maskChipTitle(layer)} Click to paint on the mask."
                 onclick={(e) => onChip(e, layer)}
               >
                 {#if !layer.maskEnabled}<span class="x" aria-hidden="true">✕</span>{/if}
@@ -555,6 +559,10 @@
   .mask-chip.shown {
     outline: 2px solid var(--color-accent);
     outline-offset: 1px;
+  }
+  /* The paint target: a thick frame in the accent color. */
+  .mask-chip.paint {
+    box-shadow: 0 0 0 2px var(--color-accent);
   }
   .mask-chip .x {
     position: absolute;

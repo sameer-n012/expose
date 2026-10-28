@@ -14,11 +14,15 @@
     ellipse marquee (drag), polygon lasso (click points). The modifier keys at
     the first pointer-down set the selection mode. The outline of the
     selection and the preview of a gesture are SVG layers over the canvas.
+  - Brush and eraser: a drag is one stroke (`StrokeClient`). Escape or a
+    cancelled pointer cancels it. A circle of the brush size follows the pointer.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import { fitCanvas, frameImageData } from '../../lib/develop/draw';
-  import type { RenderArea } from '../../lib/editor/api';
+  import type { DocumentInfo, RenderArea } from '../../lib/editor/api';
+  import { CROSSHAIR_BELOW, cursorDiameter, pointerPressure } from '../../lib/editor/brush';
+  import { StrokeClient } from '../../lib/editor/strokeClient';
   import { EditorFrameClient, type EditorFrame } from '../../lib/editor/frameClient';
   import {
     boxBetween,
@@ -27,6 +31,7 @@
     dragShape,
     ellipsePath,
     isClick,
+    isSelectionTool,
     modeFromModifiers,
     polygonShape,
     polylinePath,
@@ -147,8 +152,8 @@
     });
   });
 
-  // Every document or view change asks for a new frame.
-  $effect(() => {
+  /** Asks for a frame of the current view. */
+  function requestFrame(): void {
     const info = editor.info;
     const view = editor.view;
     const viewport = editor.viewport;
@@ -159,7 +164,10 @@
     const showMaskLayerId = editor.showMaskLayerId;
     const ratio = typeof window === 'undefined' ? 1 : window.devicePixelRatio;
     client.request({ ...renderArea(view, viewport, ratio), showMaskLayerId });
-  });
+  }
+
+  // Every document or view change asks for a new frame.
+  $effect(requestFrame);
 
   $effect(() => {
     const size = { width, height };
@@ -242,7 +250,103 @@
     untrack(() => {
       marquee = null;
       lasso = null;
+      cancelStroke();
     });
+  });
+
+  // ---- Brush and eraser strokes ----
+
+  interface RunningStroke {
+    readonly client: StrokeClient;
+    readonly pointerId: number;
+    readonly node: HTMLElement;
+  }
+
+  let stroke: RunningStroke | null = null;
+  /** The pointer position in viewport pixels, for the brush cursor. Null: hidden. */
+  let cursor = $state.raw<Point | null>(null);
+
+  /** The points of a pointer event (and its coalesced events) as [x, y, pressure, ...] in canvas pixels. */
+  function strokePoints(event: PointerEvent, node: HTMLElement, view: View): number[] {
+    const events = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
+    const list = events.length > 0 ? events : [event];
+    const out: number[] = [];
+    for (const e of list) {
+      const c = screenToCanvas(view, local(e, node));
+      out.push(c.x, c.y, pointerPressure(e));
+    }
+    return out;
+  }
+
+  function startStroke(event: PointerEvent, node: HTMLElement, view: View): void {
+    const spec = editor.strokeSpec();
+    const info = editor.info;
+    if (spec === null || info === null) {
+      return;
+    }
+    const client = new StrokeClient({
+      api: editor.api,
+      documentId: info.documentId,
+      layerId: spec.layerId,
+      target: spec.target,
+      brush: spec.brush,
+      onProgress: requestFrame,
+      onBeginError: (error) => {
+        if (stroke?.client === client) {
+          stroke = null;
+        }
+        toasts.error(`Start the stroke failed: ${describeError(error)}`, error);
+      },
+      onError: (error) => toasts.error(`Paint the stroke failed: ${describeError(error)}`, error),
+    });
+    stroke = { client, pointerId: event.pointerId, node };
+    node.setPointerCapture?.(event.pointerId);
+    client.addPoints(strokePoints(event, node, view));
+  }
+
+  function finishStroke(event: PointerEvent): void {
+    const current = stroke;
+    if (current === null || event.pointerId !== current.pointerId) {
+      return;
+    }
+    stroke = null;
+    current.node.releasePointerCapture?.(event.pointerId);
+    const view = editor.view;
+    if (event.type === 'pointercancel') {
+      void current.client.cancel().then(applyStrokeInfo);
+      return;
+    }
+    if (view !== null) {
+      current.client.addPoints(strokePoints(event, current.node, view));
+    }
+    void current.client.end().then(applyStrokeInfo);
+  }
+
+  function cancelStroke(): void {
+    const current = stroke;
+    if (current === null) {
+      return;
+    }
+    stroke = null;
+    current.node.releasePointerCapture?.(current.pointerId);
+    void current.client.cancel().then(applyStrokeInfo);
+  }
+
+  function applyStrokeInfo(info: DocumentInfo | null): void {
+    if (info !== null && !disposed) {
+      editor.applyInfo(info);
+    }
+  }
+
+  const paintReady = $derived(editor.paintTool !== null && editor.paintBlockReason === null);
+  const cursorShape = $derived.by(() => {
+    const tool = editor.paintTool;
+    const view = editor.view;
+    if (tool === null || view === null || cursor === null || !paintReady || spaceDown || panning) {
+      return null;
+    }
+    const diameter = cursorDiameter(editor.brushOf(tool).size, view.zoom);
+    return { x: cursor.x, y: cursor.y, radius: diameter / 2, crosshair: diameter < CROSSHAIR_BELOW };
   });
 
   function lassoClick(event: PointerEvent, p: Point, view: View): void {
@@ -297,6 +401,12 @@
       return;
     }
     event.preventDefault();
+    if (tool === 'brush' || tool === 'eraser') {
+      if (stroke === null) {
+        startStroke(event, event.currentTarget, view);
+      }
+      return;
+    }
     const p = local(event, event.currentTarget);
     if (tool === 'polygonLasso') {
       lassoClick(event, p, view);
@@ -307,7 +417,13 @@
   }
 
   function onpointermove(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
-    if (panning) {
+    cursor = local(event, event.currentTarget);
+    if (stroke !== null) {
+      const view = editor.view;
+      if (view !== null && event.pointerId === stroke.pointerId) {
+        stroke.client.addPoints(strokePoints(event, event.currentTarget, view));
+      }
+    } else if (panning) {
       editor.pan(event.clientX - last.x, event.clientY - last.y);
       last = { x: event.clientX, y: event.clientY };
     } else if (marquee !== null) {
@@ -318,7 +434,9 @@
   }
 
   function onpointerup(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
-    if (panning) {
+    if (stroke !== null) {
+      finishStroke(event);
+    } else if (panning) {
       panning = false;
       event.currentTarget.releasePointerCapture?.(event.pointerId);
     } else if (marquee !== null) {
@@ -340,6 +458,11 @@
   }
 
   function onwindowkey(event: KeyboardEvent): void {
+    if (event.type === 'keydown' && event.key === 'Escape' && stroke !== null) {
+      event.preventDefault();
+      cancelStroke();
+      return;
+    }
     if (event.type === 'keydown' && (marquee !== null || lasso !== null) && !isEditableTarget(event.target)) {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -405,7 +528,9 @@
     class="viewport"
     class:grab={spaceDown && !panning}
     class:grabbing={panning}
-    class:crosshair={editor.tool !== 'hand' && !spaceDown && !panning}
+    class:crosshair={isSelectionTool(editor.tool) && !spaceDown && !panning}
+    class:no-cursor={cursorShape !== null}
+    onpointerleave={() => (cursor = null)}
     hidden={editor.status !== 'ready'}
     bind:clientWidth={width}
     bind:clientHeight={height}
@@ -441,6 +566,16 @@
       <svg class="preview" aria-hidden="true" data-testid="selection-preview">
         <path class="under" d={previewPath} />
         <path class="dashes" d={previewPath} />
+      </svg>
+    {/if}
+    {#if cursorShape !== null}
+      <svg class="preview" aria-hidden="true" data-testid="brush-cursor">
+        <circle class="under" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
+        <circle class="dashes solid" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
+        {#if cursorShape.crosshair}
+          <path class="under" d="M {cursorShape.x - 6} {cursorShape.y} H {cursorShape.x + 6} M {cursorShape.x} {cursorShape.y - 6} V {cursorShape.y + 6}" />
+          <path class="dashes solid" d="M {cursorShape.x - 5} {cursorShape.y} H {cursorShape.x + 5} M {cursorShape.x} {cursorShape.y - 5} V {cursorShape.y + 5}" />
+        {/if}
       </svg>
     {/if}
     {#if editor.showMask}
@@ -487,6 +622,17 @@
   }
   .crosshair {
     cursor: crosshair;
+  }
+  /* The brush circle is the cursor. */
+  .no-cursor {
+    cursor: none;
+  }
+  .preview .solid {
+    stroke-dasharray: none;
+  }
+  .preview circle {
+    fill: none;
+    stroke-width: 1px;
   }
   .preview {
     position: absolute;

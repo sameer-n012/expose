@@ -1,20 +1,33 @@
 <!--
   The tool strip and the selection options of the Editor canvas.
 
-  - Tools: Hand (H), Rectangle and Ellipse marquee (M cycles), Polygon lasso (L).
+  - Tools: Hand (H), Rectangle and Ellipse marquee (M cycles), Polygon lasso (L),
+    Brush (B), Eraser (E). The paint tools show their options in `BrushOptions`.
+    They are disabled, with the reason as the tooltip, when the selected layer
+    cannot take paint.
   - Options of the selection tools: feather (0 to 250 px) and anti-alias.
   - Select commands: Select All, Deselect, Invert, Feather…. The last three
     need a selection.
 -->
 <script lang="ts">
-  import { MAX_FEATHER, type EditorTool } from '../../lib/editor/selection';
+  import { MAX_FEATHER, isSelectionTool, type EditorTool } from '../../lib/editor/selection';
+  import type { PaintTool } from '../../lib/editor/brush';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
+  import BrushOptions from './BrushOptions.svelte';
 
   interface Props {
     editor: EditorStore;
   }
 
   let { editor }: Props = $props();
+
+  const PAINT_TOOLS: { id: PaintTool; label: string; title: string }[] = [
+    { id: 'brush', label: 'Brush', title: 'Brush (B). Drag to paint. [ and ] change the size.' },
+    { id: 'eraser', label: 'Eraser', title: 'Eraser (E). Drag to erase. [ and ] change the size.' },
+  ];
+
+  const blocked = $derived(editor.paintBlockReason);
+  const paintTool = $derived(editor.paintTool);
 
   const TOOLS: { id: EditorTool; label: string; title: string }[] = [
     { id: 'hand', label: 'Hand', title: 'Hand tool (H). Drag to move the view.' },
@@ -23,7 +36,7 @@
     { id: 'polygonLasso', label: 'Lasso', title: 'Polygon lasso (L). Click for points. Click the first point, double-click, or press Enter to close.' },
   ];
 
-  const selecting = $derived(editor.tool !== 'hand');
+  const selecting = $derived(isSelectionTool(editor.tool));
 </script>
 
 <div class="toolbar" role="toolbar" aria-label="Selection tools" data-testid="selection-toolbar">
@@ -33,7 +46,25 @@
         {tool.label}
       </button>
     {/each}
+    {#each PAINT_TOOLS as tool (tool.id)}
+      <!-- A disabled button shows no tooltip in some web views, so the wrapper has the title too. -->
+      <span title={blocked ?? tool.title}>
+        <button
+          type="button"
+          aria-pressed={editor.tool === tool.id}
+          title={blocked ?? tool.title}
+          disabled={blocked !== null}
+          onclick={() => editor.selectPaintTool(tool.id)}
+        >
+          {tool.label}
+        </button>
+      </span>
+    {/each}
   </div>
+
+  {#if paintTool !== null}
+    <BrushOptions {editor} tool={paintTool} />
+  {/if}
 
   {#if selecting}
     <div class="group">

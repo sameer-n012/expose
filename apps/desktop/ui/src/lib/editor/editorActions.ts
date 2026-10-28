@@ -12,6 +12,10 @@
  *   deselect, invert the selection, open the Feather dialog.
  * - `M`, `L`, `H` (scope `editor`): marquee tool (rectangle, then ellipse),
  *   polygon lasso, hand.
+ * - `B`, `E` (scope `editor`): brush and eraser tool.
+ * - `[`, `]`, `{`, `}` (scope `editor`): brush size and hardness (`{` and `}`
+ *   are Shift+`[` and Shift+`]`).
+ * - `X`, `D` (scope `editor`): swap the colors, default colors.
  * - `Mod+=`, `Mod+-`, `Mod+0`, `Mod+1` (scope `editor`): zoom in, zoom out,
  *   fit to window, 100 %.
  */
@@ -38,6 +42,14 @@ export const EDITOR_ACTION = {
   marqueeTool: 'editor.marqueeTool',
   lassoTool: 'editor.lassoTool',
   handTool: 'editor.handTool',
+  brushTool: 'editor.brushTool',
+  eraserTool: 'editor.eraserTool',
+  brushSizeDown: 'editor.brushSizeDown',
+  brushSizeUp: 'editor.brushSizeUp',
+  brushHarder: 'editor.brushHarder',
+  brushSofter: 'editor.brushSofter',
+  swapColors: 'editor.swapColors',
+  resetColors: 'editor.resetColors',
 } as const;
 
 /** The commands that the Editor actions call (the editor store has them). */
@@ -58,6 +70,11 @@ export interface EditorCommands {
   openFeatherDialog(): void;
   cycleMarquee(): void;
   setTool(tool: EditorTool): void;
+  selectPaintTool(tool: 'brush' | 'eraser'): void;
+  stepBrushSize(direction: 1 | -1): void;
+  stepBrushHardness(direction: 1 | -1): void;
+  swapColors(): void;
+  resetColors(): void;
 }
 
 /** The action that opens the selected photo in the Editor. The shell knows the photo. */
@@ -81,6 +98,16 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     { id: EDITOR_ACTION.marqueeTool, label: 'Editor: marquee tool (rectangle, ellipse)', scope: 'editor', defaultBinding: 'M', run: () => commands.cycleMarquee() },
     { id: EDITOR_ACTION.lassoTool, label: 'Editor: polygon lasso tool', scope: 'editor', defaultBinding: 'L', run: () => commands.setTool('polygonLasso') },
     { id: EDITOR_ACTION.handTool, label: 'Editor: hand tool', scope: 'editor', defaultBinding: 'H', run: () => commands.setTool('hand') },
+    // In the editor scope, `E` and `D` take precedence over the global module keys.
+    { id: EDITOR_ACTION.brushTool, label: 'Editor: brush tool', scope: 'editor', defaultBinding: 'B', run: () => commands.selectPaintTool('brush') },
+    { id: EDITOR_ACTION.eraserTool, label: 'Editor: eraser tool', scope: 'editor', defaultBinding: 'E', run: () => commands.selectPaintTool('eraser') },
+    { id: EDITOR_ACTION.brushSizeDown, label: 'Editor: brush smaller', scope: 'editor', defaultBinding: '[', allowRepeat: true, run: () => commands.stepBrushSize(-1) },
+    { id: EDITOR_ACTION.brushSizeUp, label: 'Editor: brush larger', scope: 'editor', defaultBinding: ']', allowRepeat: true, run: () => commands.stepBrushSize(1) },
+    // Shift+[ and Shift+] give the keys `{` and `}`. The key registry ignores Shift for symbols, so "Shift+[" would be the same chord as "[".
+    { id: EDITOR_ACTION.brushSofter, label: 'Editor: brush softer', scope: 'editor', defaultBinding: '{', allowRepeat: true, run: () => commands.stepBrushHardness(-1) },
+    { id: EDITOR_ACTION.brushHarder, label: 'Editor: brush harder', scope: 'editor', defaultBinding: '}', allowRepeat: true, run: () => commands.stepBrushHardness(1) },
+    { id: EDITOR_ACTION.swapColors, label: 'Editor: swap foreground and background', scope: 'editor', defaultBinding: 'X', run: () => commands.swapColors() },
+    { id: EDITOR_ACTION.resetColors, label: 'Editor: default colors', scope: 'editor', defaultBinding: 'D', run: () => commands.resetColors() },
     { id: EDITOR_ACTION.save, label: 'Editor: save to library', scope: 'editor', defaultBinding: 'Mod+S', run: () => void commands.save() },
     { id: EDITOR_ACTION.saveAs, label: 'Editor: save as…', scope: 'editor', defaultBinding: 'Mod+Shift+S', run: () => void commands.saveAs() },
     { id: EDITOR_ACTION.undo, label: 'Editor: undo', scope: 'editor', defaultBinding: 'Mod+Z', allowRepeat: true, run: () => commands.undo() },
