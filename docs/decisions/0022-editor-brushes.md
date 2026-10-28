@@ -37,7 +37,10 @@ ADR 0016 step 3 is brushes. This ADR records the decisions of the brush engine i
 ## Consequences
 
 - CPU dabs: 9–11 ms per batch of 16 dabs of 300 px at 4096² (release). A GPU dab path needs a new ADR if this is too slow.
-- Each points batch changes the layer version. Without partial uploads, the GPU cache uploads the full layer each time; the partial upload task (ADR 0016 "Partial uploads") removes this cost.
+- Partial updates (ADR 0016 "Partial uploads"): each layer keeps a log of up to 64 `(version, rect)` entries; an unknown change clears it. The GPU cache patches only the changed area of the layer or mask texture. The view composite redraws only the changed area if exactly one layer changed and the area is at most half the canvas. A frame after a batch at 4096², 10 layers: 66–121 ms before, 11–17 ms after.
+- `expose-gpu` has no sub-region texture write, so a patch copies the full texture with the area replaced (a `patch.wgsl` kernel) and rebuilds the full pyramid. Sub-region writes in `expose-gpu` would bring a frame to about 2–3 ms (follow-up).
+- Shell errors: `StrokeNotActive` and `InvalidStrokePoints` (both `invalidInput`).
+- In the Editor, the keys `E` (eraser) and `D` (default colors) win over the global module keys with the same letters. Hardness keys are `{` / `}`, because the key registry does not tell `Shift+[` from `[`.
 
 ## Open
 
