@@ -11,6 +11,9 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 ## In progress
 
 - **editor-gpu-f16** (O, agent) — `rgba16float` textures in `GpuCompositor` to cut GPU memory (memory part of editor-gpu-followups-2).
+- **editor-selection-model** (O, agent) — document selection in `expose-editor`: shapes, modes, feather, invert, mask from selection, undo; `selection_version` (ADR 0016 step 2).
+- **core-contour** (O, agent) — `expose_core::buffer::trace_contours` (marching squares) for the selection outline.
+- Then: shell + UI for selections (tools, outline overlay), after both merge.
 
 ## Next (suggested order)
 
