@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentInfo, EditDto, EditorApi, LayerInfo, SelectionOutline } from '../../lib/editor/api';
+import { strokeStubs } from '../../lib/editor/fakeStrokeApi';
 import { EDITOR_ACTION, editorActions } from '../../lib/editor/editorActions';
 import { EditorStore } from '../../lib/stores/editor.svelte';
 import { ToastStore } from '../../lib/stores/toasts.svelte';
@@ -79,6 +80,7 @@ async function makeStore(layers: LayerInfo[], start: Sel = { has: false, version
     save: vi.fn(),
     close: vi.fn(async () => undefined),
     selectionOutline: vi.fn(async (_id: number, _step: number) => outline(sel.version)),
+    ...strokeStubs(),
   } satisfies EditorApi;
   const store = new EditorStore({
     library: { focusIndex: null, photoAt: () => undefined, selectedIds: [] },

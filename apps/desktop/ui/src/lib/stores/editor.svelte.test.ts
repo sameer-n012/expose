@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DocumentInfo, EditDto, EditorApi, LayerInfo, NewDocumentSpec, SaveResult } from '../editor/api';
+import { strokeStubs } from '../editor/fakeStrokeApi';
 import { defaultSpec } from '../editor/newDocument';
 import { EditorStore, GESTURE_IDLE_MS } from './editor.svelte';
 import { ToastStore } from './toasts.svelte';
@@ -52,6 +53,7 @@ function setup() {
     save: vi.fn(async (documentId: number) => saveResult(documentId, revision)),
     close: vi.fn(async (_documentId: number) => undefined),
     selectionOutline: vi.fn(async (_documentId: number, _step: number) => ({ selectionVersion: 0, step: 1, contours: [] })),
+    ...strokeStubs(),
   } satisfies EditorApi;
   const toasts = new ToastStore();
   const modules = { active: 'editor' as 'library' | 'develop' | 'editor', switchTo: vi.fn() };
