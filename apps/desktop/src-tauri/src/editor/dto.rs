@@ -5,15 +5,17 @@
 //! All names are camelCase. Enums are tagged with the field `type`.
 
 use expose_catalog::PhotoId;
+use expose_core::color::ColorSpaceId;
 use expose_core::develop::CurvePoint;
 use expose_editor::{
-    Adjustment, Background, BitDepth, BlendMode, BlendSpace, BrightnessContrast, ColorMode, Curves,
-    Document, DocumentSpec, GroupIsolation, HueSaturation, Layer, LayerKind, Levels, LevelsChannel,
-    Locks, MAX_DIMENSION, MAX_PIXELS, SelectionMode, SelectionShape,
+    Adjustment, Background, BitDepth, BlendMode, BlendSpace, BrightnessContrast, BrushSettings,
+    ColorMode, Curves, Document, DocumentSpec, GroupIsolation, HueSaturation, Layer, LayerKind,
+    Levels, LevelsChannel, Locks, MAX_DIMENSION, MAX_PIXELS, SelectionMode, SelectionShape,
+    StrokePoint, StrokeTarget,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::CommandError;
+use crate::error::{CommandError, ErrorKind};
 
 /// The identifier of an open document. It is a process counter, so it is
 /// never used two times.
@@ -824,6 +826,128 @@ impl EditDto {
     }
 }
 
+/// What a brush stroke changes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum StrokeTargetDto {
+    /// Paint on a pixel layer. `color` is gamma-encoded sRGB (0 to 1).
+    Paint {
+        /// The encoded red, green, and blue values.
+        color: [f32; 3],
+    },
+    /// Remove pixels of a pixel layer.
+    Erase,
+    /// Paint on the mask of a layer. 0 hides, 1 reveals.
+    Mask {
+        /// The mask value of the stroke.
+        value: f32,
+    },
+}
+
+impl StrokeTargetDto {
+    /// Converts to the target of the editor crate. A paint color goes from
+    /// gamma-encoded sRGB to linear Rec. 2020 (the working space).
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError`] of kind `invalidInput` if a color value is not a
+    /// finite number in 0 to 1.
+    pub fn to_target(self) -> Result<StrokeTarget, CommandError> {
+        match self {
+            Self::Paint { color } => {
+                if color
+                    .iter()
+                    .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+                {
+                    return Err(CommandError::invalid_input(
+                        "a brush color value must be in 0 to 1",
+                    ));
+                }
+                Ok(StrokeTarget::Paint {
+                    color: srgb_to_working(color)?,
+                })
+            }
+            Self::Erase => Ok(StrokeTarget::Erase),
+            // The crate checks the range of the value.
+            Self::Mask { value } => Ok(StrokeTarget::Mask { value }),
+        }
+    }
+}
+
+/// Converts a gamma-encoded sRGB color to linear Rec. 2020.
+fn srgb_to_working(color: [f32; 3]) -> Result<[f32; 3], CommandError> {
+    let transfer = ColorSpaceId::Srgb.transfer();
+    let matrix = ColorSpaceId::Srgb
+        .to_working()
+        .map_err(|e| CommandError::new(ErrorKind::Internal, e.to_string()))?;
+    let linear = color.map(|v| f64::from(transfer.decode(v)));
+    // Narrowing to f32 is the precision of the working space.
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(matrix.mul_vec(linear).map(|v| v as f32))
+}
+
+/// The settings of a brush (see `expose_editor::BrushSettings`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(missing_docs, reason = "the field names explain the fields")]
+pub struct BrushSettingsDto {
+    pub size: f32,
+    pub hardness: f32,
+    pub opacity: f32,
+    pub flow: f32,
+    pub spacing: f32,
+    pub pressure_size: bool,
+    pub pressure_opacity: bool,
+}
+
+impl From<BrushSettingsDto> for BrushSettings {
+    fn from(dto: BrushSettingsDto) -> Self {
+        Self {
+            size: dto.size,
+            hardness: dto.hardness,
+            opacity: dto.opacity,
+            flow: dto.flow,
+            spacing: dto.spacing,
+            pressure_size: dto.pressure_size,
+            pressure_opacity: dto.pressure_opacity,
+        }
+    }
+}
+
+/// The largest number of points in one `editor_stroke_points` call.
+pub const MAX_STROKE_POINTS_PER_CALL: usize = 3000;
+
+/// Converts the flat list `[x, y, pressure, ...]` to stroke points.
+///
+/// # Errors
+///
+/// [`EditorEngineError::InvalidStrokePoints`] if the length is not a
+/// multiple of 3, or the list has 0 points or more than
+/// [`MAX_STROKE_POINTS_PER_CALL`].
+pub fn stroke_points(flat: &[f64]) -> Result<Vec<StrokePoint>, super::EditorEngineError> {
+    use super::EditorEngineError::InvalidStrokePoints;
+    if flat.len() % 3 != 0 {
+        return Err(InvalidStrokePoints(
+            "the point list length must be a multiple of 3",
+        ));
+    }
+    if flat.is_empty() || flat.len() > 3 * MAX_STROKE_POINTS_PER_CALL {
+        return Err(InvalidStrokePoints(
+            "a call must have 1 to 3000 stroke points",
+        ));
+    }
+    // Pressure narrows to f32: it is a value from 0 to 1.
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(flat
+        .chunks_exact(3)
+        .map(|c| StrokePoint::new(c[0], c[1], c[2] as f32))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     // Test code: a failed setup is a test failure.
@@ -1320,5 +1444,90 @@ mod tests {
                 "{spec:?}"
             );
         }
+    }
+
+    #[test]
+    fn stroke_color_converts_from_srgb_to_linear_rec2020() {
+        let StrokeTarget::Paint { color } = (StrokeTargetDto::Paint {
+            color: [1.0, 1.0, 1.0],
+        })
+        .to_target()
+        .unwrap() else {
+            panic!("not a paint target");
+        };
+        // The matrix maps the white of sRGB to the white of the working
+        // space.
+        assert!(color.iter().all(|v| (v - 1.0).abs() < 1e-4), "{color:?}");
+
+        // 0.5 gray decodes to about 0.214 in each channel.
+        let StrokeTarget::Paint { color } = (StrokeTargetDto::Paint {
+            color: [0.5, 0.5, 0.5],
+        })
+        .to_target()
+        .unwrap() else {
+            panic!("not a paint target");
+        };
+        assert!(color.iter().all(|v| (v - 0.2140).abs() < 1e-3), "{color:?}");
+
+        // A pure encoded red goes through the matrix.
+        let StrokeTarget::Paint { color } = (StrokeTargetDto::Paint {
+            color: [1.0, 0.0, 0.0],
+        })
+        .to_target()
+        .unwrap() else {
+            panic!("not a paint target");
+        };
+        assert!((color[0] - 0.6274).abs() < 1e-3 && (color[1] - 0.0691).abs() < 1e-3);
+    }
+
+    #[test]
+    fn stroke_target_rejects_a_bad_color_and_parses_json() {
+        for bad in [-0.1_f32, 1.5, f32::NAN] {
+            let error = StrokeTargetDto::Paint {
+                color: [bad, 0.0, 0.0],
+            }
+            .to_target()
+            .unwrap_err();
+            assert_eq!(error.kind, crate::error::ErrorKind::InvalidInput);
+        }
+        let target: StrokeTargetDto =
+            serde_json::from_str(r#"{"type":"paint","color":[1,0.5,0]}"#).unwrap();
+        assert!(matches!(target, StrokeTargetDto::Paint { .. }));
+        let erase: StrokeTargetDto = serde_json::from_str(r#"{"type":"erase"}"#).unwrap();
+        assert_eq!(erase, StrokeTargetDto::Erase);
+        let mask: StrokeTargetDto = serde_json::from_str(r#"{"type":"mask","value":0}"#).unwrap();
+        assert_eq!(mask, StrokeTargetDto::Mask { value: 0.0 });
+        let brush: BrushSettingsDto = serde_json::from_str(
+            r#"{"size":10,"hardness":0.5,"opacity":1,"flow":1,"spacing":0.25,"pressureSize":true,"pressureOpacity":false}"#,
+        )
+        .unwrap();
+        assert!(brush.pressure_size && !brush.pressure_opacity);
+    }
+
+    #[test]
+    fn stroke_points_check_the_length() {
+        use crate::editor::EditorEngineError::InvalidStrokePoints;
+        assert!(matches!(
+            stroke_points(&[1.0, 2.0]),
+            Err(InvalidStrokePoints(_))
+        ));
+        assert!(matches!(
+            stroke_points(&[1.0, 2.0, 0.5, 4.0]),
+            Err(InvalidStrokePoints(_))
+        ));
+        assert!(matches!(stroke_points(&[]), Err(InvalidStrokePoints(_))));
+        let too_many = vec![0.0; 3 * (MAX_STROKE_POINTS_PER_CALL + 1)];
+        assert!(matches!(
+            stroke_points(&too_many),
+            Err(InvalidStrokePoints(_))
+        ));
+        let ok = stroke_points(&[1.0, 2.0, 0.5, 4.0, 5.0, 1.0]).unwrap();
+        assert_eq!(ok.len(), 2);
+        assert!((ok[1].x - 4.0).abs() < 1e-12);
+        let max = vec![0.0; 3 * MAX_STROKE_POINTS_PER_CALL];
+        assert_eq!(
+            stroke_points(&max).unwrap().len(),
+            MAX_STROKE_POINTS_PER_CALL
+        );
     }
 }
