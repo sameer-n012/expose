@@ -43,6 +43,13 @@ describe('EditorFrameClient', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('passes the mask layer id of the area to the render call', () => {
+    const { client, calls } = setup();
+    client.setDocument(7);
+    client.request({ ...area(1), showMaskLayerId: 4 });
+    expect(calls[0]?.area.showMaskLayerId).toBe(4);
+  });
+
   it('keeps at most 2 requests in flight and sends the newest waiting area', async () => {
     const { client, calls } = setup();
     client.setDocument(7);

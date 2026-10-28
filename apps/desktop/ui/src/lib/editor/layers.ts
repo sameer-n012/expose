@@ -252,7 +252,8 @@ export function maskCommands(layers: readonly LayerInfo[], id: number | null): M
 
 /** The tooltip of the mask chip in a layer row. */
 export function maskChipTitle(layer: LayerInfo): string {
-  return layer.maskEnabled ? 'Layer mask on. Shift+click to turn it off.' : 'Layer mask off. Shift+click to turn it on.';
+  const toggle = layer.maskEnabled ? 'Shift+click to turn it off.' : 'Shift+click to turn it on.';
+  return `Layer mask ${layer.maskEnabled ? 'on' : 'off'}. ${toggle} Alt+click to show it on the canvas.`;
 }
 
 /** True if the layer has any own lock. */
