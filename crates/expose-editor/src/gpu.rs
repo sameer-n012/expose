@@ -9,7 +9,8 @@
 //!
 //! - The compositor uses the `expose-gpu` kernel API only. All composite
 //!   buffers are `rgba32float` textures of the region size with
-//!   **premultiplied** alpha.
+//!   **premultiplied** alpha. The layer texture cache is `rgba16float`
+//!   (see "Texture formats").
 //! - Each layer is **one kernel dispatch**. The kernel reads the current
 //!   buffer (the backdrop), the layer data, and the mask, and writes a new
 //!   buffer. A kernel output cannot be one of its inputs, so the
@@ -22,9 +23,9 @@
 //! - Layer pixels and masks come from the layer texture cache (see below).
 //!   The kernel gets the canvas position and the size of each texture as
 //!   parameters, so a texture can be larger than the region.
-//! - Masks are stored as `rgba32float` with **four mask values in each
+//! - Masks are stored as `rgba16float` with **four mask values in each
 //!   texel** (texel `x / 4`, channel `x % 4`). This uses the memory of a
-//!   one-channel `f32` texture.
+//!   one-channel `f16` texture.
 //! - Curves use a table of [`CURVE_TABLE_SIZE`] samples for each channel
 //!   (the color curve, then the master curve), with linear interpolation.
 //!   The other adjustments use the exact formulas. The table (64 KiB) is
@@ -110,38 +111,81 @@
 //! The result is the same as a full composite: the same kernels run on
 //! the same buffers in the same order.
 //!
+//! # Texture formats
+//!
+//! All kernels read their inputs as `f32` and do all math in `f32`. Only
+//! the storage format changes from texture to texture:
+//!
+//! | Texture                                   | Format        | Reason |
+//! | ----------------------------------------- | ------------- | ------ |
+//! | Layer pixels (layer texture cache)        | `rgba16float` | The largest part of the memory. Each value is read once in each composite, so the rounding does not add up. |
+//! | Masks (layer texture cache)               | `rgba16float` | As the layer pixels. Mask values are in `0..=1` (absolute error at most `2^-12`). |
+//! | Composite buffers (pool)                  | `rgba32float` | The working buffers: each step reads and writes them, so `f16` rounding would add up from layer to layer. |
+//! | View composite                            | `rgba32float` | It is a composite buffer that moves to the view cache without a copy. In `f16`, the free buffer would stay in the pool, and the memory would not decrease. |
+//! | "Below" snapshot                          | `rgba32float` | As the view composite. Also, the result of a composite from the snapshot stays bit-equal to a full composite. |
+//! | View pyramid, mask view image and pyramid | `rgba16float` | Only for the display. |
+//! | Curve tables, view output, placeholder    | `rgba32float` | Small. The view output format is part of the API. |
+//!
+//! - The upload converts `f32` to the nearest `f16` on the CPU (the
+//!   `expose-gpu` upload of [`ImageFormat::Rgba16Float`]). This sends half
+//!   the bytes to the GPU. A conversion in a kernel needs the `f32` upload
+//!   first, so it cannot be faster. Measured for a 4096 x 4096 layer: about
+//!   46 ms for `rgba32float`, about 42 ms for `rgba16float` (conversion
+//!   included).
+//! - A kernel store of an `f32` value to `rgba16float` can round toward
+//!   zero on some GPUs (measured on Apple GPUs). The kernels that write
+//!   `rgba16float` (pyramid levels, mask view image) thus round to the
+//!   nearest `f16` value with `quantizeToF16` first.
+//! - Layer values outside the finite `f16` range (larger than 65504)
+//!   become infinite. Values below about `6.1e-5` lose relative
+//!   precision (absolute error at most about `3e-8`).
+//!
 //! # Memory
 //!
-//! All cached textures are `rgba32float` (16 bytes for each pixel), so that
-//! the GPU result agrees with the CPU reference. For a canvas of `N`
-//! pixels, the compositor keeps about:
+//! For a canvas of `N` pixels, the compositor keeps about:
 //!
-//! - for each pixel layer: 16 bytes for each pixel of its canvas part
-//!   (`16 N` for a canvas-size layer);
-//! - for each mask: 4 bytes for each pixel of its canvas part;
+//! - for each pixel layer: 8 bytes for each pixel of its canvas part
+//!   (`8 N` for a canvas-size layer);
+//! - for each mask: 2 bytes for each pixel of its canvas part;
 //! - free composite buffers: `16 N` each, normally one or two (one more
 //!   for each level of nested groups);
 //! - with [`GpuCompositor::render_view`]: the composite (`16 N`), the
-//!   pyramid (about `16 N / 3`), the "below" snapshot (`16 N`, at most
+//!   pyramid (about `8 N / 3`), the "below" snapshot (`16 N`, at most
 //!   one), and the view output (16 bytes for each output pixel). While a
 //!   snapshot is in use, the pool can hold one more free buffer.
-//! - with [`GpuCompositor::render_mask_view`]: the gray image (`16 N`) and
-//!   its pyramid (about `16 N / 3`), for one mask.
+//! - with [`GpuCompositor::render_mask_view`]: the gray image (`8 N`) and
+//!   its pyramid (about `8 N / 3`), for one mask.
 //!   [`GpuCompositor::clear_mask_view_cache`] frees only these.
 //!
 //! Example: 4096 x 4096 (`16 N` = 256 MiB) with 6 canvas-size layers, 2
-//! smaller layers, and one mask: about 2.3 GiB.
+//! smaller layers, one mask, the view composite, a snapshot, and a 2560 x
+//! 1600 view output: about 1.7 GiB (2.5 GiB with all textures in
+//! `rgba32float`).
 //! [`GpuCompositor::cache_memory_bytes`] reports the current value, and
 //! [`GpuCompositor::clear_cache`] frees all of it (for example, when the
 //! editor closes a document).
 //!
 //! # Differences from the CPU reference
 //!
-//! - GPU float math (for example `pow`, division, fused multiply-add) can
-//!   differ from the CPU in the last bits. The tests use a tolerance of
-//!   `5e-5 * max(1, |value|)` for each sample (measured: at most about
-//!   1.3e-5). The divide mode uses `5e-4`, because a small divisor makes
-//!   the rounding error larger (measured: at most about 1.1e-4).
+//! - The layer texture cache rounds each layer and mask value to the
+//!   nearest `f16` value (at most `2^-12` relative). The effect on the
+//!   composite, measured with `f32` values that are not `f16` values, in
+//!   `|gpu - cpu| / max(1, |cpu|)` for each sample: at most about 8.8e-4
+//!   for the separable blend modes, and about 3.0e-3 for hue, saturation,
+//!   color, and luminosity (the hue and saturation of a color near gray
+//!   change much for a small change of the values). Adjustments with a
+//!   large slope (for example levels with a small gamma) make the error
+//!   larger by their slope. The test tolerances are `2e-3` and `6e-3`.
+//! - The other tests use layer values that are `f16` values, so they test
+//!   only the composite math. GPU float math (for example `pow`, division,
+//!   fused multiply-add) can differ from the CPU in the last bits. These
+//!   tests use a tolerance of `5e-5 * max(1, |value|)` for each sample
+//!   (measured: at most about 1.3e-5). The divide mode uses `5e-4`,
+//!   because a small divisor makes the rounding error larger (measured: at
+//!   most about 1.1e-4).
+//! - The view pyramid levels and the mask view image are `rgba16float`.
+//!   Each level adds one rounding to the nearest `f16` value (the tests
+//!   use `5e-4`; measured: at most about 2.4e-4).
 //! - Curves: the table interpolation adds an error of less than about
 //!   `1e-6` where the curve is smooth. At a curve end point that is not on
 //!   a table sample (`x` not a multiple of `1 / 4096`), the error is at
@@ -171,8 +215,18 @@ use crate::layer::{
 /// 0, 0.25, 0.5) are on samples.
 pub const CURVE_TABLE_SIZE: u32 = 4097;
 
-/// The GPU format of all compositor buffers.
+/// The GPU format of the composite buffers (also the view composite and
+/// the "below" snapshot), the curve tables, the view output, and the
+/// placeholder. See "Texture formats" in the module documentation.
 const FORMAT: ImageFormat = ImageFormat::Rgba32Float;
+
+/// The GPU format of the layer texture cache (layer pixels and masks).
+/// The kernels read the values as `f32` and do all math in `f32`.
+const LAYER_FORMAT: ImageFormat = ImageFormat::Rgba16Float;
+
+/// The GPU format of the view pyramids and of the mask view image. These
+/// textures are only for the display.
+const VIEW_FORMAT: ImageFormat = ImageFormat::Rgba16Float;
 
 /// Blends a source image (pixel layer or isolated group) onto the backdrop.
 const BLEND_KERNEL: Kernel = Kernel {
@@ -960,7 +1014,10 @@ impl GpuCompositor {
         };
         let (image, mips) = match reuse {
             Some(textures) => textures,
-            None => (GpuImage::new(ctx, width, height, FORMAT).await?, Vec::new()),
+            None => (
+                GpuImage::new(ctx, width, height, VIEW_FORMAT).await?,
+                Vec::new(),
+            ),
         };
         let p = &self.placeholder;
         let m = texture.as_ref().unwrap_or(p);
@@ -1132,7 +1189,7 @@ async fn build_pyramid(
         while w > 1 || h > 1 {
             w = w.div_ceil(2);
             h = h.div_ceil(2);
-            mips.push(GpuImage::new(ctx, w, h, FORMAT).await?);
+            mips.push(GpuImage::new(ctx, w, h, VIEW_FORMAT).await?);
         }
     }
     let mut source = &composite;
@@ -1573,7 +1630,8 @@ async fn upload_pixels(ctx: &GpuContext, img: &WorkingImage, rect: Rect) -> Edit
     if rect == img.bounds() {
         // The full layer: no CPU copy.
         let image =
-            GpuImage::from_rgba_f32(ctx, rect.width, rect.height, FORMAT, img.as_slice()).await?;
+            GpuImage::from_rgba_f32(ctx, rect.width, rect.height, LAYER_FORMAT, img.as_slice())
+                .await?;
         return Ok(image);
     }
     let (x0, y0) = (rect.x as usize, rect.y as usize);
@@ -1585,7 +1643,7 @@ async fn upload_pixels(ctx: &GpuContext, img: &WorkingImage, rect: Rect) -> Edit
         let start = row * src_row + x0 * CHANNELS;
         data.extend_from_slice(&all[start..start + w * CHANNELS]);
     }
-    Ok(GpuImage::from_rgba_f32(ctx, rect.width, rect.height, FORMAT, &data).await?)
+    Ok(GpuImage::from_rgba_f32(ctx, rect.width, rect.height, LAYER_FORMAT, &data).await?)
 }
 
 /// Uploads the part `rect` (mask pixel coordinates, inside the mask) of a
@@ -1602,7 +1660,7 @@ async fn upload_mask(ctx: &GpuContext, img: &MaskImage, rect: Rect) -> EditorRes
         let start = (y0 + row) * src_row + x0;
         dst[..w].copy_from_slice(&all[start..start + w]);
     }
-    Ok(GpuImage::from_rgba_f32(ctx, texel_width, rect.height, FORMAT, &data).await?)
+    Ok(GpuImage::from_rgba_f32(ctx, texel_width, rect.height, LAYER_FORMAT, &data).await?)
 }
 
 /// The state of one composite call.
@@ -1849,6 +1907,14 @@ mod tests {
     /// error is at most about 1.1e-4.
     const DIVIDE_TOL: f32 = 5e-4;
 
+    /// The tolerance for the textures in `rgba16float` that only the
+    /// display uses (view pyramid levels, mask view image), for each
+    /// sample: `|gpu - want| <= VIEW_TOL * max(1, |want|)`. Each kernel
+    /// rounds its output to the nearest `f16` value (at most `2^-12`
+    /// relative), and the test layers with values that are not `f16`
+    /// values add one more rounding. Measured: at most about 2.4e-4.
+    const VIEW_TOL: f32 = 5e-4;
+
     fn context() -> Option<GpuContext> {
         match pollster::block_on(GpuContext::new(GpuContextOptions::default())) {
             Ok(ctx) => Some(ctx),
@@ -1878,10 +1944,31 @@ mod tests {
         }
     }
 
+    /// Rounds `v` to the nearest `f16` value (the rounding of the upload
+    /// to the layer texture cache).
+    fn to_f16(v: f32) -> f32 {
+        half::f16::from_f32(v).to_f32()
+    }
+
     /// Random premultiplied pixels. Colors are in -0.2..2.0 (values below
     /// 0 and above 1 are included). 10 % of the pixels are transparent and
     /// 20 % are opaque.
+    ///
+    /// All values are `f16` values, so the upload to the layer texture
+    /// cache does not change them, and a compare with the CPU reference
+    /// tests only the composite math. [`f16_layer_storage_error_is_small`]
+    /// tests the rounding of other values.
     fn random_image(rng: &mut Rng, width: u32, height: u32) -> WorkingImage {
+        let mut image = random_image_f32(rng, width, height);
+        for p in image.pixels_mut() {
+            *p = p.map(to_f16);
+        }
+        image
+    }
+
+    /// Random premultiplied pixels as [`random_image`], without the
+    /// rounding to `f16`.
+    fn random_image_f32(rng: &mut Rng, width: u32, height: u32) -> WorkingImage {
         let pixels = (0..width as usize * height as usize)
             .map(|_| {
                 let pick = rng.range(0.0, 1.0);
@@ -1906,7 +1993,7 @@ mod tests {
     fn random_mask(rng: &mut Rng, width: u32, height: u32) -> MaskImage {
         // Values slightly outside 0..=1 test the clamp.
         let data = (0..width as usize * height as usize)
-            .map(|_| rng.range(-0.2, 1.2))
+            .map(|_| to_f16(rng.range(-0.2, 1.2)))
             .collect();
         MaskImage::from_data(width, height, data).unwrap()
     }
@@ -2187,6 +2274,88 @@ mod tests {
         eprintln!("all_blend_modes_match_cpu: largest scaled error {worst:e}");
     }
 
+    /// The layer texture cache stores layer pixels and masks as `f16`.
+    /// Values that are not `f16` values thus change by at most `2^-12`
+    /// relative. This test measures the effect on the composite against
+    /// the CPU reference (with the `f32` values), for each group of blend
+    /// modes. The step modes and the divide mode are not in the test: near
+    /// a step, the input rounding can select the other branch.
+    ///
+    /// Measured (scaled error, see [`compare`]): separable modes at most
+    /// about 8.8e-4 (normal 5.0e-4, difference 8.8e-4); non-separable modes
+    /// at most about 3.0e-3 (hue 3.0e-3, saturation 2.3e-3). The hue and
+    /// saturation of a color near gray change much for a small change of
+    /// the values.
+    #[test]
+    fn f16_layer_storage_error_is_small() {
+        let Some(ctx) = context() else { return };
+        let mut comp = pollster::block_on(GpuCompositor::new(&ctx)).unwrap();
+        let mut rng = Rng(0x0F16_0F16);
+        let groups: [(&str, &[BlendMode], f32); 2] = [
+            (
+                "separable",
+                &[
+                    BlendMode::Normal,
+                    BlendMode::Darken,
+                    BlendMode::Multiply,
+                    BlendMode::LinearBurn,
+                    BlendMode::Lighten,
+                    BlendMode::Screen,
+                    BlendMode::LinearDodge,
+                    BlendMode::Overlay,
+                    BlendMode::SoftLight,
+                    BlendMode::HardLight,
+                    BlendMode::LinearLight,
+                    BlendMode::PinLight,
+                    BlendMode::Difference,
+                    BlendMode::Exclusion,
+                    BlendMode::Subtract,
+                ],
+                2e-3,
+            ),
+            (
+                "non-separable",
+                &[
+                    BlendMode::Hue,
+                    BlendMode::Saturation,
+                    BlendMode::Color,
+                    BlendMode::Luminosity,
+                ],
+                6e-3,
+            ),
+        ];
+        for (name, modes, tol) in groups {
+            let mut worst = 0.0_f32;
+            for &mode in modes {
+                for space in [BlendSpace::Linear, BlendSpace::Perceptual] {
+                    let mut doc = empty_doc(48, 40, space);
+                    let base = random_image_f32(&mut rng, 48, 40);
+                    add(
+                        &mut doc,
+                        None,
+                        LayerContent::Pixel(PixelLayer::new(base, (0, 0)).unwrap()),
+                    );
+                    let top = random_image_f32(&mut rng, 40, 30);
+                    let id = add(
+                        &mut doc,
+                        None,
+                        LayerContent::Pixel(PixelLayer::new(top, (4, 6)).unwrap()),
+                    );
+                    doc.set_blend_mode(id, mode).unwrap();
+                    doc.set_opacity(id, 0.8).unwrap();
+                    let data = (0..30 * 20).map(|_| rng.range(0.0, 1.0)).collect();
+                    let mask = MaskImage::from_data(30, 20, data).unwrap();
+                    doc.set_mask(id, Some(Mask::new(mask, (8, 10), MaskFill::White)))
+                        .unwrap();
+                    let what = format!("{name}: {space:?} {mode:?}");
+                    let err = compare(&ctx, &mut comp, &doc, doc.bounds(), false, tol, &what);
+                    worst = worst.max(err);
+                }
+            }
+            eprintln!("f16_layer_storage_error_is_small: {name}: largest scaled error {worst:e}");
+        }
+    }
+
     /// All adjustment kinds, with several blend modes, in both spaces.
     #[test]
     fn adjustments_match_cpu() {
@@ -2410,7 +2579,8 @@ mod tests {
         assert_eq!(comp.layer_uploads(), uploads);
 
         // A pixel write uploads the layer once; a mask write the mask once.
-        doc.write_pixels(b, Rect::new(2, 3, 4, 2), &[[0.3, 0.2, 0.1, 0.5]; 8])
+        let written = [0.3, 0.2, 0.1, 0.5].map(to_f16);
+        doc.write_pixels(b, Rect::new(2, 3, 4, 2), &[written; 8])
             .unwrap();
         check(&mut comp, &doc, "pixel write");
         uploads += 1;
@@ -2491,7 +2661,8 @@ mod tests {
             .map(|i| {
                 let t = i as f32 / n;
                 let near = (t - 0.5) * 4.0 * cell;
-                [decode(lo + near), decode(hi + near), decode(t), 1.0]
+                // `f16` values: the test is about the table error only.
+                [decode(lo + near), decode(hi + near), decode(t), 1.0].map(to_f16)
             })
             .collect();
         let image = WorkingImage::from_pixels(w, h, pixels).unwrap();
@@ -2538,7 +2709,8 @@ mod tests {
         );
         assert!(worst <= bound, "largest error {worst:e} above {bound:e}");
         // The samples near the end points show the interpolation error
-        // (measured: about 1.7e-4, near the bound). It is larger than the
+        // (measured: about 8.7e-5 with these `f16` inputs, and 1.7e-4 with
+        // denser `f32` inputs near the end points). It is larger than the
         // tolerance of the smooth parts.
         assert!(worst > TOL, "the test does not reach an end point");
     }
@@ -2729,8 +2901,9 @@ mod tests {
                 for (i, p) in out.iter().enumerate() {
                     let want = [color[0], color[1], color[2], alpha];
                     for (g, e) in p.iter().zip(want) {
+                        let err = (g - e).abs() / e.abs().max(1.0);
                         assert!(
-                            (g - e).abs() <= 1e-4,
+                            err <= VIEW_TOL,
                             "scale {scale}, pixel {i}: {p:?} against {want:?}"
                         );
                     }
@@ -2874,7 +3047,7 @@ mod tests {
                         _ => None,
                     };
                     let v = inside.unwrap_or(mask.fill.value()).clamp(0.0, 1.0);
-                    assert_mask_pixel(got, mask_gray(v), 1e-5, &format!("{id} ({x}, {y})"));
+                    assert_mask_pixel(got, mask_gray(v), VIEW_TOL, &format!("{id} ({x}, {y})"));
                 }
             }
         }
@@ -2896,7 +3069,7 @@ mod tests {
             let h = (48.0 * scale) as u32 - 1;
             let out = read_mask_view(&ctx, &mut comp, &doc, view(0.0, 0.0, scale, w, h), id);
             for (i, p) in out.iter().enumerate() {
-                assert_mask_pixel(*p, want, 1e-4, &format!("scale {scale}, pixel {i}"));
+                assert_mask_pixel(*p, want, VIEW_TOL, &format!("scale {scale}, pixel {i}"));
             }
         }
         assert_eq!(comp.mask_view_builds(), 1);
@@ -2917,7 +3090,7 @@ mod tests {
         read_view(&ctx, &mut comp, &doc, full);
         assert_eq!(comp.view_composites(), 1);
         let out = read_mask_view(&ctx, &mut comp, &doc, full, id);
-        assert_mask_pixel(out[0], mask_gray(0.25), 1e-5, "first");
+        assert_mask_pixel(out[0], mask_gray(0.25), VIEW_TOL, "first");
         assert_eq!(comp.mask_view_builds(), 1);
 
         // Pan and zoom, and a disable of the mask: no new build.
@@ -2925,7 +3098,7 @@ mod tests {
         read_mask_view(&ctx, &mut comp, &doc, view(0.0, 0.0, 0.3, 4, 4), id);
         doc.set_mask_enabled(id, false).unwrap();
         let out = read_mask_view(&ctx, &mut comp, &doc, full, id);
-        assert_mask_pixel(out[0], mask_gray(0.25), 1e-5, "disabled");
+        assert_mask_pixel(out[0], mask_gray(0.25), VIEW_TOL, "disabled");
         assert_eq!(comp.mask_view_builds(), 1);
         // The composite view cache stays: no new composite.
         read_view(&ctx, &mut comp, &doc, full);
@@ -2943,14 +3116,14 @@ mod tests {
         doc.write_mask(id, Rect::new(0, 0, 1, 1), &[0.75]).unwrap();
         let out = read_mask_view(&ctx, &mut comp, &doc, full, id);
         assert_eq!(comp.mask_view_builds(), 2);
-        assert_mask_pixel(out[0], mask_gray(0.75), 1e-5, "after write");
-        assert_mask_pixel(out[1], mask_gray(0.25), 1e-5, "after write, next pixel");
+        assert_mask_pixel(out[0], mask_gray(0.75), VIEW_TOL, "after write");
+        assert_mask_pixel(out[1], mask_gray(0.25), VIEW_TOL, "after write, next pixel");
 
         // The cache is counted, and the mask view clear frees it (at least
-        // the gray image of 16 x 16 rgba32float pixels).
+        // the gray image of 16 x 16 rgba16float pixels).
         let with_mask = comp.cache_memory_bytes();
         comp.clear_mask_view_cache();
-        assert!(comp.cache_memory_bytes() + 16 * 256 <= with_mask);
+        assert!(comp.cache_memory_bytes() + 8 * 256 <= with_mask);
         read_mask_view(&ctx, &mut comp, &doc, full, id);
         assert_eq!(comp.mask_view_builds(), 3);
     }
@@ -3308,6 +3481,29 @@ mod tests {
         let readback_ms = ms(t) - warm_ms;
         assert_eq!(gpu.width(), cpu.width());
 
+        // The upload of one canvas-size layer: `f32` values as they are,
+        // and with the CPU conversion to `f16` (the layer cache format).
+        // A conversion in a kernel needs the `f32` upload first, so it
+        // cannot be faster than the `f32` upload.
+        let layer = doc.layers()[0].as_pixel().unwrap().image();
+        let mut upload_ms = [f64::MAX; 2];
+        for (slot, format) in upload_ms.iter_mut().zip([FORMAT, LAYER_FORMAT]) {
+            for _ in 0..3 {
+                let t = Instant::now();
+                let image = pollster::block_on(GpuImage::from_rgba_f32(
+                    &ctx,
+                    size,
+                    size,
+                    format,
+                    layer.as_slice(),
+                ))
+                .unwrap();
+                ctx.wait_idle().unwrap();
+                *slot = slot.min(ms(t));
+                drop(image);
+            }
+        }
+
         eprintln!(
             "bench 4096x4096, 10 layers, perceptual: CPU {cpu_ms:.1} ms; GPU first call \
              {first_ms:.1} ms ({uploads} uploads); warm after an opacity change \
@@ -3315,8 +3511,9 @@ mod tests {
              first {view_first_ms:.1} ms, pan at scale 1 / 0.5 / 0.3: {:.2} / {:.2} / \
              {:.2} ms, after an opacity change of layer 5: first {full_change_ms:.1} ms, \
              next (below snapshot) {change_ms:.1} ms; cache {memory_mib:.0} MiB; \
-             read-back about {readback_ms:.1} ms",
-            pan_ms[0], pan_ms[1], pan_ms[2]
+             read-back about {readback_ms:.1} ms; upload of one 4096x4096 layer: rgba32float \
+             {:.1} ms, rgba16float {:.1} ms",
+            pan_ms[0], pan_ms[1], pan_ms[2], upload_ms[0], upload_ms[1]
         );
     }
 }
