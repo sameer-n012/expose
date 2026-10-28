@@ -304,11 +304,16 @@ fn warm_thumbnail<R: Runtime>(app: &AppHandle<R>, photo_id: PhotoId) {
 /// pixel. `scale`: output pixels per canvas pixel. `width`, `height`: the
 /// output size in pixels, `1..=8192`.
 ///
+/// `showMaskLayerId` (optional, `null` or absent): the number of a layer
+/// with a mask. The frame then shows the mask of this layer as a gray
+/// image, with the same geometry as the composite.
+///
 /// If a newer `editor_render` call for the same document arrives before
 /// this one starts, this call fails with the kind `superseded` (latest
 /// wins). The UI drops it.
 ///
-/// Errors: `notFound` (document), `invalidInput` (view), `superseded`,
+/// Errors: `notFound` (document or mask layer), `invalidInput` (view, or a
+/// layer with no mask), `superseded`,
 /// `unavailable` (no GPU), `internal`.
 #[tauri::command]
 #[allow(
@@ -323,6 +328,7 @@ pub async fn editor_render(
     scale: f64,
     width: u32,
     height: u32,
+    show_mask_layer_id: Option<u64>,
 ) -> Result<Response, CommandError> {
     let body = engine
         .render_async(RenderRequest {
@@ -334,6 +340,7 @@ pub async fn editor_render(
                 width,
                 height,
             },
+            show_mask: show_mask_layer_id,
         })
         .await?;
     Ok(Response::new(body))

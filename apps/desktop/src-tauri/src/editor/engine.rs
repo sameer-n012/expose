@@ -60,6 +60,9 @@ pub struct RenderRequest {
     /// The view: canvas coordinate of the top-left output pixel, output
     /// pixels per canvas pixel, and output size.
     pub view: ViewSpec,
+    /// The number of a layer with a mask. If it is `Some`, the frame shows
+    /// the mask of this layer as a gray image, not the composite.
+    pub show_mask: Option<u64>,
 }
 
 enum Job {
@@ -489,6 +492,9 @@ fn next_work(shared: &Shared) -> Work {
 struct Gpu {
     ctx: GpuContext,
     compositor: GpuCompositor,
+    /// `true` if the compositor holds a mask view image that the next
+    /// composite render must free.
+    mask_view_cached: bool,
 }
 
 /// An open document on the render thread.
@@ -523,7 +529,11 @@ fn ensure_gpu(slot: &mut Option<Gpu>) -> Result<&mut Gpu, EditorEngineError> {
             ms = started.elapsed().as_millis(),
             "editor GPU context created"
         );
-        *slot = Some(Gpu { ctx, compositor });
+        *slot = Some(Gpu {
+            ctx,
+            compositor,
+            mask_view_cached: false,
+        });
     }
     slot.as_mut()
         .ok_or(EditorEngineError::Internal("the GPU context is missing"))
@@ -580,7 +590,9 @@ impl Renderer {
         if doc.saving {
             return Err(EditorEngineError::SaveInProgress(id));
         }
-        let Gpu { ctx, compositor } = ensure_gpu(gpu)?;
+        let Gpu {
+            ctx, compositor, ..
+        } = ensure_gpu(gpu)?;
         let document = doc.session.document();
         let composite =
             pollster::block_on(compositor.composite_gpu_image(ctx, document, document.bounds()))?;
@@ -624,13 +636,18 @@ impl Renderer {
         if self.documents.is_empty() {
             if let Some(gpu) = &mut self.gpu {
                 gpu.compositor.clear_cache();
+                gpu.mask_view_cached = false;
             }
         }
     }
 
     fn render(&mut self, job: &RenderJob) -> Result<Vec<u8>, EditorEngineError> {
         let started = Instant::now();
-        let RenderRequest { document: id, view } = job.request;
+        let RenderRequest {
+            document: id,
+            view,
+            show_mask,
+        } = job.request;
         if view.width == 0
             || view.height == 0
             || view.width > MAX_VIEW_SIDE
@@ -645,7 +662,11 @@ impl Renderer {
         let doc = documents
             .get_mut(&id)
             .ok_or(EditorEngineError::DocumentNotFound(id))?;
-        let Gpu { ctx, compositor } = ensure_gpu(gpu)?;
+        let Gpu {
+            ctx,
+            compositor,
+            mask_view_cached,
+        } = ensure_gpu(gpu)?;
         let size = (view.width, view.height);
         let mut body = vec![0_u8; rgba8_body_len(size.0, size.1)];
         pollster::block_on(async {
@@ -658,9 +679,22 @@ impl Renderer {
             let display = doc.display.as_ref().ok_or(EditorEngineError::Internal(
                 "the display encoder is missing",
             ))?;
-            let image = compositor
-                .render_view(ctx, doc.session.document(), &view)
-                .await?;
+            let document = doc.session.document();
+            let image = if let Some(number) = show_mask {
+                let layer = document
+                    .layer_by_number(number)
+                    .ok_or(EditorEngineError::LayerNotFound(number))?;
+                *mask_view_cached = true;
+                compositor
+                    .render_mask_view(ctx, document, &view, layer)
+                    .await?
+            } else {
+                if *mask_view_cached {
+                    compositor.clear_mask_view_cache();
+                    *mask_view_cached = false;
+                }
+                compositor.render_view(ctx, document, &view).await?
+            };
             display.encode(ctx, image).await?;
             display
                 .read_into(ctx, &mut body[FRAME_HEADER_BYTES..])
@@ -812,8 +846,10 @@ mod tests {
 
     use expose_core::buffer::WorkingImage;
 
+    use expose_editor::EditorError;
+
     use super::*;
-    use crate::editor::dto::{AdjustmentDto, BlendModeId};
+    use crate::editor::dto::{AdjustmentDto, BlendModeId, MaskFillId};
     use crate::editor::session::build_document;
 
     /// Starts an engine and opens a `width` x `height` document of one
@@ -866,6 +902,7 @@ mod tests {
         let request = RenderRequest {
             document: info.document_id,
             view: view(-2.0, 1.0, 12, 10),
+            show_mask: None,
         };
         let body = pollster::block_on(engine.render_async(request)).unwrap();
         assert_eq!(body.len(), rgba8_body_len(12, 10));
@@ -905,6 +942,7 @@ mod tests {
         let request = RenderRequest {
             document: id,
             view: view(0.0, 0.5, 2, 2),
+            show_mask: None,
         };
         let before = pollster::block_on(engine.render_async(request)).unwrap();
         let info = pollster::block_on(engine.edit_async(
@@ -934,6 +972,42 @@ mod tests {
     }
 
     #[test]
+    fn mask_view_routing() {
+        let Some((engine, info)) = engine_with_document(4, 4, [1.0; 4]) else {
+            return;
+        };
+        let id = info.document_id;
+        let layer_id = info.layers[0].id;
+        let request = |show_mask| RenderRequest {
+            document: id,
+            view: view(0.0, 1.0, 4, 4),
+            show_mask,
+        };
+        // A layer without a mask, and a layer that does not exist.
+        let no_mask = pollster::block_on(engine.render_async(request(Some(layer_id))));
+        assert!(matches!(
+            no_mask,
+            Err(EditorEngineError::Editor(EditorError::NoMask(_)))
+        ));
+        let unknown = pollster::block_on(engine.render_async(request(Some(layer_id + 99))));
+        assert!(matches!(unknown, Err(EditorEngineError::LayerNotFound(_))));
+        // A black mask shows as black; the composite shows as white again.
+        pollster::block_on(engine.edit_async(
+            id,
+            EditDto::AddMask {
+                layer_id,
+                fill: MaskFillId::Hide,
+            },
+            None,
+        ))
+        .unwrap();
+        let mask = pollster::block_on(engine.render_async(request(Some(layer_id)))).unwrap();
+        assert_eq!(pixel(&mask, 4, 1, 1), [0, 0, 0, 255]);
+        let plain = pollster::block_on(engine.render_async(request(None)));
+        assert!(plain.is_ok());
+    }
+
+    #[test]
     fn unknown_document_and_bad_views_fail() {
         let Some((engine, info)) = engine_with_document(4, 4, [0.5; 4]) else {
             return;
@@ -941,6 +1015,7 @@ mod tests {
         let missing = pollster::block_on(engine.render_async(RenderRequest {
             document: info.document_id + 100,
             view: view(0.0, 1.0, 4, 4),
+            show_mask: None,
         }));
         assert!(matches!(
             missing,
@@ -949,6 +1024,7 @@ mod tests {
         let zero = pollster::block_on(engine.render_async(RenderRequest {
             document: info.document_id,
             view: view(0.0, 1.0, 0, 4),
+            show_mask: None,
         }));
         assert!(matches!(
             zero,
@@ -957,6 +1033,7 @@ mod tests {
         let bad_scale = pollster::block_on(engine.render_async(RenderRequest {
             document: info.document_id,
             view: view(0.0, f64::NAN, 4, 4),
+            show_mask: None,
         }));
         assert!(matches!(bad_scale, Err(EditorEngineError::Editor(_))));
         let edit = pollster::block_on(engine.edit_async(
@@ -1047,6 +1124,7 @@ mod tests {
                 RenderRequest {
                     document,
                     view: view(0.0, 1.0, 1, 1),
+                    show_mask: None,
                 },
                 reply,
             )
@@ -1085,6 +1163,7 @@ mod tests {
             RenderRequest {
                 document: 1,
                 view: view(0.0, 1.0, 1, 1),
+                show_mask: None,
             },
             Box::new(drop),
         );
