@@ -8,7 +8,7 @@ import type { SelectionModeId, SelectionShapeDto } from './api';
 import { screenToCanvas, type Point, type View } from './view';
 
 /** The tools of the Editor canvas. */
-export type EditorTool = 'hand' | 'rectSelect' | 'ellipseSelect' | 'polygonLasso';
+export type EditorTool = 'hand' | 'rectSelect' | 'ellipseSelect' | 'polygonLasso' | 'brush' | 'eraser';
 
 /** The range of the feather radius, in canvas pixels. */
 export const MAX_FEATHER = 250;
@@ -36,7 +36,7 @@ export function modeFromModifiers(keys: Modifiers): SelectionModeId {
 
 /** True for the tools that select an area. */
 export function isSelectionTool(tool: EditorTool): boolean {
-  return tool !== 'hand';
+  return tool === 'rectSelect' || tool === 'ellipseSelect' || tool === 'polygonLasso';
 }
 
 /** The next tool when `M` is pressed: rectangle, then ellipse, then rectangle again. */

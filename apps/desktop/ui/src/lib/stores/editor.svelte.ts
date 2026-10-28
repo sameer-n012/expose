@@ -34,7 +34,21 @@ import {
   type SelectionModeId,
   type SelectionOutline,
   type SelectionShapeDto,
+  type StrokeTargetDto,
 } from '../editor/api';
+import {
+  DEFAULT_BACKGROUND,
+  DEFAULT_FOREGROUND,
+  defaultBrush,
+  defaultEraser,
+  normalizeBrush,
+  steppedHardness,
+  steppedSize,
+  strokeTarget,
+  type BrushSettings,
+  type PaintTarget,
+  type PaintTool,
+} from '../editor/brush';
 import { clampFeather, cycleMarquee, type EditorTool } from '../editor/selection';
 import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
@@ -130,6 +144,16 @@ export class EditorStore {
   antiAlias = $state(true);
   /** True while the Feather dialog is open. */
   featherDialogOpen = $state(false);
+  /** The settings of the brush tool. */
+  brush = $state<BrushSettings>(defaultBrush());
+  /** The settings of the eraser tool. */
+  eraser = $state<BrushSettings>(defaultEraser());
+  /** The foreground color, "#rrggbb". */
+  foreground = $state(DEFAULT_FOREGROUND);
+  /** The background color, "#rrggbb". */
+  background = $state(DEFAULT_BACKGROUND);
+  /** The layer whose mask the user chose as the paint target (see `paintTarget`). */
+  #paintMaskId = $state<number | null>(null);
 
   readonly #library: EditorStoreOptions['library'];
   readonly #modules: EditorStoreOptions['modules'];
@@ -292,6 +316,128 @@ export class EditorStore {
     }
   }
 
+  // ---- Brush and eraser ----
+
+  /**
+   * What a stroke changes: the pixels or the mask of the selected layer. The
+   * mask is the target only while the user chose it for the selected layer
+   * and that layer still has a mask. Else the target is the pixels.
+   */
+  get paintTarget(): PaintTarget {
+    const id = this.#paintMaskId;
+    return id !== null && id === this.selectedId && this.selected?.hasMask === true ? 'mask' : 'pixels';
+  }
+
+  /** Chooses the mask of a layer as the paint target. Does nothing if the layer has no mask. */
+  selectMaskTarget(layerId: number): void {
+    const info = this.info;
+    if (info === null || findLayer(info.layers, layerId)?.hasMask !== true) {
+      return;
+    }
+    // Not `select()`: it would set the target to the pixels.
+    if (layerId !== this.#maskTarget) {
+      this.#maskTarget = null;
+    }
+    this.selectedId = layerId;
+    this.#paintMaskId = layerId;
+  }
+
+  /**
+   * The reason why the brush and the eraser cannot paint now, or null if they
+   * can. The tools paint on a pixel layer, or on the mask of a layer.
+   */
+  get paintBlockReason(): string | null {
+    if (this.info === null) {
+      return 'No document is open.';
+    }
+    const layer = this.selected;
+    if (layer === null) {
+      return 'Select a layer to paint on.';
+    }
+    if (this.paintTarget === 'pixels' && layer.kind !== 'pixel') {
+      return 'The brush and the eraser paint on pixel layers. Select a pixel layer, or click the mask of a layer.';
+    }
+    return null;
+  }
+
+  /** The settings of a paint tool. */
+  brushOf(tool: PaintTool): BrushSettings {
+    return tool === 'brush' ? this.brush : this.eraser;
+  }
+
+  /** The paint tool that is active, or null. */
+  get paintTool(): PaintTool | null {
+    return this.tool === 'brush' || this.tool === 'eraser' ? this.tool : null;
+  }
+
+  /** Changes some settings of a paint tool. Values go to their ranges. */
+  updateBrush(tool: PaintTool, patch: Partial<BrushSettings>): void {
+    const next = normalizeBrush({ ...this.brushOf(tool), ...patch });
+    if (tool === 'brush') {
+      this.brush = next;
+    } else {
+      this.eraser = next;
+    }
+  }
+
+  /** Selects the brush or the eraser. Does nothing while the tool cannot paint. */
+  selectPaintTool(tool: PaintTool): void {
+    if (this.paintBlockReason === null) {
+      this.tool = tool;
+    }
+  }
+
+  /** `]` (1) and `[` (-1): the size of the active paint tool. */
+  stepBrushSize(direction: 1 | -1): void {
+    const tool = this.paintTool;
+    if (tool !== null) {
+      this.updateBrush(tool, { size: steppedSize(this.brushOf(tool).size, direction) });
+    }
+  }
+
+  /** `}` (1) and `{` (-1): the hardness of the active paint tool. */
+  stepBrushHardness(direction: 1 | -1): void {
+    const tool = this.paintTool;
+    if (tool !== null) {
+      this.updateBrush(tool, { hardness: steppedHardness(this.brushOf(tool).hardness, direction) });
+    }
+  }
+
+  /** `X`: swaps the foreground and the background color. */
+  swapColors(): void {
+    [this.foreground, this.background] = [this.background, this.foreground];
+  }
+
+  /** `D`: black foreground and white background. */
+  resetColors(): void {
+    this.foreground = DEFAULT_FOREGROUND;
+    this.background = DEFAULT_BACKGROUND;
+  }
+
+  /**
+   * The layer, target, and brush for a stroke of the active paint tool, or
+   * null if no stroke can start.
+   */
+  strokeSpec(): { layerId: number; target: StrokeTargetDto; brush: BrushSettings } | null {
+    const tool = this.paintTool;
+    const layer = this.selected;
+    if (tool === null || layer === null || this.paintBlockReason !== null) {
+      return null;
+    }
+    const target = strokeTarget(tool, this.paintTarget, this.foreground, this.background);
+    return target === null ? null : { layerId: layer.id, target, brush: { ...this.brushOf(tool) } };
+  }
+
+  /** The backend calls of this store. A stroke uses the same calls. */
+  get api(): EditorApi {
+    return this.#api;
+  }
+
+  /** Takes the document info that a finished stroke returns. */
+  applyInfo(next: DocumentInfo): void {
+    this.#apply(next);
+  }
+
   /** Sets the feather of the selection tools (0..250 px). */
   setFeather(radius: number): void {
     this.feather = clampFeather(radius);
@@ -452,6 +598,7 @@ export class EditorStore {
     this.fit = true;
     this.selectedId = null;
     this.#maskTarget = null;
+    this.#paintMaskId = null;
     this.expanded = new Set();
     this.status = 'loading';
     this.loadError = null;
@@ -653,6 +800,8 @@ export class EditorStore {
     if (id !== this.#maskTarget) {
       this.#maskTarget = null;
     }
+    // A click on a layer row chooses the pixels as the paint target.
+    this.#paintMaskId = null;
     this.selectedId = id;
   }
 

@@ -205,6 +205,30 @@ export interface RenderArea {
   showMaskLayerId?: number | null;
 }
 
+/** What a stroke changes. */
+export type StrokeTargetDto =
+  /** Gamma-encoded sRGB, 0..1. The shell converts it to linear Rec. 2020. */
+  | { type: 'paint'; color: [number, number, number] }
+  | { type: 'erase' }
+  /** 0 hides, 1 reveals. */
+  | { type: 'mask'; value: number };
+
+/** The brush of a stroke. */
+export interface BrushSettingsDto {
+  /** Diameter, 1..5000 canvas pixels. */
+  size: number;
+  /** 0..1 */
+  hardness: number;
+  /** 0..1 */
+  opacity: number;
+  /** 0..1 */
+  flow: number;
+  /** A fraction of the size, 0.01..10. */
+  spacing: number;
+  pressureSize: boolean;
+  pressureOpacity: boolean;
+}
+
 /** The backend calls of the Editor. Tests replace them. */
 export interface EditorApi {
   open(photoId: number, displaySpace: DisplaySpace | null): Promise<DocumentInfo>;
@@ -218,6 +242,14 @@ export interface EditorApi {
   close(documentId: number): Promise<void>;
   /** The outline of the selection. `step` is the sample step in canvas pixels (1 or more). */
   selectionOutline(documentId: number, step: number): Promise<SelectionOutline>;
+  /** Starts a stroke on a layer. Returns the stroke id. One stroke is active in a document. */
+  strokeBegin(documentId: number, layerId: number, target: StrokeTargetDto, brush: BrushSettingsDto): Promise<number>;
+  /** Adds points: a flat list [x, y, pressure, ...] in canvas pixels. 1 to 3000 points per call. */
+  strokePoints(documentId: number, strokeId: number, points: number[]): Promise<null>;
+  /** Ends the stroke. It is one undo step. */
+  strokeEnd(documentId: number, strokeId: number): Promise<DocumentInfo>;
+  /** Drops the stroke. */
+  strokeCancel(documentId: number, strokeId: number): Promise<DocumentInfo>;
 }
 
 /** The real calls through `invoke`. */
@@ -233,4 +265,8 @@ export const editorApi: EditorApi = {
     await invoke<null>('editor_close', { documentId });
   },
   selectionOutline: (documentId, step) => invoke<SelectionOutline>('editor_selection_outline', { documentId, step }),
+  strokeBegin: (documentId, layerId, target, brush) => invoke<number>('editor_stroke_begin', { documentId, layerId, target, brush }),
+  strokePoints: (documentId, strokeId, points) => invoke<null>('editor_stroke_points', { documentId, strokeId, points }),
+  strokeEnd: (documentId, strokeId) => invoke<DocumentInfo>('editor_stroke_end', { documentId, strokeId }),
+  strokeCancel: (documentId, strokeId) => invoke<DocumentInfo>('editor_stroke_cancel', { documentId, strokeId }),
 };
