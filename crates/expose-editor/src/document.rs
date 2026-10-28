@@ -461,6 +461,18 @@ impl Document {
         layer_at_mut(&mut self.layers, &path).ok_or(EditorError::LayerNotFound(id))
     }
 
+    /// Returns a layer (mutable) and the selection (read-only) at the same
+    /// time. The brush uses it to read the selection while it writes the
+    /// layer.
+    pub(crate) fn layer_mut_and_selection(
+        &mut self,
+        id: LayerId,
+    ) -> EditorResult<(&mut Layer, Option<&MaskImage>)> {
+        let path = self.find_path(id).ok_or(EditorError::LayerNotFound(id))?;
+        let layer = layer_at_mut(&mut self.layers, &path).ok_or(EditorError::LayerNotFound(id))?;
+        Ok((layer, self.selection.as_ref()))
+    }
+
     /// Returns the child list of a group, or the root list for `None`.
     pub(crate) fn children_mut(
         &mut self,
