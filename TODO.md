@@ -10,15 +10,16 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; no worktrees)
+- (none — all agent branches are merged; no worktrees; 2026-10-27)
 
 ## Next (suggested order)
 
 Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use the default model).
 
-1. [ ] **editor-layers-ui** (S) — remaining P1 layer items in the UI: add an empty pixel layer, lock toggles (the model has `set_locks`), new document dialog (`DocumentSpec`), levels and curves editors for adjustment layers (the model and compositor support them). Check whether the `EditDto` contract needs new variants (shell + UI together).
+1. [ ] **editor-layers-check** (operator) — check in the real webview: New layer (`Mod+Shift+N`), lock toggles (the `all` lock disables opacity/fill/blend), New document (`Mod+N`; first Save opens Save As), Levels and Curves editors. After the check, mark in `FEATURES.md`: new document, lock UI, Levels, Curves (ADR 0017).
 2. [ ] **editor-tools** (O) — split before work: (a) layer masks in the UI (add/delete/enable, show mask); (b) brush engine (`write_pixels`/`write_mask` exist; needs a stroke model, dabs, GPU or CPU path, and history per stroke); (c) selections (rect/ellipse/lasso, selection as a mask). Design draft: ADR 0016 (Proposed) — order masks UI → selections → brushes; points (not pixels) over the IPC; selection outline as polygons; partial uploads from per-layer changed rectangles.
 3. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
+4. [ ] **editor-layers-followups** (S) — `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); the auto-open of the focused library photo can run while the New document dialog shows; dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
@@ -51,6 +52,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-layers-ui** (PRs #57–#59, ADR 0017; operator check pending: editor-layers-check) — Levels and Curves editors; `addPixelLayer` and `setLocks` edits, `LayerInfo.locks`, `DocumentInfo.sourcePhotoId`, `editor_new`; New layer button, lock toggles, New document dialog, first save of a new document opens Save As.
 
 - [x] **editor-gpu-followups** (PR #53, ADR 0014) — below snapshot in `render_view` (repeated slider step 62 → ~29 ms at 4096², +256 MiB), curve table cache, curve end-point test, doc links fixed.
 - [x] **editor-save-followups** (PR #52, ADR 0015 "Follow-ups"; operator check 2026-10-25) — `add_editor_output` (one transaction), `update_photo_file` on re-save, Save As… (`Mod+Shift+S`) to another folder.
