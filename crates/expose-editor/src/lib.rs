@@ -70,6 +70,7 @@
 pub mod adjust;
 pub mod blend;
 pub mod brush;
+mod changes;
 pub mod composite;
 pub mod document;
 pub mod error;
