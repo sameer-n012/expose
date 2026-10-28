@@ -56,6 +56,13 @@ export type AdjustmentDto =
 
 export type LayerKind = 'pixel' | 'adjustment' | 'group';
 
+export interface LocksDto {
+  transparency: boolean;
+  pixels: boolean;
+  position: boolean;
+  all: boolean;
+}
+
 export interface LayerInfo {
   id: number;
   name: string;
@@ -73,6 +80,8 @@ export interface LayerInfo {
   isolated: boolean | null;
   /** For kind `group`, bottom-first. */
   children: LayerInfo[] | null;
+  /** The layer's own locks (a group's locks also apply to its children). */
+  locks: LocksDto;
 }
 
 export interface DocumentInfo {
@@ -89,6 +98,8 @@ export interface DocumentInfo {
   dirty: boolean;
   /** The library photo of the last save, or null if the document has no saved files. */
   savedPhotoId: number | null;
+  /** The library photo the document was opened from; null for a new document. */
+  sourcePhotoId: number | null;
 }
 
 /** The result of `editor_save`. */
@@ -117,7 +128,25 @@ export type EditDto =
   | { type: 'duplicate'; layerId: number }
   /** `aboveLayerId` null: the top of the root list. */
   | { type: 'addAdjustment'; adjustment: AdjustmentDto; aboveLayerId: number | null }
-  | { type: 'setAdjustment'; layerId: number; adjustment: AdjustmentDto };
+  | { type: 'setAdjustment'; layerId: number; adjustment: AdjustmentDto }
+  /** `aboveLayerId` null: the top of the root list. A transparent canvas-size layer named "Layer N". */
+  | { type: 'addPixelLayer'; aboveLayerId: number | null }
+  | { type: 'setLocks'; layerId: number; locks: LocksDto };
+
+export type BackgroundId = 'white' | 'black' | 'transparent';
+
+export interface NewDocumentSpec {
+  /** Non-empty, max 120 chars, no '/', '\\', ':' or control chars (it becomes a file name). */
+  name: string;
+  /** 1..=30000 (integer). */
+  width: number;
+  /** 1..=30000; width * height must be at most MAX_PIXELS. */
+  height: number;
+  /** 1..=10000 */
+  resolutionPpi: number;
+  bitDepth: 8 | 16 | 32;
+  background: BackgroundId;
+}
 
 /** The area of one frame request. */
 export interface RenderArea {
@@ -134,6 +163,7 @@ export interface RenderArea {
 /** The backend calls of the Editor. Tests replace them. */
 export interface EditorApi {
   open(photoId: number, displaySpace: DisplaySpace | null): Promise<DocumentInfo>;
+  newDocument(spec: NewDocumentSpec, displaySpace: DisplaySpace | null): Promise<DocumentInfo>;
   render(documentId: number, area: RenderArea): Promise<ArrayBuffer>;
   edit(documentId: number, edit: EditDto, gesture: number | null): Promise<DocumentInfo>;
   undo(documentId: number): Promise<DocumentInfo>;
@@ -146,6 +176,7 @@ export interface EditorApi {
 /** The real calls through `invoke`. */
 export const editorApi: EditorApi = {
   open: (photoId, displaySpace) => invoke<DocumentInfo>('editor_open', { photoId, displaySpace }),
+  newDocument: (spec, displaySpace) => invoke<DocumentInfo>('editor_new', { spec, displaySpace }),
   render: (documentId, area) => invoke<ArrayBuffer>('editor_render', { documentId, ...area }),
   edit: (documentId, edit, gesture) => invoke<DocumentInfo>('editor_edit', { documentId, edit, gesture }),
   undo: (documentId) => invoke<DocumentInfo>('editor_undo', { documentId }),

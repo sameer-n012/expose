@@ -8,12 +8,13 @@
   answer does not move the handle back.
 -->
 <script lang="ts">
-  import type { BlendModeId, LayerInfo } from '../../lib/editor/api';
+  import type { BlendModeId, LayerInfo, LocksDto } from '../../lib/editor/api';
   import {
     ADJUSTMENT_LABELS,
     ADJUSTMENT_TYPES,
     BLEND_GROUPS,
     defaultAdjustment,
+    hasOwnLock,
     layerRows,
     positionOf,
   } from '../../lib/editor/layers';
@@ -87,6 +88,23 @@
     editor.edit({ type: 'addAdjustment', adjustment: defaultAdjustment(type), aboveLayerId: editor.selectedId });
   }
 
+  type LockKey = keyof LocksDto;
+  const LOCK_KEYS: readonly LockKey[] = ['transparency', 'pixels', 'position', 'all'];
+  const LOCK_LABELS: Readonly<Record<LockKey, string>> = { transparency: 'Alpha', pixels: 'Pixels', position: 'Position', all: 'All' };
+  const LOCK_TITLES: Readonly<Record<LockKey, string>> = {
+    transparency: 'Lock transparency',
+    pixels: 'Lock pixels',
+    position: 'Lock position',
+    all: 'Lock all',
+  };
+
+  /** True if a lock of the layer or of a parent group blocks changes to its properties. */
+  const locked = $derived(editor.selectedLocks.all);
+
+  function toggleLock(layer: LayerInfo, key: LockKey): void {
+    editor.setLocks(layer.id, { ...layer.locks, [key]: !layer.locks[key] });
+  }
+
   function commitRename(layer: LayerInfo, value: string): void {
     renaming = null;
     editor.rename(layer.id, value);
@@ -129,6 +147,7 @@
     <div class="toolbar">
       <button type="button" disabled={!editor.canUndo} title="Undo (Mod+Z)" onclick={() => editor.undo()}>Undo</button>
       <button type="button" disabled={!editor.canRedo} title="Redo (Mod+Shift+Z)" onclick={() => editor.redo()}>Redo</button>
+      <button type="button" disabled={info === null} title="Add a pixel layer (Mod+Shift+N)" onclick={() => editor.addPixelLayer()}>New layer</button>
       <span class="menu">
         <button
           type="button"
@@ -200,6 +219,9 @@
                 {layer.name}
               </button>
             {/if}
+            {#if hasOwnLock(layer)}
+              <span class="kind lock-mark" role="img" aria-label="Locked" title="Locked">🔒</span>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -232,9 +254,26 @@
       </div>
 
       {#if selected !== null}
+        <div class="locks" role="group" aria-label="Layer locks">
+          <span class="lock-label">Lock</span>
+          {#each LOCK_KEYS as key (key)}
+            <button
+              type="button"
+              class="lock"
+              aria-pressed={selected.locks[key]}
+              title={LOCK_TITLES[key]}
+              onclick={() => toggleLock(selected, key)}
+            >
+              {LOCK_LABELS[key]}
+            </button>
+          {/each}
+        </div>
+        {#if locked}
+          <p class="locked-note" role="status">This layer is locked. Remove the lock to change it.</p>
+        {/if}
         <div class="mode">
           <label for="layer-blend">Blend mode</label>
-          <select id="layer-blend" value={selected.blendMode} onchange={onblend}>
+          <select id="layer-blend" value={selected.blendMode} disabled={locked} onchange={onblend}>
             {#each BLEND_GROUPS as group, g (g)}
               {#if g > 0}<hr />{/if}
               {#each group as mode (mode.id)}
@@ -249,6 +288,7 @@
           min={0}
           max={100}
           unit="%"
+          disabled={locked}
           onchange={(v) => setPercent(selected, 'opacity', v)}
           onend={() => editor.endGesture()}
           onreset={() => {
@@ -262,6 +302,7 @@
           min={0}
           max={100}
           unit="%"
+          disabled={locked}
           onchange={(v) => setPercent(selected, 'fillOpacity', v)}
           onend={() => editor.endGesture()}
           onreset={() => {
@@ -396,6 +437,35 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
     font-size: var(--font-size-sm);
+  }
+  .locks {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--font-size-sm);
+  }
+  .lock-label {
+    color: var(--color-text-muted);
+  }
+  .lock {
+    background: var(--color-bg-panel-raised);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--font-size-sm);
+  }
+  .lock[aria-pressed='true'] {
+    background: var(--color-accent);
+    color: var(--color-text-on-accent);
+  }
+  .locked-note {
+    margin: 0;
+    padding: 0 var(--space-4);
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
   }
   .mode {
     display: flex;

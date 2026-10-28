@@ -29,6 +29,7 @@ function makeLayers(): LayerInfo[] {
       fillOpacity: 1,
       blendMode: 'normal',
       hasMask: false,
+      locks: { transparency: false, pixels: false, position: false, all: false },
       adjustment: curves,
       isolated: null,
       children: null,
@@ -49,6 +50,7 @@ async function makeStore() {
     revision,
     dirty: revision > 0,
     savedPhotoId: null,
+    sourcePhotoId: 1,
   });
   const api = {
     open: vi.fn(async () => doc()),

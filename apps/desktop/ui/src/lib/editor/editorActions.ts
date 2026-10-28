@@ -2,6 +2,8 @@
  * The shortcut actions of the Editor.
  *
  * - `Mod+E` (global): open the selected photo in the Editor.
+ * - `Mod+N` (global): open the New document dialog (shows the Editor).
+ * - `Mod+Shift+N` (scope `editor`): add a pixel layer above the selected layer.
  * - `Mod+S` (scope `editor`): save the document to the library.
  * - `Mod+Shift+S` (scope `editor`): save as new files in a chosen folder.
  * - `Mod+Z`, `Mod+Shift+Z` (scope `editor`): undo and redo.
@@ -20,6 +22,8 @@ export const EDITOR_ACTION = {
   zoomOut: 'editor.zoomOut',
   zoomFit: 'editor.zoomFit',
   zoom100: 'editor.zoom100',
+  newDocument: 'editor.newDocument',
+  newLayer: 'editor.newLayer',
 } as const;
 
 /** The commands that the Editor actions call (the editor store has them). */
@@ -31,6 +35,8 @@ export interface EditorCommands {
   zoomStep(direction: 1 | -1): void;
   fitToWindow(): void;
   zoomTo(zoom: number): void;
+  requestNewDocument(): void;
+  addPixelLayer(): void;
 }
 
 /** The action that opens the selected photo in the Editor. The shell knows the photo. */
@@ -41,6 +47,9 @@ export function editInEditorAction(run: () => void): ShortcutAction {
 /** The actions that work while the Editor is active. */
 export function editorActions(commands: EditorCommands): ShortcutAction[] {
   return [
+    // Global: the command shows the Editor module and opens the dialog there.
+    { id: EDITOR_ACTION.newDocument, label: 'Editor: new document', scope: 'global', defaultBinding: 'Mod+N', run: () => commands.requestNewDocument() },
+    { id: EDITOR_ACTION.newLayer, label: 'Editor: new layer', scope: 'editor', defaultBinding: 'Mod+Shift+N', run: () => commands.addPixelLayer() },
     { id: EDITOR_ACTION.save, label: 'Editor: save to library', scope: 'editor', defaultBinding: 'Mod+S', run: () => void commands.save() },
     { id: EDITOR_ACTION.saveAs, label: 'Editor: save as…', scope: 'editor', defaultBinding: 'Mod+Shift+S', run: () => void commands.saveAs() },
     { id: EDITOR_ACTION.undo, label: 'Editor: undo', scope: 'editor', defaultBinding: 'Mod+Z', allowRepeat: true, run: () => commands.undo() },

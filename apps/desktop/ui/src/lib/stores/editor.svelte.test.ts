@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { DocumentInfo, EditDto, EditorApi, LayerInfo, SaveResult } from '../editor/api';
+import type { DocumentInfo, EditDto, EditorApi, LayerInfo, NewDocumentSpec, SaveResult } from '../editor/api';
+import { defaultSpec } from '../editor/newDocument';
 import { EditorStore, GESTURE_IDLE_MS } from './editor.svelte';
 import { ToastStore } from './toasts.svelte';
 
@@ -16,12 +17,13 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
     adjustment: null,
     isolated: null,
     children: null,
+    locks: { transparency: false, pixels: false, position: false, all: false },
     ...extra,
   };
 }
 
 function info(documentId: number, revision: number, layers: LayerInfo[] = [layer(1), layer(2)], extra: Partial<DocumentInfo> = {}): DocumentInfo {
-  return { documentId, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, ...extra };
+  return { documentId, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, ...extra };
 }
 
 function saveResult(documentId: number, revision: number, photoId = 77, created = true): SaveResult {
@@ -41,6 +43,7 @@ function setup() {
   let nextDoc = 1;
   const api = {
     open: vi.fn(async (_photo: number, _space: unknown) => info(nextDoc++, 0)),
+    newDocument: vi.fn(async (_spec: NewDocumentSpec, _space: unknown) => info(nextDoc++, 0, [layer(1)], { sourcePhotoId: null })),
     render: vi.fn(async () => new ArrayBuffer(0)),
     edit: vi.fn(async (documentId: number, _edit: EditDto, _gesture: number | null) => info(documentId, ++revision)),
     undo: vi.fn(async (documentId: number) => info(documentId, ++revision)),
@@ -481,5 +484,92 @@ describe('EditorStore view', () => {
     store.zoomStep(1);
     store.pan(1, 1);
     expect(store.view).toBeNull();
+  });
+});
+
+describe('EditorStore new document', () => {
+  it('makes a new document, shows it, and counts the untitled name', async () => {
+    const { store, api } = setup();
+    expect(store.suggestedName).toBe('Untitled-1');
+    expect(await store.newDocument(defaultSpec('Untitled-1'))).toBe(true);
+    expect(api.newDocument).toHaveBeenCalledWith(defaultSpec('Untitled-1'), null);
+    expect(store.status).toBe('ready');
+    expect(store.photoId).toBeNull();
+    expect(store.suggestedName).toBe('Untitled-2');
+  });
+
+  it('asks about unsaved changes first and keeps the document on Cancel', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    editsAreDirty(api);
+    store.edit({ type: 'setVisible', layerId: 1, visible: false });
+    const run = store.newDocument(defaultSpec('Untitled-1'));
+    await tick();
+    expect(store.leavePrompt).not.toBeNull();
+    store.answerLeave('cancel');
+    expect(await run).toBe(false);
+    expect(api.newDocument).not.toHaveBeenCalled();
+    expect(store.photoId).toBe(5);
+  });
+
+  it('shows an error and keeps the name when the shell refuses', async () => {
+    const { store, api, toasts } = setup();
+    api.newDocument.mockRejectedValueOnce({ kind: 'invalid', message: 'bad' });
+    expect(await store.newDocument(defaultSpec('Untitled-1'))).toBe(false);
+    expect(store.status).toBe('error');
+    expect(toasts.items.at(-1)?.message).toContain('new document');
+    expect(store.suggestedName).toBe('Untitled-1');
+  });
+
+  it('requestNewDocument shows the Editor and opens the dialog', () => {
+    const { store, modules } = setup();
+    store.requestNewDocument();
+    expect(modules.switchTo).toHaveBeenCalledWith('editor');
+    expect(store.newDocumentOpen).toBe(true);
+    store.closeNewDocument();
+    expect(store.newDocumentOpen).toBe(false);
+  });
+
+  it('Save of a new document asks for a folder (Save As)', async () => {
+    const { api, toasts, modules, library } = setup();
+    const pickFolder = vi.fn(async () => '/docs');
+    const store = new EditorStore({ library, modules: modules as never, toasts, api, pickFolder });
+    await store.newDocument(defaultSpec('Untitled-1'));
+    expect(await store.save()).toBe(true);
+    expect(pickFolder).toHaveBeenCalledOnce();
+    expect(api.save).toHaveBeenCalledWith(1, '/docs');
+  });
+
+  it('Save of a photo document does not ask for a folder', async () => {
+    const { api, toasts, modules, library } = setup();
+    const pickFolder = vi.fn(async () => '/docs');
+    const store = new EditorStore({ library, modules: modules as never, toasts, api, pickFolder });
+    await store.openPhoto(5);
+    await store.save();
+    expect(pickFolder).not.toHaveBeenCalled();
+  });
+});
+
+describe('EditorStore layers', () => {
+  it('addPixelLayer sends the edit above the selection and selects the new layer', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    store.select(1);
+    api.edit.mockImplementationOnce(async (documentId: number) => info(documentId, 1, [layer(1), layer(3), layer(2)]));
+    store.addPixelLayer();
+    await tick();
+    expect(api.edit).toHaveBeenCalledWith(1, { type: 'addPixelLayer', aboveLayerId: 1 }, null);
+    expect(store.selectedId).toBe(3);
+  });
+
+  it('selectedLocks combines the locks of the ancestors', async () => {
+    const { store, api } = setup();
+    const all = { transparency: false, pixels: false, position: false, all: true };
+    api.open.mockImplementationOnce(async () => info(1, 0, [layer(7, { kind: 'group', isolated: true, locks: all, children: [layer(8)] })]));
+    await store.openPhoto(5);
+    store.select(8);
+    expect(store.selectedLocks.all).toBe(true);
+    store.select(null);
+    expect(store.selectedLocks.all).toBe(false);
   });
 });

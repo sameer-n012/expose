@@ -21,8 +21,18 @@
  */
 import { pickFolder, type PhotoId } from '../catalog';
 import type { DisplaySpace } from '../develop/transport';
-import { editorApi, type DocumentInfo, type EditDto, type EditorApi, type LayerInfo, type SaveResult } from '../editor/api';
-import { allLayerIds, findLayer, moveStep, newLayerIds } from '../editor/layers';
+import {
+  editorApi,
+  type DocumentInfo,
+  type EditDto,
+  type EditorApi,
+  type LayerInfo,
+  type LocksDto,
+  type NewDocumentSpec,
+  type SaveResult,
+} from '../editor/api';
+import { NO_LOCKS, allLayerIds, effectiveLocks, findLayer, moveStep, newLayerIds } from '../editor/layers';
+import { untitledName } from '../editor/newDocument';
 import {
   clampView,
   clampZoom,
@@ -104,6 +114,8 @@ export class EditorStore {
   saving = $state(false);
   /** The open unsaved-changes question, or null. */
   leavePrompt = $state.raw<LeavePrompt | null>(null);
+  /** True while the New document dialog is open. */
+  newDocumentOpen = $state(false);
 
   readonly #library: EditorStoreOptions['library'];
   readonly #modules: EditorStoreOptions['modules'];
@@ -116,6 +128,8 @@ export class EditorStore {
   #answerLeave: ((choice: LeaveChoice) => void) | null = null;
   /** The running save, or null. */
   #saveRun: Promise<boolean> | null = null;
+  /** The number in the next suggested "Untitled-N" name. */
+  #untitled = 1;
 
   #generation = 0;
   #chain: Promise<void> = Promise.resolve();
@@ -167,6 +181,24 @@ export class EditorStore {
     return info === null || this.selectedId === null ? null : findLayer(info.layers, this.selectedId);
   }
 
+  /** The locks that apply to the selected layer (own and from ancestor groups). */
+  get selectedLocks(): LocksDto {
+    const info = this.info;
+    return info === null || this.selectedId === null ? NO_LOCKS : effectiveLocks(info.layers, this.selectedId);
+  }
+
+  /** Sets the own locks of a layer. */
+  setLocks(layerId: number, locks: LocksDto): void {
+    this.edit({ type: 'setLocks', layerId, locks });
+  }
+
+  /** Adds a transparent pixel layer above the selected layer. */
+  addPixelLayer(): void {
+    if (this.info !== null) {
+      this.edit({ type: 'addPixelLayer', aboveLayerId: this.selectedId });
+    }
+  }
+
   get canUndo(): boolean {
     return this.info?.canUndo ?? false;
   }
@@ -207,8 +239,44 @@ export class EditorStore {
    * document stays open.
    */
   async openPhoto(photoId: PhotoId): Promise<void> {
+    await this.#replaceDocument(photoId, () => this.#api.open(photoId, this.#displaySpace), 'Open the photo in the Editor');
+  }
+
+  /** The name that the New document dialog suggests ("Untitled-N", N counts per session). */
+  get suggestedName(): string {
+    return untitledName(this.#untitled);
+  }
+
+  /** Opens the New document dialog and shows the Editor module (the dialog lives in the Editor view). */
+  requestNewDocument(): void {
+    this.#modules.switchTo('editor');
+    this.newDocumentOpen = true;
+  }
+
+  closeNewDocument(): void {
+    this.newDocumentOpen = false;
+  }
+
+  /**
+   * Makes a new empty document and shows it. Like `openPhoto`, it asks about
+   * unsaved changes of the old document first. Returns true if the document
+   * opened.
+   */
+  async newDocument(spec: NewDocumentSpec): Promise<boolean> {
+    const ok = await this.#replaceDocument(null, () => this.#api.newDocument(spec, this.#displaySpace), 'Make the new document');
+    if (ok) {
+      this.#untitled += 1;
+    }
+    return ok;
+  }
+
+  /**
+   * The shared flow of `openPhoto` and `newDocument`: confirm, close the old
+   * document, and open the new one. Returns true if the new document is open.
+   */
+  async #replaceDocument(photoId: PhotoId | null, open: () => Promise<DocumentInfo>, action: string): Promise<boolean> {
     if (this.info !== null && !(await this.confirmLeave())) {
-      return;
+      return false;
     }
     const generation = ++this.#generation;
     const old = this.info;
@@ -225,30 +293,31 @@ export class EditorStore {
     if (old !== null) {
       await this.#closeDocument(old.documentId);
       if (generation !== this.#generation) {
-        return;
+        return false;
       }
     }
     let info: DocumentInfo;
     try {
-      info = await this.#api.open(photoId, this.#displaySpace);
+      info = await open();
     } catch (error: unknown) {
       if (generation !== this.#generation) {
-        return;
+        return false;
       }
       this.status = 'error';
       this.loadError = this.#describe(error);
-      this.#toasts.error(this.#messageFor('Open the photo in the Editor', error), error);
-      return;
+      this.#toasts.error(this.#messageFor(action, error), error);
+      return false;
     }
     if (generation !== this.#generation) {
-      // Another photo was requested while this one opened.
+      // Another document was requested while this one opened.
       await this.#closeDocument(info.documentId);
-      return;
+      return false;
     }
     this.info = info;
     this.status = 'ready';
     this.selectedId = info.layers[info.layers.length - 1]?.id ?? null;
     this.#refit();
+    return true;
   }
 
   /** Closes the open document (the view is destroyed). */
@@ -275,6 +344,11 @@ export class EditorStore {
    * Returns true on success. Errors show a toast.
    */
   save(): Promise<boolean> {
+    // A new document has no source photo and no saved files: it needs a folder.
+    const info = this.info;
+    if (info !== null && info.savedPhotoId === null && info.sourcePhotoId === null) {
+      return this.saveAs();
+    }
     return this.#startSave();
   }
 
@@ -433,7 +507,7 @@ export class EditorStore {
         return;
       }
       this.#apply(next);
-      if (edit.type === 'duplicate' || edit.type === 'addAdjustment') {
+      if (edit.type === 'duplicate' || edit.type === 'addAdjustment' || edit.type === 'addPixelLayer') {
         const added = newLayerIds(before, next.layers);
         const top = added[added.length - 1];
         if (top !== undefined) {
