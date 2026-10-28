@@ -86,6 +86,19 @@ enum EditKind {
         rect: Rect,
         data: Vec<f32>,
     },
+    /// Pixel patches that do not overlap, each with its `rect` in layer
+    /// pixel coordinates. A brush stroke makes this edit (see
+    /// [`crate::brush`]), so that the edit holds only the touched tiles.
+    PixelTiles {
+        id: LayerId,
+        tiles: Vec<(Rect, Vec<Rgba>)>,
+    },
+    /// Mask patches that do not overlap, each with its `rect` in mask pixel
+    /// coordinates.
+    MaskTiles {
+        id: LayerId,
+        tiles: Vec<(Rect, Vec<f32>)>,
+    },
     BlendSpace(BlendSpace),
     /// The document selection to set (`None` = no selection), in compact
     /// form. See [`crate::selection`].
@@ -100,6 +113,18 @@ impl Edit {
     /// Makes an edit that sets the document selection.
     pub(crate) fn selection(selection: Option<StoredSelection>) -> Self {
         Self::new(EditKind::Selection(selection.map(Box::new)))
+    }
+
+    /// Makes an edit that writes pixel tiles. The tiles must not overlap.
+    /// The caller must already have applied the inverse of this edit (the
+    /// edit holds the values to restore).
+    pub(crate) fn pixel_tiles(id: LayerId, tiles: Vec<(Rect, Vec<Rgba>)>) -> Self {
+        Self::new(EditKind::PixelTiles { id, tiles })
+    }
+
+    /// Makes an edit that writes mask tiles. The tiles must not overlap.
+    pub(crate) fn mask_tiles(id: LayerId, tiles: Vec<(Rect, Vec<f32>)>) -> Self {
+        Self::new(EditKind::MaskTiles { id, tiles })
     }
 
     /// Returns the approximate heap memory of the edit in bytes. The
@@ -118,6 +143,14 @@ impl Edit {
             EditKind::Mask { mask, .. } => mask.as_ref().map_or(0, |m| size_of_val(m.image.data())),
             EditKind::PixelPatch { data, .. } => size_of_val(data.as_slice()),
             EditKind::MaskPatch { data, .. } => size_of_val(data.as_slice()),
+            EditKind::PixelTiles { tiles, .. } => tiles
+                .iter()
+                .map(|(_, d)| size_of::<(Rect, Vec<Rgba>)>() + size_of_val(d.as_slice()))
+                .sum(),
+            EditKind::MaskTiles { tiles, .. } => tiles
+                .iter()
+                .map(|(_, d)| size_of::<(Rect, Vec<f32>)>() + size_of_val(d.as_slice()))
+                .sum(),
             EditKind::Selection(s) => s.as_ref().map_or(0, |s| s.memory_bytes()),
             EditKind::Remove { .. }
             | EditKind::Move { .. }
@@ -293,6 +326,8 @@ impl Document {
                 layer.touch_mask();
                 EditKind::MaskPatch { id, rect, data }
             }
+            EditKind::PixelTiles { id, tiles } => self.raw_pixel_tiles(id, tiles)?,
+            EditKind::MaskTiles { id, tiles } => self.raw_mask_tiles(id, tiles)?,
             EditKind::BlendSpace(space) => {
                 let old = std::mem::replace(&mut self.blend_space, space);
                 EditKind::BlendSpace(old)
@@ -301,6 +336,49 @@ impl Document {
         // The edit is applied (each error above returns before a change).
         self.touch();
         Ok(Edit::new(inverse))
+    }
+
+    /// Swaps pixel tiles. Checks all tiles first, so that an error changes
+    /// nothing.
+    fn raw_pixel_tiles(
+        &mut self,
+        id: LayerId,
+        mut tiles: Vec<(Rect, Vec<Rgba>)>,
+    ) -> EditorResult<EditKind> {
+        let layer = self.layer_mut(id)?;
+        let LayerKind::Pixel(p) = layer.kind_mut() else {
+            return Err(EditorError::NotAPixelLayer(id));
+        };
+        let img = p.image_mut();
+        for (rect, data) in &tiles {
+            check_patch(*rect, img.bounds(), data.len())?;
+        }
+        let w = img.width();
+        for (rect, data) in &mut tiles {
+            swap_rect(img.pixels_mut(), w, *rect, data);
+        }
+        layer.touch_pixels();
+        Ok(EditKind::PixelTiles { id, tiles })
+    }
+
+    /// Swaps mask tiles. Checks all tiles first, so that an error changes
+    /// nothing.
+    fn raw_mask_tiles(
+        &mut self,
+        id: LayerId,
+        mut tiles: Vec<(Rect, Vec<f32>)>,
+    ) -> EditorResult<EditKind> {
+        let layer = self.layer_mut(id)?;
+        let m = layer.mask_mut().ok_or(EditorError::NoMask(id))?;
+        for (rect, data) in &tiles {
+            check_patch(*rect, m.image.bounds(), data.len())?;
+        }
+        let w = m.image.width();
+        for (rect, data) in &mut tiles {
+            swap_rect(m.image.data_mut(), w, *rect, data);
+        }
+        layer.touch_mask();
+        Ok(EditKind::MaskTiles { id, tiles })
     }
 
     fn raw_insert(&mut self, at: Placement, layer: Layer) -> EditorResult<EditKind> {

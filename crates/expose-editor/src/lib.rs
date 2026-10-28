@@ -20,6 +20,8 @@
 //! - [`selection`]: the document selection (rectangle, ellipse, and
 //!   polygon shapes, combine modes, feather, invert, mask from selection).
 //!   [`Document::selection_version`] changes at each selection change.
+//! - [`brush`]: brush strokes (paint, erase, mask paint) on pixel layers
+//!   and masks ([`Stroke`]). One stroke gives one undo edit.
 //! - [`history`]: undo and redo. [`History::push_merge`] makes one undo
 //!   step from a gesture (for example, a slider drag).
 //! - [`mod@file`]: the native layered document file (`.exdoc`):
@@ -67,6 +69,7 @@
 
 pub mod adjust;
 pub mod blend;
+pub mod brush;
 pub mod composite;
 pub mod document;
 pub mod error;
@@ -83,6 +86,10 @@ pub use adjust::{
     PreparedAdjustment,
 };
 pub use blend::{BlendMode, BlendSpace, RangeHandling};
+pub use brush::{
+    BrushSettings, MAX_BRUSH_SIZE, MAX_BRUSH_SPACING, MAX_STROKE_COORD, MIN_BRUSH_SIZE,
+    MIN_BRUSH_SPACING, MIN_DAB_STEP, STROKE_TILE_SIZE, Stroke, StrokePoint, StrokeTarget,
+};
 pub use composite::{composite, composite_straight, to_straight_alpha};
 pub use document::{
     Background, BitDepth, ColorMode, Document, DocumentSpec, MAX_DIMENSION, MAX_PIXELS,

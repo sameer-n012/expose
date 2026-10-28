@@ -151,6 +151,13 @@ pub enum EditorError {
     #[error("the document has no selection")]
     NoSelection,
 
+    /// The layer of a brush stroke changed outside the stroke (for example,
+    /// an undo, a move, or a resize during the stroke). The stroke cannot
+    /// continue, because the original values that it keeps are not correct
+    /// now (see [`crate::brush`]).
+    #[error("layer {0} changed outside the brush stroke")]
+    StrokeConflict(LayerId),
+
     /// A document file cannot be read or written (see [`crate::file`]).
     #[error("document file: {0}")]
     File(#[from] FileError),
