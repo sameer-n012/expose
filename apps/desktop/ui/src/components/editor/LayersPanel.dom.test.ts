@@ -184,12 +184,12 @@ describe('AdjustmentPanel', () => {
     expect(typeof call?.[2]).toBe('number');
   });
 
-  it('says that levels have no editor yet', async () => {
+  it('shows the levels editor for a levels layer', async () => {
     const channel = { inputBlack: 0, inputWhite: 1, gamma: 1, outputBlack: 0, outputWhite: 1 };
     const { store } = await makeStore([
       layer(1, { kind: 'adjustment', adjustment: { type: 'levels', master: channel, red: channel, green: channel, blue: channel } }),
     ]);
     render(AdjustmentPanel, { editor: store });
-    expect(screen.getByText('No editor yet.')).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Levels' })).toBeTruthy();
   });
 });
