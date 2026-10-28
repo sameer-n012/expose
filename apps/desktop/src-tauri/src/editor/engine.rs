@@ -39,7 +39,8 @@ use expose_editor::{Document, GpuCompositor, ViewSpec};
 use expose_gpu::{GpuContext, GpuContextOptions};
 
 use super::EditorEngineError;
-use super::dto::{DocumentId, DocumentInfo, EditDto};
+use super::dto::{DocumentId, DocumentInfo, EditDto, SelectionOutline};
+use super::outline::{MAX_OUTLINE_POINTS, selection_outline};
 use super::save::{DocumentOrigin, SaveSnapshot, SavedFiles};
 use super::session::EditSession;
 use crate::preview::frame::{FRAME_HEADER_BYTES, FrameHeader, FrameTimings, rgba8_body_len};
@@ -96,6 +97,12 @@ enum Job {
     Redo {
         document: DocumentId,
         reply: Reply<DocumentInfo>,
+    },
+    /// Traces the outline of the selection.
+    Outline {
+        document: DocumentId,
+        step: u32,
+        reply: Reply<SelectionOutline>,
     },
     Close(DocumentId),
 }
@@ -259,6 +266,27 @@ impl EditorEngine {
             document,
             edit,
             gesture,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
+    /// Traces the outline of the selection of a document on the engine
+    /// thread and waits for it (see [`selection_outline`]).
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`] and
+    /// [`EditorEngineError::InvalidStep`].
+    pub async fn selection_outline_async(
+        &self,
+        document: DocumentId,
+        step: u32,
+    ) -> Result<SelectionOutline, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::Outline {
+            document,
+            step,
             reply: reply_to(sender),
         });
         receive(receiver).await
@@ -451,6 +479,7 @@ fn fail_job(job: Job, error: &EditorEngineError) {
         | Job::Undo { reply, .. }
         | Job::Redo { reply, .. } => reply(Err(error())),
         Job::Snapshot { reply, .. } => reply(Err(error())),
+        Job::Outline { reply, .. } => reply(Err(error())),
         Job::FinishSave { reply, .. } => {
             if let Some(reply) = reply {
                 reply(Err(error()));
@@ -766,6 +795,17 @@ impl Renderer {
                     let session = r.session(document)?;
                     session.undo()?;
                     Ok(session.info(document))
+                });
+                reply(result);
+            }
+            Job::Outline {
+                document,
+                step,
+                reply,
+            } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    selection_outline(session.document(), step, MAX_OUTLINE_POINTS)
                 });
                 reply(result);
             }
