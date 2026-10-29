@@ -164,6 +164,11 @@ pub enum EditorError {
     #[error("invalid brush setting: {0}")]
     InvalidBrush(&'static str),
 
+    /// A fill setting is not valid (for example, the dissolve blend mode
+    /// for the paint bucket, see [`crate::flood`]).
+    #[error("invalid fill setting: {0}")]
+    InvalidFill(&'static str),
+
     /// A document file cannot be read or written (see [`crate::file`]).
     #[error("document file: {0}")]
     File(#[from] FileError),
