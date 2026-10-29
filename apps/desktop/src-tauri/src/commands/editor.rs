@@ -527,6 +527,23 @@ pub async fn editor_redo(
     Ok(engine.redo_async(document_id).await?)
 }
 
+/// Undoes or redoes steps until `step` steps are applied (a click in the
+/// history panel). An active stroke ends first. Returns the new document
+/// info.
+///
+/// Errors: `notFound` (document), `invalidInput` (`step` is more than the
+/// number of steps), `internal`.
+#[tauri::command]
+pub async fn editor_history_jump(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    step: u32,
+) -> Result<DocumentInfo, CommandError> {
+    Ok(engine
+        .history_jump_async(document_id, step as usize)
+        .await?)
+}
+
 /// Closes a document and frees its memory. Edits after the last save are
 /// lost (the UI asks the user first). Closing an unknown document does
 /// nothing.

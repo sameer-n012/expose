@@ -50,6 +50,7 @@ async function makeStore() {
     layers,
     canUndo: revision > 0,
     canRedo: false,
+    history: { steps: [], cursor: 0 },
     revision,
     dirty: revision > 0,
     savedPhotoId: null,
@@ -71,6 +72,7 @@ async function makeStore() {
     }),
     undo: vi.fn(),
     redo: vi.fn(),
+    historyJump: vi.fn(),
     save: vi.fn(),
     close: vi.fn(async () => undefined),
   } as unknown as EditorApi & { edit: ReturnType<typeof vi.fn> };

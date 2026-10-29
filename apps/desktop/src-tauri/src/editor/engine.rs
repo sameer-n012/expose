@@ -124,6 +124,12 @@ enum Job {
         document: DocumentId,
         reply: Reply<DocumentInfo>,
     },
+    /// Undoes or redoes until `step` steps are applied.
+    HistoryJump {
+        document: DocumentId,
+        step: usize,
+        reply: Reply<DocumentInfo>,
+    },
     /// Traces the outline of the selection.
     Outline {
         document: DocumentId,
@@ -514,6 +520,28 @@ impl EditorEngine {
         receive(receiver).await
     }
 
+    /// Undoes or redoes steps until `step` steps are applied, and waits for
+    /// the new info.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`], `IndexOutOfRange` (as
+    /// [`EditorEngineError::Editor`]) for a `step` that is too large, and
+    /// history errors.
+    pub async fn history_jump_async(
+        &self,
+        document: DocumentId,
+        step: usize,
+    ) -> Result<DocumentInfo, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::HistoryJump {
+            document,
+            step,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
     /// Queues a document close. A close of an unknown document does
     /// nothing. When no document stays open, the engine frees the GPU
     /// cache of the compositor.
@@ -667,7 +695,8 @@ fn fail_job(job: Job, error: &EditorEngineError) {
         | Job::StrokeEnd { reply, .. }
         | Job::StrokeCancel { reply, .. }
         | Job::Undo { reply, .. }
-        | Job::Redo { reply, .. } => reply(Err(error())),
+        | Job::Redo { reply, .. }
+        | Job::HistoryJump { reply, .. } => reply(Err(error())),
         Job::Snapshot { reply, .. } => reply(Err(error())),
         Job::StrokeBegin { reply, .. } => reply(Err(error())),
         Job::StrokePoints { reply, .. } => reply(Err(error())),
@@ -1094,15 +1123,34 @@ impl Renderer {
                 });
                 reply(result);
             }
-            Job::Redo { document, reply } => {
-                let result = guarded(self, |r| {
-                    let session = r.session(document)?;
-                    session.redo()?;
-                    Ok(session.info(document))
-                });
-                reply(result);
-            }
+            job @ (Job::Redo { .. } | Job::HistoryJump { .. }) => self.run_redo_job(job),
         }
+    }
+
+    /// Runs a redo or a history jump.
+    fn run_redo_job(&mut self, job: Job) {
+        let (document, step, reply) = match job {
+            Job::Redo { document, reply } => (document, None, reply),
+            Job::HistoryJump {
+                document,
+                step,
+                reply,
+            } => (document, Some(step), reply),
+            other => {
+                debug_assert!(false, "not a redo job");
+                fail_job(other, &stopped());
+                return;
+            }
+        };
+        let result = guarded(self, |r| {
+            let session = r.session(document)?;
+            match step {
+                Some(step) => session.history_jump(step)?,
+                None => session.redo()?,
+            }
+            Ok(session.info(document))
+        });
+        reply(result);
     }
 }
 
@@ -1256,6 +1304,44 @@ mod tests {
         assert!(!undone.can_undo && undone.can_redo);
         let body = pollster::block_on(engine.render_async(request)).unwrap();
         assert_eq!(pixel(&body, 12, 4, 4), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn history_jump_changes_the_frame_and_refuses_a_large_step() {
+        let Some((engine, info)) = engine_with_document(8, 6, [1.0, 1.0, 1.0, 1.0]) else {
+            return;
+        };
+        let id = info.document_id;
+        let request = RenderRequest {
+            document: id,
+            view: view(0.0, 1.0, 8, 6),
+            show_mask: None,
+        };
+        let edited = pollster::block_on(engine.edit_async(
+            id,
+            EditDto::SetVisible {
+                layer_id: info.layers[0].id,
+                visible: false,
+            },
+            None,
+        ))
+        .unwrap();
+        assert_eq!(edited.history.cursor, 1);
+        let body = pollster::block_on(engine.render_async(request)).unwrap();
+        assert_eq!(pixel(&body, 8, 4, 3)[3], 0);
+        let back = pollster::block_on(engine.history_jump_async(id, 0)).unwrap();
+        assert_eq!((back.history.steps.len(), back.history.cursor), (1, 0));
+        let body = pollster::block_on(engine.render_async(request)).unwrap();
+        assert_eq!(pixel(&body, 8, 4, 3), [255, 255, 255, 255]);
+        let forward = pollster::block_on(engine.history_jump_async(id, 1)).unwrap();
+        assert_eq!(forward.history.cursor, 1);
+        let body = pollster::block_on(engine.render_async(request)).unwrap();
+        assert_eq!(pixel(&body, 8, 4, 3)[3], 0);
+        let error = pollster::block_on(engine.history_jump_async(id, 2)).unwrap_err();
+        assert!(matches!(
+            error,
+            EditorEngineError::Editor(EditorError::IndexOutOfRange { .. })
+        ));
     }
 
     #[test]

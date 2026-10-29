@@ -1194,6 +1194,22 @@ export class EditorStore {
     this.#history('redo');
   }
 
+  /** Undoes or redoes until `step` steps are applied (history panel). No call if `step` is the current cursor. */
+  historyJump(step: number): void {
+    const tab = this.#activeTab;
+    if (tab === null) {
+      return;
+    }
+    tab.endGesture();
+    this.#enqueue(tab, async (info) => {
+      // Test the cursor after the queued edits: they can change it.
+      if (info.history.cursor === step) {
+        return;
+      }
+      tab.apply(await this.#api.historyJump(info.documentId, step));
+    });
+  }
+
   #history(kind: 'undo' | 'redo'): void {
     const tab = this.#activeTab;
     if (tab === null) {

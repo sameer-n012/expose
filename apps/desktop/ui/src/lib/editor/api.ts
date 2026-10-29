@@ -88,6 +88,14 @@ export interface LayerInfo {
   locks: LocksDto;
 }
 
+/** The undo history of a document, for the history panel. */
+export interface HistoryInfo {
+  /** The step names, oldest first (at most 50). */
+  steps: string[];
+  /** The number of applied steps, 0..=steps.length. Steps at cursor.. can be redone. */
+  cursor: number;
+}
+
 export interface DocumentInfo {
   documentId: number;
   /** The title of the document for its tab: the photo file stem, the new-document name, or the stem of the saved file. */
@@ -98,6 +106,8 @@ export interface DocumentInfo {
   layers: LayerInfo[];
   canUndo: boolean;
   canRedo: boolean;
+  /** The step names and the cursor, for the history panel. */
+  history: HistoryInfo;
   /** Changes at every document change. */
   revision: number;
   /** True if the document changed after the last save (or the open). */
@@ -256,6 +266,8 @@ export interface EditorApi {
   edit(documentId: number, edit: EditDto, gesture: number | null): Promise<DocumentInfo>;
   undo(documentId: number): Promise<DocumentInfo>;
   redo(documentId: number): Promise<DocumentInfo>;
+  /** Undoes or redoes until `step` steps are applied. An active stroke ends first. */
+  historyJump(documentId: number, step: number): Promise<DocumentInfo>;
   /** Saves the document. With `folder` ("Save As"), it makes new files in that folder. */
   save(documentId: number, folder?: string): Promise<SaveResult>;
   close(documentId: number): Promise<void>;
@@ -283,6 +295,7 @@ export const editorApi: EditorApi = {
   edit: (documentId, edit, gesture) => invoke<DocumentInfo>('editor_edit', { documentId, edit, gesture }),
   undo: (documentId) => invoke<DocumentInfo>('editor_undo', { documentId }),
   redo: (documentId) => invoke<DocumentInfo>('editor_redo', { documentId }),
+  historyJump: (documentId, step) => invoke<DocumentInfo>('editor_history_jump', { documentId, step }),
   save: (documentId, folder) => invoke<SaveResult>('editor_save', { documentId, folder: folder ?? null }),
   close: async (documentId) => {
     await invoke<null>('editor_close', { documentId });
