@@ -12,13 +12,6 @@ UI_DIR="$ROOT/apps/desktop/ui"
 MODE="${1:-all}"
 
 run_rust() {
-  # Use the rustfmt of the pinned toolchain. Another rustfmt earlier in PATH
-  # (for example one installed by an editor) can be a different version or
-  # a binary for a different CPU.
-  if command -v rustup >/dev/null 2>&1; then
-    RUSTFMT="$(rustup which rustfmt)"
-    export RUSTFMT
-  fi
   echo "==> cargo fmt"
   cargo fmt --all --check
   echo "==> cargo clippy"
