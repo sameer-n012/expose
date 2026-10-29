@@ -64,7 +64,7 @@ import { clampFeather, cycleLasso, cycleMarquee, isLassoTool, type EditorTool, t
 import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
 import { decodeMaskThumbnail, type MaskThumbnail } from '../editor/maskThumbnail';
-import { clampZoom, panBy, steppedZoom, zoomAbout, type Point, type Size, type View } from '../editor/view';
+import { clampZoom, normalizeRotation, panBy, rotateVector, steppedZoom, zoomAbout, type Point, type Size, type View } from '../editor/view';
 import { EditorTab } from './editorTab.svelte';
 import type { LibraryStore } from './library.svelte';
 import type { ModuleStore } from './modules.svelte';
@@ -1194,6 +1194,22 @@ export class EditorStore {
     this.#history('redo');
   }
 
+  /** Undoes or redoes until `step` steps are applied (history panel). No call if `step` is the current cursor. */
+  historyJump(step: number): void {
+    const tab = this.#activeTab;
+    if (tab === null) {
+      return;
+    }
+    tab.endGesture();
+    this.#enqueue(tab, async (info) => {
+      // Test the cursor after the queued edits: they can change it.
+      if (info.history.cursor === step) {
+        return;
+      }
+      tab.apply(await this.#api.historyJump(info.documentId, step));
+    });
+  }
+
   #history(kind: 'undo' | 'redo'): void {
     const tab = this.#activeTab;
     if (tab === null) {
@@ -1265,16 +1281,41 @@ export class EditorStore {
     this.#changeView((view) => zoomAbout(view, steppedZoom(view.zoom, direction), at));
   }
 
-  /** Zooms by a factor about a screen point (wheel and pinch). */
+  /** Zooms by a factor about a content-space point (wheel and pinch; the view unrotates the pointer first). */
   zoomBy(factor: number, anchor: Point): void {
     if (Number.isFinite(factor)) {
       this.#changeView((view) => zoomAbout(view, view.zoom * factor, anchor));
     }
   }
 
-  /** Moves the content by a screen distance. */
+  /** Moves the content by a screen distance. With a view rotation, the content still follows the pointer. */
   pan(dx: number, dy: number): void {
-    this.#changeView((view) => panBy(view, dx, dy));
+    this.#changeView((view) => {
+      const d = rotateVector({ x: dx, y: dy }, -view.rotation);
+      return panBy(view, d.x, d.y);
+    });
+  }
+
+  /** The view rotation of the active tab in degrees (0 without a view). */
+  get rotation(): number {
+    return this.view?.rotation ?? 0;
+  }
+
+  /**
+   * Sets the view rotation of the active tab (degrees, normalized to
+   * (-180, 180]). It is view state: no undo step, and "fit" stays on.
+   */
+  setRotation(degrees: number): void {
+    const tab = this.#activeTab;
+    const view = tab?.view ?? null;
+    if (tab !== null && view !== null) {
+      tab.setView({ ...view, rotation: normalizeRotation(degrees) }, this.viewport);
+    }
+  }
+
+  /** Sets the view rotation of the active tab to 0. */
+  resetRotation(): void {
+    this.setRotation(0);
   }
 
   /** Changes the view of the active tab by the user; the view stops following "fit". */

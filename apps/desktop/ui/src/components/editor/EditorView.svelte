@@ -11,8 +11,18 @@
     flight, latest wins). Until the new frame arrives, the old frame shows
     scaled and moved to the new view.
   - Wheel: scroll. With the primary modifier (and for pinch): zoom about the
-    pointer. Middle button, or the space key and the left button: pan.
-  - Tools (`editor.tool`): hand (the left button does nothing), rectangle and
+    pointer. Middle button, the space key and the left button, or the hand
+    tool and the left button: pan.
+  - View rotation (ADR 0026): the checkerboard, the frame, and all the
+    canvas-space overlays are in one container (`.rotator`) with a CSS
+    rotation about the viewport center. The view math works in the space
+    before the rotation ("content space"); `local()` turns each pointer
+    point back by the rotation. Screen-space items (zoom readout, mask
+    badge, rotation readout, toolbar) are outside the container.
+  - Rotate view tool: a drag turns the view about the viewport center;
+    Shift snaps to 15° steps; Escape or a cancelled pointer gives back the
+    start angle.
+  - Tools (`editor.tool`): hand (drag to pan), rotate view, rectangle and
     ellipse marquee (drag), freehand lasso (drag; release closes), polygon
     lasso (click points). The modifier keys at
     the first pointer-down set the selection mode. The outline of the
@@ -46,12 +56,14 @@
     polylinePath,
     repeatsLastPoint,
   } from '../../lib/editor/selection';
+  import { beginRotateDrag, cancelRotateDrag, dragRotation, rotationLabel, type RotateDrag } from '../../lib/editor/rotate';
   import {
     canvasToScreen,
     frameBox,
     hasArea,
     renderArea,
     screenToCanvas,
+    unrotatePoint,
     wheelZoomFactor,
     type Point,
     type View,
@@ -205,6 +217,8 @@
       height: info.height * view.zoom,
     };
   });
+  /** The view rotation of the active tab, in degrees. */
+  const rotation = $derived(editor.rotation);
   const frameStyle = $derived.by(() => {
     const view = editor.view;
     return shown === null || view === null ? null : frameBox(shown, view);
@@ -216,11 +230,12 @@
     // A non-passive listener: the view stops the page from zooming or scrolling.
     const handler = (event: WheelEvent): void => {
       event.preventDefault();
-      const rect = node.getBoundingClientRect();
       if (event.ctrlKey || event.metaKey) {
-        editor.zoomBy(wheelZoomFactor(event.deltaY, event.deltaMode), { x: event.clientX - rect.left, y: event.clientY - rect.top });
+        // The canvas point under the pointer stays there: the anchor is in content space.
+        editor.zoomBy(wheelZoomFactor(event.deltaY, event.deltaMode), local(event, node));
       } else {
         const line = event.deltaMode === 1 ? 16 : 1;
+        // A screen distance: the store turns it by the view rotation.
         editor.pan(-event.deltaX * line, -event.deltaY * line);
       }
     };
@@ -230,10 +245,37 @@
 
   let last = { x: 0, y: 0 };
 
-  /** The pointer position in viewport pixels. */
-  function local(event: PointerEvent | MouseEvent, node: HTMLElement): Point {
+  /** The pointer position in viewport pixels, on the screen (before the view rotation). */
+  function screenPoint(event: PointerEvent | MouseEvent, node: HTMLElement): Point {
     const rect = node.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  /**
+   * The pointer position in content space: the screen point turned back by
+   * the view rotation about the viewport center. All the canvas math and
+   * the overlays in `.rotator` use this space. At rotation 0 it is the screen point.
+   */
+  function local(event: PointerEvent | MouseEvent, node: HTMLElement): Point {
+    return unrotatePoint(screenPoint(event, node), editor.viewport, editor.rotation);
+  }
+
+  // ---- Rotate view tool ----
+
+  /** The rotate drag that runs, or null. */
+  let rotating = $state.raw<{ readonly drag: RotateDrag; readonly pointerId: number; readonly node: HTMLElement } | null>(null);
+
+  /** Ends the rotate drag. `restore`: go back to the angle at the start (Escape, cancel). */
+  function endRotate(restore: boolean): void {
+    const current = rotating;
+    if (current === null) {
+      return;
+    }
+    rotating = null;
+    current.node.releasePointerCapture?.(current.pointerId);
+    if (restore) {
+      editor.setRotation(cancelRotateDrag(current.drag));
+    }
   }
 
   // ---- Selection gestures ----
@@ -275,6 +317,9 @@
       lasso = null;
       freehand = null;
       cancelStroke();
+      // Stop a rotate drag and keep the angle: after a tab switch the store
+      // works on the new tab, so a restore would change the wrong view.
+      endRotate(false);
     });
   });
 
@@ -478,7 +523,10 @@
   }
 
   function onpointerdown(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
-    if (event.button === 1 || (event.button === 0 && spaceDown)) {
+    if (rotating !== null) {
+      return;
+    }
+    if (event.button === 1 || (event.button === 0 && (spaceDown || (editor.tool === 'hand' && editor.info !== null)))) {
       event.preventDefault();
       panning = true;
       last = { x: event.clientX, y: event.clientY };
@@ -491,6 +539,16 @@
       return;
     }
     event.preventDefault();
+    if (tool === 'rotate') {
+      // The angle is around the viewport center on the screen, so this uses the screen point.
+      rotating = {
+        drag: beginRotateDrag(view.rotation, screenPoint(event, event.currentTarget), editor.viewport),
+        pointerId: event.pointerId,
+        node: event.currentTarget,
+      };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      return;
+    }
     if (tool === 'eyedropper' || (tool === 'brush' && event.altKey)) {
       // Alt+click with the brush samples to the foreground (all layers); it paints nothing.
       sampleAtPointer(event, event.currentTarget, view, tool === 'eyedropper' && event.altKey);
@@ -526,7 +584,11 @@
 
   function onpointermove(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
     cursor = local(event, event.currentTarget);
-    if (stroke !== null) {
+    if (rotating !== null) {
+      if (event.pointerId === rotating.pointerId) {
+        editor.setRotation(dragRotation(rotating.drag, screenPoint(event, event.currentTarget), editor.viewport, event.shiftKey));
+      }
+    } else if (stroke !== null) {
       const view = editor.view;
       if (view !== null && event.pointerId === stroke.pointerId) {
         stroke.client.addPoints(strokePoints(event, event.currentTarget, view));
@@ -547,7 +609,11 @@
   }
 
   function onpointerup(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
-    if (stroke !== null) {
+    if (rotating !== null) {
+      if (event.pointerId === rotating.pointerId) {
+        endRotate(event.type === 'pointercancel');
+      }
+    } else if (stroke !== null) {
       finishStroke(event);
     } else if (panning) {
       panning = false;
@@ -575,6 +641,11 @@
   }
 
   function onwindowkey(event: KeyboardEvent): void {
+    if (event.type === 'keydown' && event.key === 'Escape' && rotating !== null) {
+      event.preventDefault();
+      endRotate(true);
+      return;
+    }
     if (event.type === 'keydown' && event.key === 'Escape' && stroke !== null) {
       event.preventDefault();
       cancelStroke();
@@ -651,8 +722,8 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="viewport"
-      class:grab={spaceDown && !panning}
-      class:grabbing={panning}
+      class:grab={(spaceDown || editor.tool === 'hand' || editor.tool === 'rotate') && !panning && rotating === null}
+      class:grabbing={panning || rotating !== null}
       class:crosshair={(isSelectionTool(editor.tool) || editor.tool === 'eyedropper') && !spaceDown && !panning}
       class:no-cursor={cursorShape !== null}
       onpointerleave={() => (cursor = null)}
@@ -667,42 +738,45 @@
       {ondblclick}
       data-testid="editor-viewport"
     >
-      {#if docBox !== null}
-        <div
-          class="checker"
-          style:left="{docBox.left}px"
-          style:top="{docBox.top}px"
-          style:width="{docBox.width}px"
-          style:height="{docBox.height}px"
-        ></div>
-      {/if}
-      <canvas
-        bind:this={canvas}
-        class="frame"
-        hidden={frameStyle === null}
-        style:left="{frameStyle?.left ?? 0}px"
-        style:top="{frameStyle?.top ?? 0}px"
-        style:width="{frameStyle?.width ?? 0}px"
-        style:height="{frameStyle?.height ?? 0}px"
-        aria-label="Document canvas"
-      ></canvas>
-      <SelectionOverlay {editor} />
-      {#if previewPath !== ''}
-        <svg class="preview" aria-hidden="true" data-testid="selection-preview">
-          <path class="under" d={previewPath} />
-          <path class="dashes" d={previewPath} />
-        </svg>
-      {/if}
-      {#if cursorShape !== null}
-        <svg class="preview" aria-hidden="true" data-testid="brush-cursor">
-          <circle class="under" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
-          <circle class="dashes solid" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
-          {#if cursorShape.crosshair}
-            <path class="under" d="M {cursorShape.x - 6} {cursorShape.y} H {cursorShape.x + 6} M {cursorShape.x} {cursorShape.y - 6} V {cursorShape.y + 6}" />
-            <path class="dashes solid" d="M {cursorShape.x - 5} {cursorShape.y} H {cursorShape.x + 5} M {cursorShape.x} {cursorShape.y - 5} V {cursorShape.y + 5}" />
-          {/if}
-        </svg>
-      {/if}
+      <!-- Canvas-space layers: one CSS rotation about the viewport center (ADR 0026). -->
+      <div class="rotator" style:transform={rotation === 0 ? null : `rotate(${rotation}deg)`} data-testid="editor-rotator">
+        {#if docBox !== null}
+          <div
+            class="checker"
+            style:left="{docBox.left}px"
+            style:top="{docBox.top}px"
+            style:width="{docBox.width}px"
+            style:height="{docBox.height}px"
+          ></div>
+        {/if}
+        <canvas
+          bind:this={canvas}
+          class="frame"
+          hidden={frameStyle === null}
+          style:left="{frameStyle?.left ?? 0}px"
+          style:top="{frameStyle?.top ?? 0}px"
+          style:width="{frameStyle?.width ?? 0}px"
+          style:height="{frameStyle?.height ?? 0}px"
+          aria-label="Document canvas"
+        ></canvas>
+        <SelectionOverlay {editor} />
+        {#if previewPath !== ''}
+          <svg class="preview" aria-hidden="true" data-testid="selection-preview">
+            <path class="under" d={previewPath} />
+            <path class="dashes" d={previewPath} />
+          </svg>
+        {/if}
+        {#if cursorShape !== null}
+          <svg class="preview" aria-hidden="true" data-testid="brush-cursor">
+            <circle class="under" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
+            <circle class="dashes solid" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
+            {#if cursorShape.crosshair}
+              <path class="under" d="M {cursorShape.x - 6} {cursorShape.y} H {cursorShape.x + 6} M {cursorShape.x} {cursorShape.y - 6} V {cursorShape.y + 6}" />
+              <path class="dashes solid" d="M {cursorShape.x - 5} {cursorShape.y} H {cursorShape.x + 5} M {cursorShape.x} {cursorShape.y - 5} V {cursorShape.y + 5}" />
+            {/if}
+          </svg>
+        {/if}
+      </div>
       {#if editor.showMask}
         <div class="mask-badge" data-testid="mask-badge">Mask: {editor.selected?.name ?? ''}</div>
       {/if}
@@ -710,6 +784,12 @@
         <div class="zoom" aria-live="off">{editor.zoomPercent} %</div>
       {/if}
     </div>
+    {#if editor.status === 'ready' && rotation !== 0}
+      <div class="rotation" role="group" aria-label="View rotation" data-testid="rotation-readout">
+        <span>{rotationLabel(rotation)}</span>
+        <button type="button" title="Set the view rotation to 0°" onclick={() => editor.resetRotation()}>Reset</button>
+      </div>
+    {/if}
     {#if editor.status === 'ready'}
       <SelectionToolbar {editor} />
     {/if}
@@ -772,8 +852,28 @@
     inset: 0;
     width: 100%;
     height: 100%;
-    overflow: hidden;
+    /* The rotator can turn this layer: the viewport clips it, not the layer box. */
+    overflow: visible;
     pointer-events: none;
+  }
+  /* Same box as the viewport; the rotation is about its center. */
+  .rotator {
+    position: absolute;
+    inset: 0;
+    transform-origin: 50% 50%;
+  }
+  .rotation {
+    position: absolute;
+    right: var(--space-3);
+    bottom: calc(var(--space-3) * 2 + 1.75em);
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-panel);
+    color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
   }
   .preview path {
     fill: none;

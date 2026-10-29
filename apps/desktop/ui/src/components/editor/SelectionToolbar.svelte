@@ -1,7 +1,7 @@
 <!--
   The tool strip and the selection options of the Editor canvas.
 
-  - Tools: Hand (H), Rectangle and Ellipse marquee (M cycles), Polygon lasso (L),
+  - Tools: Hand (H), Rotate view (R), Rectangle and Ellipse marquee (M cycles), Polygon lasso (L),
     Brush (B), Eraser (E). The paint tools show their options in `BrushOptions`.
     They are disabled, with the reason as the tooltip, when the selected layer
     cannot take paint.
@@ -32,6 +32,7 @@
 
   const TOOLS: { id: EditorTool; label: string; title: string }[] = [
     { id: 'hand', label: 'Hand', title: 'Hand tool (H). Drag to move the view.' },
+    { id: 'rotate', label: 'Rotate', title: 'Rotate view (R). Drag to turn the view. Shift snaps to 15° steps. Escape cancels.' },
     { id: 'rectSelect', label: 'Rectangle', title: 'Rectangle marquee (M). Shift adds, Alt subtracts, Shift+Alt intersects.' },
     { id: 'ellipseSelect', label: 'Ellipse', title: 'Ellipse marquee (M). Shift adds, Alt subtracts, Shift+Alt intersects.' },
     { id: 'lasso', label: 'Freehand', title: 'Freehand lasso (L). Drag to draw the outline. Release to close. Shift adds, Alt subtracts.' },

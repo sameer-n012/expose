@@ -22,6 +22,7 @@ const info: DocumentInfo = {
   layers: [{ id: 1, name: 'Photo', kind: 'pixel', visible: true, opacity: 1, fillOpacity: 1, blendMode: 'normal', hasMask: false, maskEnabled: false, maskVersion: null, adjustment: null, isolated: null, children: null, locks: { transparency: false, pixels: false, position: false, all: false } }],
   canUndo: false,
   canRedo: false,
+  history: { steps: [], cursor: 0 },
   revision: 0,
   dirty: false,
   savedPhotoId: null,

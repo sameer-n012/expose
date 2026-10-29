@@ -35,7 +35,7 @@ const layers: LayerInfo[] = [
 ];
 
 function doc(revision = 0): DocumentInfo {
-  return { documentId: 1, name: 'doc', width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, revision, dirty: revision > 0, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false };
+  return { documentId: 1, name: 'doc', width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, history: { steps: [], cursor: 0 }, revision, dirty: revision > 0, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false };
 }
 
 async function makeStore() {
@@ -52,6 +52,7 @@ async function makeStore() {
     }),
     undo: vi.fn(async () => doc(++revision)),
     redo: vi.fn(async () => doc(++revision)),
+    historyJump: vi.fn(async () => doc(++revision)),
     save: vi.fn(),
     close: vi.fn(async () => undefined),
   } as unknown as EditorApi & { edit: ReturnType<typeof vi.fn> };
