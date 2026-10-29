@@ -39,6 +39,7 @@ import {
   type LocksDto,
   type MaskFillId,
   type NewDocumentSpec,
+  type SampleSource,
   type SaveResult,
   type SelectionModeId,
   type SelectionOutline,
@@ -53,6 +54,7 @@ import {
   normalizeBrush,
   steppedHardness,
   steppedSize,
+  strokeBrush,
   strokeTarget,
   type BrushSettings,
   type PaintTarget,
@@ -133,6 +135,10 @@ export class EditorStore {
   foreground = $state(DEFAULT_FOREGROUND);
   /** The background color, "#rrggbb". */
   background = $state(DEFAULT_BACKGROUND);
+  /** The sample size of the eyedropper, in pixels (a square). */
+  sampleSize = $state<1 | 3 | 5>(1);
+  /** What the eyedropper reads: all layers (the composite) or the selected layer. */
+  sampleSource = $state<SampleSource>('composite');
 
   readonly #library: EditorStoreOptions['library'];
   readonly #modules: EditorStoreOptions['modules'];
@@ -617,7 +623,52 @@ export class EditorStore {
       return null;
     }
     const target = strokeTarget(tool, this.paintTarget, this.foreground, this.background);
-    return target === null ? null : { layerId: layer.id, target, brush: { ...this.brushOf(tool) } };
+    return target === null ? null : { layerId: layer.id, target, brush: strokeBrush(tool, this.paintTarget, this.brushOf(tool)) };
+  }
+
+  /**
+   * Samples the color at a canvas pixel and sets the foreground color (or the
+   * background color, with `toBackground`). `source` and `size` default to the
+   * eyedropper options; the Alt+click of the brush uses all layers.
+   * Errors and empty pixels show a toast. Returns true if a color was set.
+   * The colors are shared by all tabs, so a tab switch while the call runs
+   * does not cancel the result.
+   */
+  async sampleAt(
+    x: number,
+    y: number,
+    options: { toBackground?: boolean; source?: SampleSource } = {},
+  ): Promise<boolean> {
+    const info = this.info;
+    if (info === null) {
+      return false;
+    }
+    const source = options.source ?? this.sampleSource;
+    let layerId: number | null = null;
+    if (source === 'layer') {
+      const layer = this.selected;
+      if (layer === null || layer.kind !== 'pixel') {
+        this.#toasts.info('Select a pixel layer to sample the current layer.');
+        return false;
+      }
+      layerId = layer.id;
+    }
+    try {
+      const sampled = await this.#api.sampleColor(info.documentId, Math.floor(x), Math.floor(y), this.sampleSize, source, layerId);
+      if (sampled.color === null) {
+        this.#toasts.info('No color here: the pixels are transparent.');
+        return false;
+      }
+      if (options.toBackground === true) {
+        this.background = sampled.color;
+      } else {
+        this.foreground = sampled.color;
+      }
+      return true;
+    } catch (error) {
+      this.#toasts.error('Sample the color failed.', error);
+      return false;
+    }
   }
 
   /** The backend calls of this store. A stroke uses the same calls. */
@@ -656,6 +707,18 @@ export class EditorStore {
   deselect(): void {
     if (this.hasSelection) {
       this.edit({ type: 'deselect' });
+    }
+  }
+
+  /** True if Reselect can restore the last removed selection. */
+  get canReselect(): boolean {
+    return this.info?.canReselect ?? false;
+  }
+
+  /** Restores the selection that the last Deselect removed. The shell refuses this when it cannot, so the store does nothing then. */
+  reselect(): void {
+    if (this.canReselect) {
+      this.edit({ type: 'reselect' });
     }
   }
 

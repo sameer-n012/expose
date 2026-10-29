@@ -8,7 +8,7 @@ import type { SelectionModeId, SelectionShapeDto } from './api';
 import { screenToCanvas, type Point, type View } from './view';
 
 /** The tools of the Editor canvas. */
-export type EditorTool = 'hand' | 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso' | 'brush' | 'eraser';
+export type EditorTool = 'hand' | 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso' | 'brush' | 'eraser' | 'eyedropper';
 
 /** The two lasso tools: freehand and polygon. */
 export type LassoTool = 'lasso' | 'polygonLasso';

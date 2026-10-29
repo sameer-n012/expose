@@ -14,6 +14,7 @@
   import type { PaintTool } from '../../lib/editor/brush';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
   import BrushOptions from './BrushOptions.svelte';
+  import EyedropperOptions from './EyedropperOptions.svelte';
 
   interface Props {
     editor: EditorStore;
@@ -35,6 +36,7 @@
     { id: 'ellipseSelect', label: 'Ellipse', title: 'Ellipse marquee (M). Shift adds, Alt subtracts, Shift+Alt intersects.' },
     { id: 'lasso', label: 'Freehand', title: 'Freehand lasso (L). Drag to draw the outline. Release to close. Shift adds, Alt subtracts.' },
     { id: 'polygonLasso', label: 'Polygon', title: 'Polygon lasso (L). Click for points. Click the first point, double-click, or press Enter to close.' },
+    { id: 'eyedropper', label: 'Eyedropper', title: 'Eyedropper (I). Click to pick the foreground color. Alt+click picks the background color.' },
   ];
 
   const selecting = $derived(isSelectionTool(editor.tool));
@@ -67,6 +69,10 @@
     <BrushOptions {editor} tool={paintTool} />
   {/if}
 
+  {#if editor.tool === 'eyedropper'}
+    <EyedropperOptions {editor} />
+  {/if}
+
   {#if selecting}
     <div class="group">
       <label>
@@ -94,6 +100,7 @@
   <div class="group" role="group" aria-label="Select">
     <button type="button" title="Select all (Mod+A)" onclick={() => editor.selectAll()}>Select All</button>
     <button type="button" title="Deselect (Mod+D)" disabled={!editor.hasSelection} onclick={() => editor.deselect()}>Deselect</button>
+    <button type="button" title="Reselect (Mod+Shift+D)" disabled={!editor.canReselect} onclick={() => editor.reselect()}>Reselect</button>
     <button type="button" title="Invert the selection (Mod+Shift+I)" disabled={!editor.hasSelection} onclick={() => editor.invertSelection()}>
       Invert
     </button>

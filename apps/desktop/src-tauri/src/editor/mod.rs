@@ -30,6 +30,7 @@
 pub mod dto;
 pub mod engine;
 pub mod outline;
+pub mod sample;
 pub mod save;
 pub mod session;
 
@@ -65,6 +66,9 @@ pub enum EditorEngineError {
     /// The sample step of a selection outline is 0.
     #[error("the outline step must be 1 or more")]
     InvalidStep,
+    /// The input of a color sample is not valid.
+    #[error("invalid color sample: {0}")]
+    InvalidSample(&'static str),
     /// The layer has a mask already. The edit does not replace it.
     #[error("the layer {0} has a mask already")]
     MaskExists(u64),
@@ -150,6 +154,7 @@ impl From<EditorEngineError> for CommandError {
             }
             EditorEngineError::InvalidViewSize { .. }
             | EditorEngineError::InvalidStep
+            | EditorEngineError::InvalidSample(_)
             | EditorEngineError::MaskExists(_)
             | EditorEngineError::StrokeNotActive(_)
             | EditorEngineError::InvalidStrokePoints(_)
