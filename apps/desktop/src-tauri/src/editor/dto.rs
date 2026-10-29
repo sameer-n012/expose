@@ -581,6 +581,19 @@ pub struct DocumentInfo {
     /// photo (open), the trimmed name of the spec (new document), or the
     /// file stem of the layered file of the last save.
     pub name: String,
+    /// The undo history, for the history panel.
+    pub history: HistoryInfo,
+}
+
+/// The undo history of a document, for the history panel.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryInfo {
+    /// The step names, oldest first (at most `HISTORY_STEPS`).
+    pub steps: Vec<String>,
+    /// The number of applied steps, `0..=steps.len()`. Steps at
+    /// `cursor..` can be redone.
+    pub cursor: u32,
 }
 
 impl DocumentInfo {
@@ -603,6 +616,7 @@ impl DocumentInfo {
             selection_version: document.selection_version(),
             can_reselect: document.can_reselect(),
             name: String::new(),
+            history: HistoryInfo::default(),
         }
     }
 }
@@ -1183,6 +1197,8 @@ mod tests {
         assert_eq!(info.revision, doc.revision());
         assert!(!info.has_selection);
         assert_eq!(info.selection_version, doc.selection_version());
+        let json = serde_json::to_value(&info.history).unwrap();
+        assert_eq!(json, serde_json::json!({ "steps": [], "cursor": 0 }));
         assert_eq!(info.layers.len(), 2);
         assert_eq!(info.layers[0].id, background.get());
         assert_eq!(info.layers[0].kind, LayerKindId::Pixel);
