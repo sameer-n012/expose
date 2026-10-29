@@ -34,7 +34,9 @@ After the selections UI (ADR 0021) and the brushes (ADR 0022), four parts of P1 
 ### Eyedropper (shell and UI)
 
 - The shell samples on the CPU with `composite_straight(document, region)` for a 1×1, 3×3, or 5×5 region (or reads the selected layer), averages, and returns gamma-encoded sRGB. The GPU view cache is not used, so the canvas frame stays cached.
-- UI: tool `I`; Alt+click with the brush samples to the foreground color.
+- Command: `editor_sample_color(documentId, x, y, size, source, layerId)` with `source` = `composite` or `layer` (a pixel layer; pixels outside the layer count as transparent). The mean is alpha-weighted. Result: `{ color: "#rrggbb" | null, alpha }`; `color` is null when the mean alpha is 0. Bad input gives `EditorEngineError::InvalidSample` (`invalidInput`). The sample does not commit an active stroke (PR #81).
+- UI: tool `I` with sample size and source options; click sets the foreground color, Alt+click the background color. Alt+pointer-down with the brush samples all layers to the foreground color and starts no stroke (PR #82).
+- UI reselect: `Mod+Shift+D` and a toolbar entry, disabled when `canReselect` is false. The brush Mode select lists the layer blend modes without Dissolve; the eraser and the mask target always send Normal.
 
 ### Color picker
 

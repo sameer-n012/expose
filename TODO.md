@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- **editor-selections-followups + editor-brushes-followups** (ADR 0024, 2026-10-28) — round 1: `feat/editor-reselect-brush-blend` (crate `Document::reselect`/`can_reselect`, `BrushSettings.blend_mode`; O) and `feat/editor-freehand-lasso` (UI `lasso` tool; S). Round 2 after the merge: shell (reselect edit, `canReselect`, brush `blendMode`, `editor_sample_color`) + UI (reselect `Mod+Shift+D`, blend mode select, eyedropper `I`).
+- (none — all agent branches are merged; 2026-10-28)
 
 ## Next (suggested order)
 
@@ -24,8 +24,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
    - Follow-ups: `expose-gpu` sub-region texture writes and kernel runs on a sub-rectangle (removes the full-texture copies in partial updates, the 2 × 128 MiB spare textures at 4096², and the full pyramid rebuild; frame after a batch ~12 ms → ~2–3 ms, O); partial updates for `render_mask_view` while the mask is shown; undo of a long diagonal stroke gives one large rect (more than half the canvas → full view composite); CPU dab speed-ups (falloff lookup table, no square root in the hard core).
 5. [ ] **editor-tabs-check** (operator) — check in the real webview: open two photos (`Mod+E` on each) → two tabs; `Mod+E` on a photo that has a tab activates it; New document (`Mod+N`) adds a tab; tab names (photo stem, new-document name, saved file stem after Save As); dirty marker; close button, middle-click, `Mod+W` (check that the macOS app menu does not close the window first, ADR 0023 "Open"); `Ctrl+Tab` / `Ctrl+Shift+Tab`; a dirty tab asks before it closes; window close with two dirty tabs asks for each; after the last tab closes, the library photo does not open again until you leave the Editor and come back; zoom/fit and layer selection stay per tab. After the check, mark "Multiple open documents (tabs)" in `FEATURES.md`.
    - Follow-ups: key the compositor cache by document and layer (a tab switch can upload all layers again; O); per-tab tool or layer-list scroll position (optional); shell tests for `name` through `editor_open` / `editor_new` (S); the AppShell editor DOM test prints "The window close guard is not available" (happy-dom has no Tauri window).
-6. [ ] **editor-selections-followups** — freehand lasso (P1 lasso item); reselect (restore the last selection after deselect; P1 item "select all, deselect, reselect, invert").
-7. [ ] **editor-brushes-followups** — brush blend mode (P1 brush item); eyedropper (P1 colors item). The color picker is the native color input (system color panel); the operator check decides if it is sufficient (ADR 0024).
+6. [ ] **editor-tool-followups-check** (operator) — check in the real webview: freehand lasso (`L`, `L` again switches to the polygon lasso; Shift/Alt modes; a click deselects; Escape cancels); Reselect (`Mod+Shift+D` and the toolbar entry, after `Mod+D`; disabled when nothing is stored); brush Mode select (multiply/screen/luminosity on a photo layer; Normal only for the eraser and the mask target); eyedropper (`I`; sample size 1/3/5; all layers / current layer; click = foreground, Alt+click = background; transparent pixels give a toast); Alt+click with the brush picks the foreground color; the native color panel for the swatches. After this check and items 3 and 4, mark in `FEATURES.md`: "Lasso, polygonal lasso", "Select all, deselect, reselect, invert", "Brush tool", and (if the native color panel is sufficient) "Foreground/background colors, color picker, eyedropper" (ADR 0024).
+   - Follow-ups: a shell stroke test with a non-Normal brush blend mode (only the DTO conversion is tested; S); the `pointercancel` path of the freehand lasso has no test.
 8. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
 
 ### Follow-ups from editor-gpu (ADR 0012)
@@ -59,6 +59,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-selections-followups + editor-brushes-followups** (PRs #79–#82, ADR 0024) — UI freehand lasso (`lasso`, `L` cycle); crate `Document::reselect`/`can_reselect`, `BrushSettings.blend_mode` (+ `EditorError::InvalidBrush`); shell `reselect` edit, `DocumentInfo.canReselect`, brush `blendMode`, `editor_sample_color` (`editor/sample.rs`, `EditorEngineError::InvalidSample`); UI Reselect (`Mod+Shift+D`), brush Mode select, eyedropper tool (`I`, `EyedropperOptions.svelte`), brush Alt+click samples. Waits for the operator check (item 6 in "Next").
 
 - [x] **editor-tabs** (PRs #76, #77, ADR 0023) — shell `DocumentInfo.name` (photo stem, new-document name, saved file stem; fallback "Untitled"); UI `EditorTab` (`lib/stores/editorTab.svelte.ts`) per-document state with `EditorStore` forwarding to the active tab; `openPhoto`/`newDocument` open tabs, `closeTab`, `nextTab`, `confirmCloseAll` window guard; auto-open stops after the last tab closes and while the New document dialog is open; `DocumentTabs.svelte`; `Mod+W`, `Ctrl+Tab`, `Ctrl+Shift+Tab`. Waits for the operator check (item 5 in "Next").
 
