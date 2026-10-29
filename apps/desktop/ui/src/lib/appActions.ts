@@ -11,6 +11,9 @@ export const APP_ACTION = {
   libraryGrid: 'module.library.grid',
   develop: 'module.develop',
   editor: 'module.editor',
+  libraryGridAnywhere: 'module.library.gridAnywhere',
+  developAnywhere: 'module.develop.anywhere',
+  editorAnywhere: 'module.editor.anywhere',
   toggleSidePanels: 'panels.toggleSides',
   toggleAllPanels: 'panels.toggleAll',
   exportPhotos: 'export.photos',
@@ -57,6 +60,28 @@ export function appActions({ modules, layout }: AppActionTargets): ShortcutActio
       label: 'Editor',
       scope: 'global',
       defaultBinding: 'E',
+      run: () => modules.switchTo('editor'),
+    },
+    // The Editor uses G, D, and E for tools: these bindings work in every module.
+    {
+      id: APP_ACTION.libraryGridAnywhere,
+      label: 'Library: grid view (any module)',
+      scope: 'global',
+      defaultBinding: 'Mod+Alt+1',
+      run: () => modules.showLibraryGrid(),
+    },
+    {
+      id: APP_ACTION.developAnywhere,
+      label: 'Develop (any module)',
+      scope: 'global',
+      defaultBinding: 'Mod+Alt+2',
+      run: () => modules.switchTo('develop'),
+    },
+    {
+      id: APP_ACTION.editorAnywhere,
+      label: 'Editor (any module)',
+      scope: 'global',
+      defaultBinding: 'Mod+Alt+3',
       run: () => modules.switchTo('editor'),
     },
     {

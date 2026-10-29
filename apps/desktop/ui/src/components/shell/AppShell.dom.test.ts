@@ -27,6 +27,11 @@ async function press(key: string, init: KeyboardEventInit = {}, target: Window |
   await fireEvent.keyDown(target, { key, ...init });
 }
 
+/** Cmd+Option+digit. On macOS, Option changes `key`, so the matcher reads `code`. */
+async function pressChord(code: 'Digit1' | 'Digit2' | 'Digit3'): Promise<void> {
+  await fireEvent.keyDown(window, { key: { Digit1: '¡', Digit2: '™', Digit3: '£' }[code], code, metaKey: true, altKey: true });
+}
+
 beforeEach(() => {
   vi.mocked(invoke).mockImplementation(new FakeCatalog(5).invoke);
   restoreSize = mockElementSize(1000, 600);
@@ -62,11 +67,21 @@ describe('module switching', () => {
     // In the Editor, G is the paint bucket: it does not leave the Editor.
     await press('g');
     expect(app.modules.active).toBe('editor');
-    await press('d', {}, window);
-    await fireEvent.click(screen.getByRole('button', { name: 'Develop' }));
-    await press('g');
+    await pressChord('Digit1');
     expect(moduleView('library')?.hidden).toBe(false);
     expect(moduleView('editor')?.hidden).toBe(true);
+  });
+
+  it('Mod+Alt+1, 2, and 3 switch modules from any module', async () => {
+    await renderShell();
+    await pressChord('Digit3');
+    expect(app.modules.active).toBe('editor');
+    await pressChord('Digit2');
+    expect(app.modules.active).toBe('develop');
+    await pressChord('Digit3');
+    await pressChord('Digit1');
+    expect(app.modules.active).toBe('library');
+    expect(screen.getByTestId('library-grid')).toBeTruthy();
   });
 
   it('switches modules with the top bar buttons', async () => {
@@ -110,9 +125,8 @@ describe('module switching', () => {
     await fireEvent.dblClick(cell);
     expect(screen.getByTestId('library-loupe')).toBeTruthy();
     await press('e');
-    // In the Editor, G is the paint bucket: leave through the Develop button first.
-    await fireEvent.click(screen.getByRole('button', { name: 'Develop' }));
-    await press('g');
+    // In the Editor, G is the paint bucket: Mod+Alt+1 opens the grid.
+    await pressChord('Digit1');
     expect(screen.getByTestId('library-grid')).toBeTruthy();
   });
 });
