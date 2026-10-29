@@ -31,6 +31,12 @@ The work goes in one round with three parallel agents: shell history, UI history
 - The frame request covers the bounding box of the rotated viewport (up to about 1.41 × the viewport side at 45°). The shell does not change.
 - Tool "Rotate view" (`R` in the editor scope): a drag rotates about the viewport center, Shift snaps to 15°. Escape while dragging cancels. A rotation readout with a reset button shows while the rotation is not 0. Fit (`Mod+0`) and 100 % (`Mod+1`) keep the rotation.
 
+### Notes from the implementation (PRs #87–#89)
+
+- Shell: a jump checks the step after it commits an active stroke, so the stroke counts as a step. Dirty state is revision-based, so the jump needs no extra save-state code (as for undo).
+- UI history: the store compares the step with the cursor inside the queued task (queued edits can move the cursor first).
+- UI rotate: `View extends ViewMapping { rotation }`; the pure mapping functions take `ViewMapping`. At 0° the container has no CSS transform. Overlay SVGs use `overflow: visible` (the viewport still clips). A left drag with the hand tool now pans (before, it did nothing). A tool change or tab switch during a rotate drag keeps the current angle.
+
 ## Reasons
 
 - The history data already exists in the crate; sending it with the info keeps the panel in step with every edit with no extra command.
