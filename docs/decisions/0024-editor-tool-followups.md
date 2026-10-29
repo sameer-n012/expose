@@ -15,7 +15,7 @@ After the selections UI (ADR 0021) and the brushes (ADR 0022), four parts of P1 
 
 ### Reselect (crate)
 
-- `Document` keeps the selection that the last `deselect` removed. It is session state: it is not in the history and not in the `.exdoc` file.
+- `Document` keeps the selection that the last `deselect` removed (compact form). It is session state: it is not in the history, not in the `.exdoc` file, and document equality ignores it. Only `deselect` changes it; undo and redo of a deselect do not (PR #80).
 - `Document::reselect()` sets that selection again (one undo step). With nothing stored, or a stored selection of a different canvas size, it gives `EditorError::NoSelection`. `Document::can_reselect()` lets the UI disable the command.
 - UI key: `Mod+Shift+D`.
 
@@ -24,10 +24,11 @@ After the selections UI (ADR 0021) and the brushes (ADR 0022), four parts of P1 
 - A new tool `lasso`. The shell already accepts polygons with 3 to 100 000 points, so a freehand path is sent as a polygon.
 - The UI adds a point only when it is at least one screen pixel from the last point, and stops adding points at 100 000.
 - `L` selects the last lasso kind; `L` again switches between the freehand lasso and the polygon lasso (same rule as `M` for the marquees).
+- A drag shorter than the click distance is a click (deselect in replace mode, as the marquee). A path with fewer than 3 points sends nothing (PR #79).
 
 ### Brush blend mode (crate)
 
-- `BrushSettings.blend_mode` (default `Normal`) applies to paint strokes only. Erase and mask strokes with another mode are an input error.
+- `BrushSettings.blend_mode` (default `Normal`) applies to paint strokes only. Erase and mask strokes with another mode, and `Dissolve` for any stroke, give the new error `EditorError::InvalidBrush` (shell: `invalidInput`). Dissolve is refused because the coverage rule of a stroke cannot give its per-pixel alpha pattern. The stroke reads the blend space of the document once, at `Stroke::begin` (PR #80).
 - Per pixel: `B = decode(mode.blend(encode(Cb), encode(Cs)))` in the blend space of the document, then `Cs' = (1 − αb)·Cs + αb·B`, then the paint rule of ADR 0022 with `Cs'`. Thus a blend mode has no effect on transparent pixels, as in layer compositing. `Normal` keeps the old result bit for bit.
 
 ### Eyedropper (shell and UI)
