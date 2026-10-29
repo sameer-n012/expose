@@ -1,8 +1,10 @@
 <!--
   Center view of the Editor module: the document canvas.
 
+  - A tab strip above the canvas shows the open documents (`DocumentTabs`).
+    The canvas shows the active tab.
   - The view opens the library photo when the module is active and no
-    document is open (`editor.openTarget`).
+    tab is open (`editor.openTarget`).
   - A checkerboard shows behind the document. The shell renders the visible
     part of the document at device pixel size, with straight alpha.
   - Each view change or document change requests a new frame (at most 2 in
@@ -50,6 +52,7 @@
   import { isEditableTarget } from '../../lib/shortcuts/editable';
   import { editorApi, type SelectionModeId } from '../../lib/editor/api';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
+  import DocumentTabs from './DocumentTabs.svelte';
   import FeatherDialog from './FeatherDialog.svelte';
   import NewDocumentDialog from './NewDocumentDialog.svelte';
   import SelectionOverlay from './SelectionOverlay.svelte';
@@ -143,7 +146,7 @@
     }
   });
 
-  // A new document: forget the old frame.
+  // A new document or a tab switch: forget the old frame.
   $effect(() => {
     const id = editor.info?.documentId ?? null;
     untrack(() => {
@@ -243,7 +246,7 @@
   let marquee = $state.raw<Marquee | null>(null);
   let lasso = $state.raw<Lasso | null>(null);
 
-  // A tool change or another document ends a gesture that runs.
+  // A tool change or another document (also a tab switch) ends a gesture that runs.
   $effect(() => {
     void editor.tool;
     void editor.info?.documentId;
@@ -510,84 +513,89 @@
 <svelte:window onkeydown={onwindowkey} onkeyup={onwindowkey} onblur={() => (spaceDown = false)} />
 
 <div class="editor">
-  {#if editor.status === 'empty'}
-    <div class="message" role="status">
-      <p>Select a photo in the Library to edit it.</p>
-      <button type="button" onclick={() => editor.requestNewDocument()}>New document…</button>
-    </div>
-  {:else if editor.status === 'loading'}
-    <p class="message" role="status">Opening the photo…</p>
-  {:else if editor.status === 'error'}
-    <p class="message error" role="alert" data-testid="editor-error">
-      The photo could not be opened in the Editor: {editor.loadError}
-    </p>
+  {#if editor.tabs.length > 0}
+    <DocumentTabs {editor} />
   {/if}
+  <div class="stage">
+    {#if editor.status === 'empty'}
+      <div class="message" role="status">
+        <p>Select a photo in the Library to edit it.</p>
+        <button type="button" onclick={() => editor.requestNewDocument()}>New document…</button>
+      </div>
+    {:else if editor.status === 'loading'}
+      <p class="message" role="status">Opening the document…</p>
+    {:else if editor.status === 'error'}
+      <p class="message error" role="alert" data-testid="editor-error">
+        The document could not be opened in the Editor: {editor.loadError}
+      </p>
+    {/if}
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="viewport"
-    class:grab={spaceDown && !panning}
-    class:grabbing={panning}
-    class:crosshair={isSelectionTool(editor.tool) && !spaceDown && !panning}
-    class:no-cursor={cursorShape !== null}
-    onpointerleave={() => (cursor = null)}
-    hidden={editor.status !== 'ready'}
-    bind:clientWidth={width}
-    bind:clientHeight={height}
-    use:wheelAction
-    {onpointerdown}
-    {onpointermove}
-    {onpointerup}
-    onpointercancel={onpointerup}
-    {ondblclick}
-    data-testid="editor-viewport"
-  >
-    {#if docBox !== null}
-      <div
-        class="checker"
-        style:left="{docBox.left}px"
-        style:top="{docBox.top}px"
-        style:width="{docBox.width}px"
-        style:height="{docBox.height}px"
-      ></div>
-    {/if}
-    <canvas
-      bind:this={canvas}
-      class="frame"
-      hidden={frameStyle === null}
-      style:left="{frameStyle?.left ?? 0}px"
-      style:top="{frameStyle?.top ?? 0}px"
-      style:width="{frameStyle?.width ?? 0}px"
-      style:height="{frameStyle?.height ?? 0}px"
-      aria-label="Document canvas"
-    ></canvas>
-    <SelectionOverlay {editor} />
-    {#if previewPath !== ''}
-      <svg class="preview" aria-hidden="true" data-testid="selection-preview">
-        <path class="under" d={previewPath} />
-        <path class="dashes" d={previewPath} />
-      </svg>
-    {/if}
-    {#if cursorShape !== null}
-      <svg class="preview" aria-hidden="true" data-testid="brush-cursor">
-        <circle class="under" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
-        <circle class="dashes solid" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
-        {#if cursorShape.crosshair}
-          <path class="under" d="M {cursorShape.x - 6} {cursorShape.y} H {cursorShape.x + 6} M {cursorShape.x} {cursorShape.y - 6} V {cursorShape.y + 6}" />
-          <path class="dashes solid" d="M {cursorShape.x - 5} {cursorShape.y} H {cursorShape.x + 5} M {cursorShape.x} {cursorShape.y - 5} V {cursorShape.y + 5}" />
-        {/if}
-      </svg>
-    {/if}
-    {#if editor.showMask}
-      <div class="mask-badge" data-testid="mask-badge">Mask: {editor.selected?.name ?? ''}</div>
-    {/if}
-    {#if editor.zoomPercent !== null}
-      <div class="zoom" aria-live="off">{editor.zoomPercent} %</div>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="viewport"
+      class:grab={spaceDown && !panning}
+      class:grabbing={panning}
+      class:crosshair={isSelectionTool(editor.tool) && !spaceDown && !panning}
+      class:no-cursor={cursorShape !== null}
+      onpointerleave={() => (cursor = null)}
+      hidden={editor.status !== 'ready'}
+      bind:clientWidth={width}
+      bind:clientHeight={height}
+      use:wheelAction
+      {onpointerdown}
+      {onpointermove}
+      {onpointerup}
+      onpointercancel={onpointerup}
+      {ondblclick}
+      data-testid="editor-viewport"
+    >
+      {#if docBox !== null}
+        <div
+          class="checker"
+          style:left="{docBox.left}px"
+          style:top="{docBox.top}px"
+          style:width="{docBox.width}px"
+          style:height="{docBox.height}px"
+        ></div>
+      {/if}
+      <canvas
+        bind:this={canvas}
+        class="frame"
+        hidden={frameStyle === null}
+        style:left="{frameStyle?.left ?? 0}px"
+        style:top="{frameStyle?.top ?? 0}px"
+        style:width="{frameStyle?.width ?? 0}px"
+        style:height="{frameStyle?.height ?? 0}px"
+        aria-label="Document canvas"
+      ></canvas>
+      <SelectionOverlay {editor} />
+      {#if previewPath !== ''}
+        <svg class="preview" aria-hidden="true" data-testid="selection-preview">
+          <path class="under" d={previewPath} />
+          <path class="dashes" d={previewPath} />
+        </svg>
+      {/if}
+      {#if cursorShape !== null}
+        <svg class="preview" aria-hidden="true" data-testid="brush-cursor">
+          <circle class="under" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
+          <circle class="dashes solid" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
+          {#if cursorShape.crosshair}
+            <path class="under" d="M {cursorShape.x - 6} {cursorShape.y} H {cursorShape.x + 6} M {cursorShape.x} {cursorShape.y - 6} V {cursorShape.y + 6}" />
+            <path class="dashes solid" d="M {cursorShape.x - 5} {cursorShape.y} H {cursorShape.x + 5} M {cursorShape.x} {cursorShape.y - 5} V {cursorShape.y + 5}" />
+          {/if}
+        </svg>
+      {/if}
+      {#if editor.showMask}
+        <div class="mask-badge" data-testid="mask-badge">Mask: {editor.selected?.name ?? ''}</div>
+      {/if}
+      {#if editor.zoomPercent !== null}
+        <div class="zoom" aria-live="off">{editor.zoomPercent} %</div>
+      {/if}
+    </div>
+    {#if editor.status === 'ready'}
+      <SelectionToolbar {editor} />
     {/if}
   </div>
-  {#if editor.status === 'ready'}
-    <SelectionToolbar {editor} />
-  {/if}
 </div>
 
 {#if editor.newDocumentOpen}
@@ -600,10 +608,17 @@
 
 <style>
   .editor {
-    position: relative;
+    display: flex;
+    flex-direction: column;
     width: 100%;
     height: 100%;
     background: var(--color-bg-center);
+  }
+  /* The area below the tab strip: the canvas, the toolbar, and the messages. */
+  .stage {
+    position: relative;
+    flex: 1;
+    min-height: 0;
   }
   .viewport {
     position: absolute;

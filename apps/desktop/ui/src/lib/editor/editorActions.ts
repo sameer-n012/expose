@@ -18,6 +18,10 @@
  * - `X`, `D` (scope `editor`): swap the colors, default colors.
  * - `Mod+=`, `Mod+-`, `Mod+0`, `Mod+1` (scope `editor`): zoom in, zoom out,
  *   fit to window, 100 %.
+ * - `Mod+W` (scope `editor`): close the active document tab (a tab with
+ *   unsaved changes asks first).
+ * - `Ctrl+Tab`, `Ctrl+Shift+Tab` (scope `editor`): next and previous document
+ *   tab (physical Control on all platforms; it wraps at the ends).
  */
 import type { ShortcutAction } from '../shortcuts/registry';
 import type { EditorTool } from './selection';
@@ -50,6 +54,9 @@ export const EDITOR_ACTION = {
   brushSofter: 'editor.brushSofter',
   swapColors: 'editor.swapColors',
   resetColors: 'editor.resetColors',
+  closeTab: 'editor.closeTab',
+  nextTab: 'editor.nextTab',
+  previousTab: 'editor.previousTab',
 } as const;
 
 /** The commands that the Editor actions call (the editor store has them). */
@@ -75,6 +82,8 @@ export interface EditorCommands {
   stepBrushHardness(direction: 1 | -1): void;
   swapColors(): void;
   resetColors(): void;
+  closeActiveTab(): void;
+  nextTab(step: 1 | -1): void;
 }
 
 /** The action that opens the selected photo in the Editor. The shell knows the photo. */
@@ -116,5 +125,8 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     { id: EDITOR_ACTION.zoomOut, label: 'Editor: zoom out', scope: 'editor', defaultBinding: 'Mod+-', allowRepeat: true, run: () => commands.zoomStep(-1) },
     { id: EDITOR_ACTION.zoomFit, label: 'Editor: fit to window', scope: 'editor', defaultBinding: 'Mod+0', run: () => commands.fitToWindow() },
     { id: EDITOR_ACTION.zoom100, label: 'Editor: zoom to 100 %', scope: 'editor', defaultBinding: 'Mod+1', run: () => commands.zoomTo(1) },
+    { id: EDITOR_ACTION.closeTab, label: 'Editor: close document tab', scope: 'editor', defaultBinding: 'Mod+W', run: () => commands.closeActiveTab() },
+    { id: EDITOR_ACTION.nextTab, label: 'Editor: next document tab', scope: 'editor', defaultBinding: 'Ctrl+Tab', allowRepeat: true, run: () => commands.nextTab(1) },
+    { id: EDITOR_ACTION.previousTab, label: 'Editor: previous document tab', scope: 'editor', defaultBinding: 'Ctrl+Shift+Tab', allowRepeat: true, run: () => commands.nextTab(-1) },
   ];
 }

@@ -113,6 +113,25 @@ describe('Edit in Editor', () => {
     await waitFor(() => expect(opens()).toBe(2));
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(editorCalls.some((c) => c.command === 'editor_close')).toBe(false);
+    // The tab strip shows both documents; the new one is active.
+    await waitFor(() => expect(screen.getAllByRole('tab').length).toBe(2));
+    expect(screen.getByRole('tab', { name: /^photo-12/ }).getAttribute('aria-selected')).toBe('true');
+    // Close the dirty tab: the question shows; Cancel keeps the tab.
+    await fireEvent.click(screen.getByRole('button', { name: 'Close photo' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog.textContent).toContain('Save the changes?');
+    // The tab that asks is active (the open dialog hides the strip from the role queries).
+    expect(document.querySelector('[role="tab"][aria-selected="true"] .title')?.textContent).toBe('photo');
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(screen.getAllByRole('tab').length).toBe(2);
+    // Again with Mod+W: Don't save closes the document.
+    await fireEvent.keyDown(window, { key: 'w', metaKey: true });
+    await screen.findByRole('alertdialog');
+    await fireEvent.click(screen.getByRole('button', { name: "Don't save" }));
+    await waitFor(() => expect(editorCalls.some((c) => c.command === 'editor_close' && c.args['documentId'] === 11)).toBe(true));
+    expect(screen.getAllByRole('tab').map((t) => t.textContent?.trim())).toEqual(['photo-12']);
+    expect(editorCalls.some((c) => c.command === 'editor_save')).toBe(false);
   });
 
   it('the Editor module opens the selected photo when it has no document', async () => {
