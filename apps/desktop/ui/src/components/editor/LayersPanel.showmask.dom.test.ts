@@ -21,6 +21,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
     blendMode: 'normal',
     hasMask: false,
     maskEnabled: false,
+    maskVersion: null,
     adjustment: null,
     isolated: null,
     children: null,
