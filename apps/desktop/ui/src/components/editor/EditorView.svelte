@@ -13,7 +13,8 @@
   - Wheel: scroll. With the primary modifier (and for pinch): zoom about the
     pointer. Middle button, or the space key and the left button: pan.
   - Tools (`editor.tool`): hand (the left button does nothing), rectangle and
-    ellipse marquee (drag), polygon lasso (click points). The modifier keys at
+    ellipse marquee (drag), freehand lasso (drag; release closes), polygon
+    lasso (click points). The modifier keys at
     the first pointer-down set the selection mode. The outline of the
     selection and the preview of a gesture are SVG layers over the canvas.
   - Brush and eraser: a drag is one stroke (`StrokeClient`). Escape or a
@@ -29,6 +30,7 @@
   import {
     boxBetween,
     boxPath,
+    appendLassoPoint,
     closesPolygon,
     dragShape,
     ellipsePath,
@@ -243,8 +245,19 @@
     readonly pointer: Point | null;
   }
 
+  /** A freehand lasso drag: the points are in canvas pixels; `start` is in screen pixels. */
+  interface Freehand {
+    readonly mode: SelectionModeId;
+    readonly points: readonly Point[];
+    readonly start: Point;
+    /** True when the pointer has moved farther than a click. */
+    readonly moved: boolean;
+    readonly pointerId: number;
+  }
+
   let marquee = $state.raw<Marquee | null>(null);
   let lasso = $state.raw<Lasso | null>(null);
+  let freehand = $state.raw<Freehand | null>(null);
 
   // A tool change or another document (also a tab switch) ends a gesture that runs.
   $effect(() => {
@@ -253,6 +266,7 @@
     untrack(() => {
       marquee = null;
       lasso = null;
+      freehand = null;
       cancelStroke();
     });
   });
@@ -375,6 +389,53 @@
     }
   }
 
+  /** Adds the points of a pointer event (with its coalesced events) to the freehand path. */
+  function extendFreehand(event: PointerEvent, node: HTMLElement, view: View): void {
+    const current = freehand;
+    if (current === null) {
+      return;
+    }
+    const events = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
+    const list = events.length > 0 ? events : [event];
+    // One screen pixel in canvas pixels.
+    const minDistance = 1 / view.zoom;
+    const points = [...current.points];
+    let moved = current.moved;
+    let added = false;
+    for (const e of list) {
+      const screen = local(e, node);
+      moved = moved || !isClick(current.start, screen);
+      added = appendLassoPoint(points, screenToCanvas(view, screen), minDistance) || added;
+    }
+    if (added || moved !== current.moved) {
+      freehand = { ...current, points, moved };
+    }
+  }
+
+  /** Closes the freehand path and sends it. A click without a drag removes the selection. */
+  function finishFreehand(event: PointerEvent, node: HTMLElement): void {
+    const view = editor.view;
+    if (view !== null && event.type !== 'pointercancel') {
+      extendFreehand(event, node, view);
+    }
+    const current = freehand;
+    freehand = null;
+    node.releasePointerCapture?.(event.pointerId);
+    if (current === null || event.type === 'pointercancel') {
+      return;
+    }
+    if (!current.moved) {
+      if (current.mode === 'replace' && editor.hasSelection) {
+        editor.deselect();
+      }
+      return;
+    }
+    const shape = polygonShape(current.points);
+    if (shape !== null) {
+      editor.selectShape(shape, current.mode);
+    }
+  }
+
   function finishMarquee(current: Marquee, end: Point, view: View): void {
     marquee = null;
     if (isClick(current.start, end)) {
@@ -411,6 +472,19 @@
       return;
     }
     const p = local(event, event.currentTarget);
+    if (tool === 'lasso') {
+      if (freehand === null) {
+        freehand = {
+          mode: modeFromModifiers(event),
+          points: [screenToCanvas(view, p)],
+          start: p,
+          moved: false,
+          pointerId: event.pointerId,
+        };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+      }
+      return;
+    }
     if (tool === 'polygonLasso') {
       lassoClick(event, p, view);
       return;
@@ -429,6 +503,11 @@
     } else if (panning) {
       editor.pan(event.clientX - last.x, event.clientY - last.y);
       last = { x: event.clientX, y: event.clientY };
+    } else if (freehand !== null) {
+      const view = editor.view;
+      if (view !== null && event.pointerId === freehand.pointerId) {
+        extendFreehand(event, event.currentTarget, view);
+      }
     } else if (marquee !== null) {
       marquee = { ...marquee, current: local(event, event.currentTarget) };
     } else if (lasso !== null) {
@@ -442,6 +521,10 @@
     } else if (panning) {
       panning = false;
       event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } else if (freehand !== null) {
+      if (event.pointerId === freehand.pointerId) {
+        finishFreehand(event, event.currentTarget);
+      }
     } else if (marquee !== null) {
       const view = editor.view;
       const current = marquee;
@@ -466,11 +549,12 @@
       cancelStroke();
       return;
     }
-    if (event.type === 'keydown' && (marquee !== null || lasso !== null) && !isEditableTarget(event.target)) {
+    if (event.type === 'keydown' && (marquee !== null || lasso !== null || freehand !== null) && !isEditableTarget(event.target)) {
       if (event.key === 'Escape') {
         event.preventDefault();
         marquee = null;
         lasso = null;
+        freehand = null;
         return;
       }
       if (lasso !== null && event.key === 'Enter') {
@@ -501,6 +585,9 @@
     if (marquee !== null) {
       const box = boxBetween(marquee.start, marquee.current);
       return marquee.tool === 'rectSelect' ? boxPath(box) : ellipsePath(box);
+    }
+    if (freehand !== null && view !== null) {
+      return polylinePath(freehand.points.map((c) => canvasToScreen(view, c)));
     }
     if (lasso !== null && view !== null) {
       const points = lasso.points.map((c) => canvasToScreen(view, c));

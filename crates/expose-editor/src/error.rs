@@ -158,6 +158,12 @@ pub enum EditorError {
     #[error("layer {0} changed outside the brush stroke")]
     StrokeConflict(LayerId),
 
+    /// A brush setting is not valid for the stroke target (for example, a
+    /// blend mode other than normal for an eraser or a mask stroke, see
+    /// [`crate::brush`]).
+    #[error("invalid brush setting: {0}")]
+    InvalidBrush(&'static str),
+
     /// A document file cannot be read or written (see [`crate::file`]).
     #[error("document file: {0}")]
     File(#[from] FileError),

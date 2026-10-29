@@ -33,7 +33,8 @@
     { id: 'hand', label: 'Hand', title: 'Hand tool (H). Drag to move the view.' },
     { id: 'rectSelect', label: 'Rectangle', title: 'Rectangle marquee (M). Shift adds, Alt subtracts, Shift+Alt intersects.' },
     { id: 'ellipseSelect', label: 'Ellipse', title: 'Ellipse marquee (M). Shift adds, Alt subtracts, Shift+Alt intersects.' },
-    { id: 'polygonLasso', label: 'Lasso', title: 'Polygon lasso (L). Click for points. Click the first point, double-click, or press Enter to close.' },
+    { id: 'lasso', label: 'Freehand', title: 'Freehand lasso (L). Drag to draw the outline. Release to close. Shift adds, Alt subtracts.' },
+    { id: 'polygonLasso', label: 'Polygon', title: 'Polygon lasso (L). Click for points. Click the first point, double-click, or press Enter to close.' },
   ];
 
   const selecting = $derived(isSelectionTool(editor.tool));

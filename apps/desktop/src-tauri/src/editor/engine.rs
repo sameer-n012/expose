@@ -1176,6 +1176,7 @@ mod tests {
             spacing: 0.25,
             pressure_size: false,
             pressure_opacity: false,
+            ..BrushSettings::default()
         };
         let target = StrokeTarget::Paint {
             color: [1.0, 1.0, 1.0],
