@@ -43,6 +43,7 @@ const doc = (): DocumentInfo => ({
   hasSelection: false,
   selectionVersion: 0,
   canReselect: false,
+  history: { steps: [], cursor: 0 },
 });
 
 /** The viewport of the tests: happy-dom has no layout, so the store gets this size by hand. Center (50, 40). */
@@ -56,6 +57,7 @@ async function ready() {
     edit: vi.fn(async (_id: number, _edit: EditDto, _gesture: number | null) => doc()),
     undo: vi.fn(async () => doc()),
     redo: vi.fn(async () => doc()),
+    historyJump: vi.fn(async () => doc()),
     save: vi.fn(),
     close: vi.fn(async () => undefined),
     selectionOutline: vi.fn(async () => ({ selectionVersion: 0, step: 1, contours: [] })),

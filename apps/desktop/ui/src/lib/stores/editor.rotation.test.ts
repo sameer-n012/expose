@@ -43,6 +43,7 @@ function info(documentId: number): DocumentInfo {
     hasSelection: false,
     selectionVersion: 0,
     canReselect: false,
+    history: { steps: [], cursor: 0 },
   };
 }
 
@@ -55,6 +56,7 @@ async function setup() {
     edit: vi.fn(async (documentId: number) => info(documentId)),
     undo: vi.fn(async (documentId: number) => info(documentId)),
     redo: vi.fn(async (documentId: number) => info(documentId)),
+    historyJump: vi.fn(async (documentId: number) => info(documentId)),
     save: vi.fn(),
     close: vi.fn(async () => undefined),
     selectionOutline: vi.fn(async () => ({ selectionVersion: 0, step: 1, contours: [] })),
