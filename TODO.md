@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; 2026-10-28)
+- (none — all agent branches are merged; 2026-10-29)
 
 ## Next (suggested order)
 
@@ -26,7 +26,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
    - Follow-ups: key the compositor cache by document and layer (a tab switch can upload all layers again; O); per-tab tool or layer-list scroll position (optional); shell tests for `name` through `editor_open` / `editor_new` (S); the AppShell editor DOM test prints "The window close guard is not available" (happy-dom has no Tauri window).
 6. [ ] **editor-tool-followups-check** (operator) — check in the real webview: freehand lasso (`L`, `L` again switches to the polygon lasso; Shift/Alt modes; a click deselects; Escape cancels); Reselect (`Mod+Shift+D` and the toolbar entry, after `Mod+D`; disabled when nothing is stored); brush Mode select (multiply/screen/luminosity on a photo layer; Normal only for the eraser and the mask target); eyedropper (`I`; sample size 1/3/5; all layers / current layer; click = foreground, Alt+click = background; transparent pixels give a toast); Alt+click with the brush picks the foreground color; the native color panel for the swatches. After this check and items 3 and 4, mark in `FEATURES.md`: "Lasso, polygonal lasso", "Select all, deselect, reselect, invert", "Brush tool", and (if the native color panel is sufficient) "Foreground/background colors, color picker, eyedropper" (ADR 0024).
    - Follow-ups: a shell stroke test with a non-Normal brush blend mode (only the DTO conversion is tested; S); the `pointercancel` path of the freehand lasso has no test.
-8. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
+7. [ ] **editor-layers-followups-check** (operator) — check in the real webview: the mask chip shows the mask (also after a brush stroke on the mask, undo, a disabled mask, Retina sharpness); toggling a mask off with `\` while frames load gives no error toast; with the `all` lock, the Adjustment panel (also Levels and Curves) is disabled, but the channel buttons work (ADR 0025).
+   - Follow-ups (S): optional levels input bar with draggable handles; the develop defaults (`DEFAULTS`, `SHARPEN_DEFAULTS`, `CROP_DEFAULTS`) and the levels `MIN_INPUT_SPAN` are not checked against Rust.
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
@@ -34,7 +35,7 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 
 ### Follow-ups from merged work
 
-- [ ] **develop-ui-followups** (S) — the TS slider ranges in `ui/src/lib/develop/settings.ts` are copies of the Rust constants (add a test or generate them); the shell drops unknown settings fields (ADR 0009).
+- [ ] **develop-ui-followups** (S) — the shell drops unknown settings fields (ADR 0009). (The slider ranges are checked by `lib/rustConstants.test.ts` since PR #85.)
 
 - [ ] **geometry-followups** — crops tighter than about 60 % of the long edge hit the 4096 px session base and show slightly enlarged; `PreviewRenderer` still allocates its unused tone-only output image (change in `expose-develop`); `DevelopTargets` intermediates are full `rgba32float` (single-channel formats in `expose-gpu` would save memory); auto straighten (P2).
 - [ ] **develop-ui-followups-2** (S) — histogram is computed from the 8-bit display frame (not the working data).
@@ -59,6 +60,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-layers-followups** (PRs #84, #85, ADR 0025) — shell `LayerInfo.maskVersion`, `editor_mask_thumbnail` (binary gray, whole canvas, ≤ 256 px, 4.1 ms at 4096²; `EditorEngineError::InvalidThumbnailSize`); UI mask chip thumbnail (cache per tab by `maskVersion`), stale show-mask frame errors ignored, Adjustment panel disabled for the `all` lock, `lib/rustConstants.test.ts` checks the TS copies of Rust constants (also the develop slider ranges of develop-ui-followups). The "dialog values lost on cancel" item is obsolete since tabs. Waits for the operator check (item 7 in "Next").
 
 - [x] **editor-selections-followups + editor-brushes-followups** (PRs #79–#82, ADR 0024) — UI freehand lasso (`lasso`, `L` cycle); crate `Document::reselect`/`can_reselect`, `BrushSettings.blend_mode` (+ `EditorError::InvalidBrush`); shell `reselect` edit, `DocumentInfo.canReselect`, brush `blendMode`, `editor_sample_color` (`editor/sample.rs`, `EditorEngineError::InvalidSample`); UI Reselect (`Mod+Shift+D`), brush Mode select, eyedropper tool (`I`, `EyedropperOptions.svelte`), brush Alt+click samples. Waits for the operator check (item 6 in "Next").
 
