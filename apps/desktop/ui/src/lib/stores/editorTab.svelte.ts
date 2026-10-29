@@ -10,7 +10,7 @@ import type { PhotoId } from '../catalog';
 import type { DocumentInfo, EditDto } from '../editor/api';
 import { allLayerIds, findLayer } from '../editor/layers';
 import type { MaskThumbnail } from '../editor/maskThumbnail';
-import { clampView, fitView, hasArea, type Size, type View } from '../editor/view';
+import { FIT_MARGIN, clampView, fitView, hasArea, type Size, type View } from '../editor/view';
 
 /** What a tab shows: the document is opening, is open, or did not open. */
 export type EditorTabStatus = 'loading' | 'ready' | 'error';
@@ -37,7 +37,10 @@ export class EditorTab {
   paintMaskId = $state<number | null>(null);
   /** Ids of the expanded groups. */
   expanded = $state.raw<ReadonlySet<number>>(new Set());
-  /** The canvas view, or null until the document and the viewport are known. */
+  /**
+   * The canvas view, or null until the document and the viewport are known.
+   * Its rotation is view state of this tab only: no undo step, not saved.
+   */
   view = $state.raw<View | null>(null);
   /** True while the view follows "fit to window". */
   fit = $state(true);
@@ -141,11 +144,14 @@ export class EditorTab {
     return id;
   }
 
-  /** Fits the view to the viewport. Does nothing without a document or a viewport area. */
+  /**
+   * Fits the view to the viewport. Does nothing without a document or a
+   * viewport area. The view keeps its rotation (ADR 0026).
+   */
   refit(viewport: Size): void {
     const info = this.info;
     if (info !== null && hasArea(viewport)) {
-      this.view = fitView(viewport, info);
+      this.view = fitView(viewport, info, FIT_MARGIN, this.view?.rotation ?? 0);
     }
   }
 
