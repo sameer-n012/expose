@@ -242,7 +242,20 @@ impl EditSession {
         info.dirty = self.is_dirty();
         info.saved_photo_id = self.origin.saved.as_ref().map(|s| s.photo_id);
         info.source_photo_id = self.origin.source_photo_id;
+        info.name = self.name();
         info
+    }
+
+    /// The title of the document: the file stem of the layered file of the
+    /// last save or link, else the name of the origin, else "Untitled".
+    pub fn name(&self) -> String {
+        self.origin
+            .saved
+            .as_ref()
+            .and_then(|s| s.document_path.file_stem())
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .or_else(|| self.origin.name.clone())
+            .unwrap_or_else(|| "Untitled".to_owned())
     }
 
     /// Applies `edit` and records it as one history step.
@@ -1187,6 +1200,42 @@ mod tests {
         };
         let s = EditSession::with_origin(build_document(image).unwrap(), origin).unwrap();
         assert_eq!(s.info(1).source_photo_id, Some(expose_catalog::PhotoId(5)));
+    }
+
+    #[test]
+    fn info_name_follows_origin_and_saves() {
+        // Default origin: no name known.
+        assert_eq!(session().info(1).name, "Untitled");
+        // Opened photo or new document: the name of the origin.
+        let image = WorkingImage::new_filled(2, 2, [0.0; 4]).unwrap();
+        let origin = DocumentOrigin {
+            name: Some("IMG_0001".to_owned()),
+            ..DocumentOrigin::default()
+        };
+        let mut s = EditSession::with_origin(build_document(image).unwrap(), origin).unwrap();
+        assert_eq!(s.info(1).name, "IMG_0001");
+        // A save sets the name to the stem of the layered file.
+        let files = |stem: &str| SavedFiles {
+            photo_id: expose_catalog::PhotoId(7),
+            document_path: format!("/p/{stem}.exdoc").into(),
+            image_path: format!("/p/{stem}.tif").into(),
+        };
+        s.mark_saved(s.document().revision(), files("IMG_0001-edit"));
+        assert_eq!(s.info(1).name, "IMG_0001-edit");
+        // Edits and undo keep the name; a save as changes it.
+        let bg = background(&s);
+        s.edit(
+            EditDto::SetVisible {
+                layer_id: bg,
+                visible: false,
+            },
+            None,
+        )
+        .unwrap();
+        s.undo().unwrap();
+        assert_eq!(s.info(1).name, "IMG_0001-edit");
+        s.mark_saved(s.document().revision(), files("other-edit-2"));
+        assert_eq!(s.info(1).name, "other-edit-2");
     }
 
     fn brush() -> BrushSettings {
