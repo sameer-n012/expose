@@ -13,6 +13,11 @@
 //!
 //! The selection is not a layer, and the `.exdoc` file does not store it.
 //!
+//! [`Document::deselect`] keeps a copy of the removed selection (compact
+//! form, see "History and versions"). [`Document::reselect`] restores it as
+//! a new undo step. This copy is session state: the history, the file, and
+//! document equality do not include it.
+//!
 //! # Shapes
 //!
 //! [`SelectionShape`] coordinates are canvas pixel coordinates (`f64`). The
@@ -770,11 +775,48 @@ impl Document {
 
     /// Removes the selection (sets `None`).
     ///
+    /// The document keeps a copy of the removed selection (compact form),
+    /// so that [`Document::reselect`] can restore it. This copy replaces
+    /// the copy of an earlier deselect. Undo and redo do not change it.
+    ///
     /// Returns [`EditorError::NoSelection`] if there is no selection, so
     /// that the history does not get a step that changes nothing.
     pub fn deselect(&mut self) -> EditorResult<Edit> {
-        self.require_selection()?;
-        Ok(self.replace_selection(None))
+        let stored = StoredSelection::compact(self.require_selection()?);
+        self.selection = None;
+        self.selection_version = next_stamp();
+        self.last_selection = Some(stored.clone());
+        Ok(Edit::selection(Some(stored)))
+    }
+
+    /// Returns `true` if [`Document::reselect`] can restore a selection.
+    pub fn can_reselect(&self) -> bool {
+        self.last_selection
+            .as_ref()
+            .is_some_and(|s| (s.width, s.height) == (self.width(), self.height()))
+    }
+
+    /// Sets the selection to the selection that the last
+    /// [`Document::deselect`] removed. Returns the edit that restores the
+    /// old selection (one undo step). The stored copy stays, so a second
+    /// deselect and reselect also work.
+    ///
+    /// Returns [`EditorError::NoSelection`] if no selection is stored. If
+    /// the size of the stored selection is not the canvas size, the
+    /// function drops the stored selection and also returns
+    /// [`EditorError::NoSelection`].
+    pub fn reselect(&mut self) -> EditorResult<Edit> {
+        let (w, h) = (self.width(), self.height());
+        let stored = self
+            .last_selection
+            .as_ref()
+            .ok_or(EditorError::NoSelection)?;
+        if (stored.width, stored.height) != (w, h) {
+            self.last_selection = None;
+            return Err(EditorError::NoSelection);
+        }
+        let mask = stored.expand(w, h)?;
+        Ok(self.replace_selection(Some(mask)))
     }
 
     /// Inverts the selection: each value `v` becomes `1 - v`.
@@ -1293,6 +1335,118 @@ mod tests {
         d.mask_from_selection(id).unwrap();
         assert_ne!(d.revision(), rev);
         assert_eq!(d.selection_version(), before);
+    }
+
+    #[test]
+    fn reselect_restores_the_exact_values() {
+        let mut d = doc(16, 12);
+        d.select_shape(
+            &SelectionShape::Ellipse {
+                x: 2.3,
+                y: 1.7,
+                width: 9.1,
+                height: 7.4,
+            },
+            SelectionMode::Replace,
+            true,
+            1.5,
+        )
+        .unwrap();
+        let before = sel(&d).to_vec();
+        assert!(!d.can_reselect());
+        d.deselect().unwrap();
+        assert!(d.selection().is_none());
+        assert!(d.can_reselect());
+        let v = d.selection_version();
+        d.reselect().unwrap();
+        assert_ne!(d.selection_version(), v);
+        let bits = |s: &[f32]| s.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(sel(&d)), bits(&before));
+        // The stored copy stays: a second deselect + reselect works.
+        assert!(d.can_reselect());
+        d.deselect().unwrap();
+        d.reselect().unwrap();
+        assert_eq!(bits(sel(&d)), bits(&before));
+    }
+
+    #[test]
+    fn undo_of_reselect() {
+        let mut d = doc(8, 8);
+        let mut history = History::new(10).unwrap();
+        let e = d
+            .select_shape(&rect(1.0, 1.0, 3.0, 3.0), SelectionMode::Replace, true, 0.0)
+            .unwrap();
+        history.push("rect", vec![e]);
+        let before = sel(&d).to_vec();
+        let e = d.deselect().unwrap();
+        history.push("deselect", vec![e]);
+        let e = d.reselect().unwrap();
+        history.push("reselect", vec![e]);
+        assert_eq!(sel(&d), before.as_slice());
+        history.undo(&mut d).unwrap();
+        assert!(d.selection().is_none());
+        history.redo(&mut d).unwrap();
+        assert_eq!(sel(&d), before.as_slice());
+        // Undo of the deselect gives the selection back, but the stored
+        // copy does not change.
+        history.undo(&mut d).unwrap();
+        history.undo(&mut d).unwrap();
+        assert_eq!(sel(&d), before.as_slice());
+        assert!(d.can_reselect());
+    }
+
+    #[test]
+    fn reselect_without_stored_selection_errors() {
+        let mut d = doc(8, 8);
+        assert!(!d.can_reselect());
+        assert_eq!(d.reselect(), Err(EditorError::NoSelection));
+        d.select_all().unwrap();
+        assert_eq!(d.reselect(), Err(EditorError::NoSelection));
+    }
+
+    #[test]
+    fn reselect_drops_a_stored_selection_of_other_size() {
+        let mut d = doc(8, 8);
+        let other = doc(4, 4);
+        let mask = MaskImage::new_filled(other.width(), other.height(), 1.0).unwrap();
+        d.last_selection = Some(StoredSelection::compact(&mask));
+        assert!(!d.can_reselect());
+        assert_eq!(d.reselect(), Err(EditorError::NoSelection));
+        assert!(d.last_selection.is_none());
+    }
+
+    #[test]
+    fn deselect_replaces_the_stored_selection() {
+        let mut d = doc(8, 8);
+        d.select_shape(&rect(0.0, 0.0, 2.0, 2.0), SelectionMode::Replace, true, 0.0)
+            .unwrap();
+        let first = sel(&d).to_vec();
+        d.deselect().unwrap();
+        // New selections do not change the stored copy.
+        d.select_shape(&rect(4.0, 4.0, 2.0, 2.0), SelectionMode::Replace, true, 0.0)
+            .unwrap();
+        let second = sel(&d).to_vec();
+        d.select_all().unwrap();
+        d.select_shape(&rect(5.0, 5.0, 1.0, 1.0), SelectionMode::Add, true, 0.0)
+            .unwrap();
+        d.reselect().unwrap();
+        assert_eq!(sel(&d), first.as_slice());
+        // A new deselect replaces it.
+        d.select_shape(&rect(4.0, 4.0, 2.0, 2.0), SelectionMode::Replace, true, 0.0)
+            .unwrap();
+        d.deselect().unwrap();
+        d.reselect().unwrap();
+        assert_eq!(sel(&d), second.as_slice());
+    }
+
+    #[test]
+    fn stored_selection_is_not_part_of_equality() {
+        let mut a = doc(8, 8);
+        let b = a.clone();
+        a.select_all().unwrap();
+        a.deselect().unwrap();
+        assert!(a.can_reselect());
+        assert_eq!(a, b);
     }
 
     #[test]

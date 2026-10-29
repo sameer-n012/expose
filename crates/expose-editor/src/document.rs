@@ -10,6 +10,7 @@ use crate::error::{EditorError, EditorResult, check_range};
 use crate::layer::{
     Layer, LayerId, LayerKind, LayerProps, Locks, MaskImage, PixelLayer, Placement,
 };
+use crate::selection::StoredSelection;
 use crate::version::next_stamp;
 
 /// The largest permitted width or height of a document, a layer, or a
@@ -158,7 +159,8 @@ impl DocumentSpec {
 ///
 /// Equality compares the settings, the layer tree, and the selection. It
 /// ignores the revision, the selection version, and the layer content
-/// versions (they are change stamps, not content).
+/// versions (they are change stamps, not content). It also ignores the
+/// selection that [`Document::reselect`] can restore (session state).
 #[derive(Debug, Clone)]
 pub struct Document {
     width: u32,
@@ -177,6 +179,10 @@ pub struct Document {
     pub(crate) selection: Option<MaskImage>,
     /// Stamp of the last selection change.
     pub(crate) selection_version: u64,
+    /// The selection that the last [`Document::deselect`] removed, in
+    /// compact form (see [`Document::reselect`]). It is session state: it
+    /// is not part of the history, the file, or document equality.
+    pub(crate) last_selection: Option<StoredSelection>,
 }
 
 impl PartialEq for Document {
@@ -295,6 +301,7 @@ impl Document {
             revision: next_stamp(),
             selection: None,
             selection_version: next_stamp(),
+            last_selection: None,
         })
     }
 
