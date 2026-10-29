@@ -31,7 +31,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 }
 
 function doc(layers: LayerInfo[], revision = 0): DocumentInfo {
-  return { documentId: 1, name: 'doc', width: 100, height: 80, layers, canUndo: false, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false };
+  return { documentId: 1, name: 'doc', width: 100, height: 80, layers, canUndo: false, canRedo: false, history: { steps: [], cursor: 0 }, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false };
 }
 
 /** The layer list that the fake shell returns can change between calls. */
@@ -45,6 +45,7 @@ async function makeStore(initial: LayerInfo[]) {
     edit: vi.fn(async (_id: number, _edit: EditDto, _gesture: number | null) => doc(layers, ++revision)),
     undo: vi.fn(async () => doc(layers, ++revision)),
     redo: vi.fn(async () => doc(layers, ++revision)),
+    historyJump: vi.fn(async () => doc(layers, ++revision)),
     save: vi.fn(),
     close: vi.fn(async () => undefined),
     selectionOutline: vi.fn(async () => ({ selectionVersion: 0, step: 1, contours: [] })),

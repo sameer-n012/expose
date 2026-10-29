@@ -34,13 +34,14 @@ function layer(adjustment: AdjustmentDto, all: boolean): LayerInfo {
 
 async function makeStore(adjustment: AdjustmentDto, all: boolean) {
   const layers = [layer(adjustment, all)];
-  const doc: DocumentInfo = { documentId: 1, name: 'doc', width: 100, height: 80, layers, canUndo: false, canRedo: false, revision: 0, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false };
+  const doc: DocumentInfo = { documentId: 1, name: 'doc', width: 100, height: 80, layers, canUndo: false, canRedo: false, history: { steps: [], cursor: 0 }, revision: 0, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false };
   const api = {
     open: vi.fn(async () => doc),
     render: vi.fn(async () => new ArrayBuffer(0)),
     edit: vi.fn(async () => doc),
     undo: vi.fn(),
     redo: vi.fn(),
+    historyJump: vi.fn(),
     save: vi.fn(),
     close: vi.fn(async () => undefined),
   } as unknown as EditorApi & { edit: ReturnType<typeof vi.fn> };
