@@ -95,14 +95,15 @@
       }),
   );
 
-  // While the document has unsaved changes, a window close asks first.
+  // While an Editor document has unsaved changes, a window close asks first
+  // (one question for each dirty tab).
   $effect(() => {
-    if (!editor.dirty) {
+    if (!editor.anyDirty) {
       return;
     }
     return guardWindowClose(
       tauriCloseListener,
-      () => editor.confirmLeave(),
+      () => editor.confirmCloseAll(),
       (error) => console.warn('The window close guard is not available.', error),
     );
   });
@@ -209,8 +210,11 @@
             />
           </div>
         {:else if id === 'editor' && side === 'right'}
-          <LayersPanel {editor} />
-          <AdjustmentPanel {editor} />
+          <!-- A tab switch makes new panels: dragged values, rename fields, and menus belong to one document. -->
+          {#key editor.activeTab?.id}
+            <LayersPanel {editor} />
+            <AdjustmentPanel {editor} />
+          {/key}
           <PanelSections sections={PANEL_SECTIONS.editor.right} />
         {:else}
           <PanelSections sections={PANEL_SECTIONS[id][side]} />

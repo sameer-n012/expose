@@ -29,7 +29,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 }
 
 function doc(layers: LayerInfo[], revision = 0): DocumentInfo {
-  return { documentId: 1, width: 100, height: 80, layers, canUndo: false, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0 };
+  return { documentId: 1, name: 'doc', width: 100, height: 80, layers, canUndo: false, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0 };
 }
 
 async function makeStore(layers: LayerInfo[]) {
