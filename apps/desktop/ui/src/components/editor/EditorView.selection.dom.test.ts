@@ -212,9 +212,14 @@ describe('selection shortcuts', () => {
     find(store, EDITOR_ACTION.marqueeTool)?.run();
     expect(store.tool).toBe('ellipseSelect');
     find(store, EDITOR_ACTION.lassoTool)?.run();
+    expect(store.tool).toBe('lasso');
+    find(store, EDITOR_ACTION.lassoTool)?.run();
     expect(store.tool).toBe('polygonLasso');
     find(store, EDITOR_ACTION.handTool)?.run();
     expect(store.tool).toBe('hand');
+    // L returns to the lasso kind that was used last.
+    find(store, EDITOR_ACTION.lassoTool)?.run();
+    expect(store.tool).toBe('polygonLasso');
   });
 });
 
@@ -285,7 +290,7 @@ describe('Add mask with a selection', () => {
 });
 
 describe('EditorView gestures', () => {
-  async function ready(tool: 'rectSelect' | 'ellipseSelect' | 'polygonLasso', start?: Sel) {
+  async function ready(tool: 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso', start?: Sel) {
     const made = await makeStore([layer(1)], start);
     render(EditorView, { editor: made.store, toasts: new ToastStore() });
     await flush();
@@ -367,6 +372,47 @@ describe('EditorView gestures', () => {
     await fireEvent.pointerUp(viewport, point(60, 60));
     await flush();
     expect(api.edit).not.toHaveBeenCalled();
+  });
+
+  it('a freehand lasso drag sends one polygon edit with the mode', async () => {
+    const { api, viewport } = await ready('lasso');
+    await fireEvent.pointerDown(viewport, point(10, 10, { shiftKey: true }));
+    await fireEvent.pointerMove(viewport, point(60, 10));
+    expect(screen.queryByTestId('selection-preview')).not.toBeNull();
+    await fireEvent.pointerMove(viewport, point(60, 60));
+    await fireEvent.pointerUp(viewport, point(60, 60));
+    await flush();
+    expect(api.edit).toHaveBeenCalledTimes(1);
+    expect(api.edit.mock.calls[0]?.[1]).toEqual({
+      type: 'selectShape',
+      shape: {
+        type: 'polygon',
+        points: [
+          [10, 10],
+          [60, 10],
+          [60, 60],
+        ],
+      },
+      mode: 'add',
+      antiAlias: true,
+      feather: 0,
+    });
+  });
+
+  it('a freehand click deselects, Escape cancels', async () => {
+    const some = await ready('lasso', { has: true, version: 1 });
+    await fireEvent.pointerDown(some.viewport, point(5, 5));
+    await fireEvent.pointerUp(some.viewport, point(5, 5));
+    await flush();
+    expect(some.api.edit.mock.calls[0]?.[1]).toEqual({ type: 'deselect' });
+    cleanup();
+    const none = await ready('lasso');
+    await fireEvent.pointerDown(none.viewport, point(10, 10));
+    await fireEvent.pointerMove(none.viewport, point(60, 10));
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await fireEvent.pointerUp(none.viewport, point(60, 60));
+    await flush();
+    expect(none.api.edit).not.toHaveBeenCalled();
   });
 
   it('the lasso closes on a click near the first point', async () => {

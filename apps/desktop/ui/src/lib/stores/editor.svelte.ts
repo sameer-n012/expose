@@ -58,7 +58,7 @@ import {
   type PaintTarget,
   type PaintTool,
 } from '../editor/brush';
-import { clampFeather, cycleMarquee, type EditorTool } from '../editor/selection';
+import { clampFeather, cycleLasso, cycleMarquee, isLassoTool, type EditorTool, type LassoTool } from '../editor/selection';
 import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
 import { clampZoom, panBy, steppedZoom, zoomAbout, type Point, type Size, type View } from '../editor/view';
@@ -485,6 +485,19 @@ export class EditorStore {
   /** Sets the tool of the canvas. */
   setTool(tool: EditorTool): void {
     this.tool = tool;
+    if (isLassoTool(tool)) {
+      this.lastLasso = tool;
+    }
+  }
+
+  /** The lasso tool that `L` selects when no lasso tool is active. */
+  private lastLasso: LassoTool = 'lasso';
+
+  /** `L`: the last used lasso tool; while one is active, the other one. */
+  cycleLasso(): void {
+    if (this.info !== null) {
+      this.setTool(cycleLasso(this.tool, this.lastLasso));
+    }
   }
 
   /** `M`: the rectangle tool, then the ellipse tool. */

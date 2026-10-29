@@ -11,7 +11,7 @@
  * - `Mod+A`, `Mod+D`, `Mod+Shift+I`, `Shift+F6` (scope `editor`): select all,
  *   deselect, invert the selection, open the Feather dialog.
  * - `M`, `L`, `H` (scope `editor`): marquee tool (rectangle, then ellipse),
- *   polygon lasso, hand.
+ *   lasso (the last used kind; `L` again: freehand or polygon), hand.
  * - `B`, `E` (scope `editor`): brush and eraser tool.
  * - `[`, `]`, `{`, `}` (scope `editor`): brush size and hardness (`{` and `}`
  *   are Shift+`[` and Shift+`]`).
@@ -76,6 +76,7 @@ export interface EditorCommands {
   invertSelection(): void;
   openFeatherDialog(): void;
   cycleMarquee(): void;
+  cycleLasso(): void;
   setTool(tool: EditorTool): void;
   selectPaintTool(tool: 'brush' | 'eraser'): void;
   stepBrushSize(direction: 1 | -1): void;
@@ -105,7 +106,7 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     { id: EDITOR_ACTION.invertSelection, label: 'Editor: invert selection', scope: 'editor', defaultBinding: 'Mod+Shift+I', run: () => commands.invertSelection() },
     { id: EDITOR_ACTION.featherSelection, label: 'Editor: feather selection…', scope: 'editor', defaultBinding: 'Shift+F6', run: () => commands.openFeatherDialog() },
     { id: EDITOR_ACTION.marqueeTool, label: 'Editor: marquee tool (rectangle, ellipse)', scope: 'editor', defaultBinding: 'M', run: () => commands.cycleMarquee() },
-    { id: EDITOR_ACTION.lassoTool, label: 'Editor: polygon lasso tool', scope: 'editor', defaultBinding: 'L', run: () => commands.setTool('polygonLasso') },
+    { id: EDITOR_ACTION.lassoTool, label: 'Editor: lasso tool (freehand, polygon)', scope: 'editor', defaultBinding: 'L', run: () => commands.cycleLasso() },
     { id: EDITOR_ACTION.handTool, label: 'Editor: hand tool', scope: 'editor', defaultBinding: 'H', run: () => commands.setTool('hand') },
     // In the editor scope, `E` and `D` take precedence over the global module keys.
     { id: EDITOR_ACTION.brushTool, label: 'Editor: brush tool', scope: 'editor', defaultBinding: 'B', run: () => commands.selectPaintTool('brush') },
