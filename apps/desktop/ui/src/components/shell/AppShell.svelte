@@ -35,6 +35,7 @@
   import { EditorStore } from '../../lib/stores/editor.svelte';
   import { EDITOR_ACTION, editInEditorAction, editorActions } from '../../lib/editor/editorActions';
   import AdjustmentPanel from '../editor/AdjustmentPanel.svelte';
+  import HistoryPanel from '../editor/HistoryPanel.svelte';
   import EditInEditorButton from '../editor/EditInEditorButton.svelte';
   import EditorView from '../editor/EditorView.svelte';
   import LayersPanel from '../editor/LayersPanel.svelte';
@@ -214,6 +215,7 @@
           {#key editor.activeTab?.id}
             <LayersPanel {editor} />
             <AdjustmentPanel {editor} />
+            <HistoryPanel {editor} />
           {/key}
           <PanelSections sections={PANEL_SECTIONS.editor.right} />
         {:else}

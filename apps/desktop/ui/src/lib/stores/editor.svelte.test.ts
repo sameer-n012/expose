@@ -26,7 +26,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 }
 
 function info(documentId: number, revision: number, layers: LayerInfo[] = [layer(1), layer(2)], extra: Partial<DocumentInfo> = {}): DocumentInfo {
-  return { documentId, name: `doc${documentId}`, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false, ...extra };
+  return { documentId, name: `doc${documentId}`, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, history: { steps: ['Brush', 'Move'], cursor: 2 }, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false, ...extra };
 }
 
 function saveResult(documentId: number, revision: number, photoId = 77, created = true): SaveResult {
@@ -51,6 +51,9 @@ function setup() {
     edit: vi.fn(async (documentId: number, _edit: EditDto, _gesture: number | null) => info(documentId, ++revision)),
     undo: vi.fn(async (documentId: number) => info(documentId, ++revision)),
     redo: vi.fn(async (documentId: number) => info(documentId, ++revision)),
+    historyJump: vi.fn(async (documentId: number, step: number) =>
+      info(documentId, ++revision, undefined, { history: { steps: ['Brush', 'Move'], cursor: step } }),
+    ),
     save: vi.fn(async (documentId: number) => saveResult(documentId, revision)),
     close: vi.fn(async (_documentId: number) => undefined),
     selectionOutline: vi.fn(async (_documentId: number, _step: number) => ({ selectionVersion: 0, step: 1, contours: [] })),
@@ -498,6 +501,34 @@ describe('EditorStore edits', () => {
     expect(api.undo).toHaveBeenCalledWith(1);
     expect(api.redo).toHaveBeenCalledWith(1);
     expect(store.info?.revision).toBe(2);
+  });
+
+  it('jumps in the history after the queued edits', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(1);
+    store.setVisible(1, false);
+    store.historyJump(0);
+    await tick();
+    expect(api.historyJump).toHaveBeenCalledWith(1, 0);
+    expect(api.edit.mock.invocationCallOrder[0]).toBeLessThan(api.historyJump.mock.invocationCallOrder[0] ?? 0);
+    expect(store.info?.history.cursor).toBe(0);
+  });
+
+  it('does not call the API for a jump to the current cursor', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(1);
+    store.historyJump(2);
+    await tick();
+    expect(api.historyJump).not.toHaveBeenCalled();
+  });
+
+  it('shows a toast when a history jump fails', async () => {
+    const { store, api, toasts } = setup();
+    await store.openPhoto(1);
+    api.historyJump.mockRejectedValueOnce({ kind: 'invalidInput', message: 'bad' });
+    store.historyJump(0);
+    await tick();
+    expect(toasts.items).toHaveLength(1);
   });
 
   it('shows a toast when an edit fails and continues with the next edit', async () => {
