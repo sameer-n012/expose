@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_POLYGON_POINTS,
+  appendLassoPoint,
+  cycleLasso,
+  isSelectionTool,
   boxBetween,
   boxPath,
   ellipsePath,
@@ -142,6 +146,29 @@ describe('tool helpers', () => {
     expect(cycleMarquee('hand')).toBe('rectSelect');
     expect(cycleMarquee('rectSelect')).toBe('ellipseSelect');
     expect(cycleMarquee('ellipseSelect')).toBe('rectSelect');
+  });
+  it('cycles the lasso tools', () => {
+    expect(cycleLasso('hand')).toBe('lasso');
+    expect(cycleLasso('hand', 'polygonLasso')).toBe('polygonLasso');
+    expect(cycleLasso('lasso', 'lasso')).toBe('polygonLasso');
+    expect(cycleLasso('polygonLasso')).toBe('lasso');
+  });
+  it('knows the selection tools', () => {
+    expect(isSelectionTool('lasso')).toBe(true);
+    expect(isSelectionTool('polygonLasso')).toBe(true);
+    expect(isSelectionTool('brush')).toBe(false);
+  });
+  it('adds freehand points only when far enough', () => {
+    const points: { x: number; y: number }[] = [];
+    expect(appendLassoPoint(points, { x: 0, y: 0 }, 1)).toBe(true);
+    expect(appendLassoPoint(points, { x: 0.5, y: 0 }, 1)).toBe(false);
+    expect(appendLassoPoint(points, { x: 1, y: 0 }, 1)).toBe(true);
+    expect(points).toHaveLength(2);
+  });
+  it('stops adding freehand points at the cap', () => {
+    const points = Array.from({ length: MAX_POLYGON_POINTS }, (_, i) => ({ x: i, y: 0 }));
+    expect(appendLassoPoint(points, { x: -50, y: 9 }, 1)).toBe(false);
+    expect(points).toHaveLength(MAX_POLYGON_POINTS);
   });
   it('limits the feather', () => {
     expect(clampFeather(-3)).toBe(0);

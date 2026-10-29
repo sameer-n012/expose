@@ -8,7 +8,13 @@ import type { SelectionModeId, SelectionShapeDto } from './api';
 import { screenToCanvas, type Point, type View } from './view';
 
 /** The tools of the Editor canvas. */
-export type EditorTool = 'hand' | 'rectSelect' | 'ellipseSelect' | 'polygonLasso' | 'brush' | 'eraser';
+export type EditorTool = 'hand' | 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso' | 'brush' | 'eraser';
+
+/** The two lasso tools: freehand and polygon. */
+export type LassoTool = 'lasso' | 'polygonLasso';
+
+/** The shell accepts at most this many polygon points. */
+export const MAX_POLYGON_POINTS = 100_000;
 
 /** The range of the feather radius, in canvas pixels. */
 export const MAX_FEATHER = 250;
@@ -36,7 +42,43 @@ export function modeFromModifiers(keys: Modifiers): SelectionModeId {
 
 /** True for the tools that select an area. */
 export function isSelectionTool(tool: EditorTool): boolean {
-  return tool === 'rectSelect' || tool === 'ellipseSelect' || tool === 'polygonLasso';
+  return tool === 'rectSelect' || tool === 'ellipseSelect' || tool === 'lasso' || tool === 'polygonLasso';
+}
+
+/** True for the freehand and the polygon lasso. */
+export function isLassoTool(tool: EditorTool): tool is LassoTool {
+  return tool === 'lasso' || tool === 'polygonLasso';
+}
+
+/**
+ * The next tool when `L` is pressed. While a lasso tool is active, it
+ * switches to the other lasso tool. Otherwise it gives `last`, the lasso
+ * tool that was active most recently.
+ */
+export function cycleLasso(tool: EditorTool, last: LassoTool = 'lasso'): LassoTool {
+  if (tool === 'lasso') {
+    return 'polygonLasso';
+  }
+  return tool === 'polygonLasso' ? 'lasso' : last;
+}
+
+/**
+ * Adds `p` (canvas pixels) to a freehand path if it is at least
+ * `minDistance` from the last point. Use `1 / zoom`: that is one screen
+ * pixel, so a slow drag gives no points that are closer than the eye can
+ * see. The first point is always added. At `MAX_POLYGON_POINTS` points no
+ * more points are added (the shape still closes). Returns true if added.
+ */
+export function appendLassoPoint(points: Point[], p: Point, minDistance: number): boolean {
+  if (points.length >= MAX_POLYGON_POINTS) {
+    return false;
+  }
+  const lastPoint = points[points.length - 1];
+  if (lastPoint !== undefined && distance(lastPoint, p) < minDistance) {
+    return false;
+  }
+  points.push(p);
+  return true;
 }
 
 /** The next tool when `M` is pressed: rectangle, then ellipse, then rectangle again. */
