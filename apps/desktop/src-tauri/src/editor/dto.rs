@@ -919,6 +919,7 @@ impl From<BrushSettingsDto> for BrushSettings {
             spacing: dto.spacing,
             pressure_size: dto.pressure_size,
             pressure_opacity: dto.pressure_opacity,
+            blend_mode: BlendMode::Normal,
         }
     }
 }

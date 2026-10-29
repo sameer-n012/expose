@@ -136,7 +136,8 @@ fn editor_error_kind(error: &EditorError) -> ErrorKind {
         | EditorError::OffsetOverflow
         | EditorError::InvalidCurve { .. }
         | EditorError::DuplicateId(_)
-        | EditorError::InvalidView(_) => ErrorKind::InvalidInput,
+        | EditorError::InvalidView(_)
+        | EditorError::InvalidBrush(_) => ErrorKind::InvalidInput,
     }
 }
 
