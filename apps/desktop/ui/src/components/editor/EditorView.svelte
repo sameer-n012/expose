@@ -31,6 +31,8 @@
     cancelled pointer cancels it. A circle of the brush size follows the pointer.
     Alt+click with the brush does not paint: it samples the composite color
     under the pointer (current sample size) into the foreground color.
+  - Magic wand and paint bucket: a click inside the canvas sends one edit
+    (Shift adds, Alt subtracts, Shift+Alt intersects for the wand).
   - Eyedropper: a click samples the color under the pointer into the
     foreground color; Alt+click sets the background color. The options are
     the sample size and the source (all layers or the selected layer).
@@ -522,6 +524,28 @@
     void editor.sampleAt(x, y, { toBackground, source: editor.tool === 'eyedropper' ? editor.sampleSource : 'composite' });
   }
 
+  /**
+   * A click of the magic wand or the paint bucket. A point outside the canvas
+   * is ignored. The wand mode comes from the modifier keys.
+   */
+  function floodClick(event: PointerEvent, node: HTMLElement, view: View, tool: 'magicWand' | 'paintBucket'): void {
+    const info = editor.info;
+    if (info === null) {
+      return;
+    }
+    const point = screenToCanvas(view, local(event, node));
+    const x = Math.floor(point.x);
+    const y = Math.floor(point.y);
+    if (x < 0 || y < 0 || x >= info.width || y >= info.height) {
+      return;
+    }
+    if (tool === 'magicWand') {
+      editor.magicWandAt(x, y, modeFromModifiers(event));
+    } else {
+      editor.fillAt(x, y);
+    }
+  }
+
   function onpointerdown(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
     if (rotating !== null) {
       return;
@@ -547,6 +571,10 @@
         node: event.currentTarget,
       };
       event.currentTarget.setPointerCapture?.(event.pointerId);
+      return;
+    }
+    if (tool === 'magicWand' || tool === 'paintBucket') {
+      floodClick(event, event.currentTarget, view, tool);
       return;
     }
     if (tool === 'eyedropper' || (tool === 'brush' && event.altKey)) {
@@ -724,7 +752,7 @@
       class="viewport"
       class:grab={(spaceDown || editor.tool === 'hand' || editor.tool === 'rotate') && !panning && rotating === null}
       class:grabbing={panning || rotating !== null}
-      class:crosshair={(isSelectionTool(editor.tool) || editor.tool === 'eyedropper') && !spaceDown && !panning}
+      class:crosshair={(isSelectionTool(editor.tool) || editor.tool === 'eyedropper' || editor.tool === 'magicWand' || editor.tool === 'paintBucket') && !spaceDown && !panning}
       class:no-cursor={cursorShape !== null}
       onpointerleave={() => (cursor = null)}
       hidden={editor.status !== 'ready'}

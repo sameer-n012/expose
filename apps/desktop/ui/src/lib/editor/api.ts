@@ -181,6 +181,32 @@ export type EditDto =
   /** `feather` is 0..=250 px. */
   | { type: 'selectShape'; shape: SelectionShapeDto; mode: SelectionModeId; antiAlias: boolean; feather: number }
   | { type: 'selectAll' }
+  /** x, y: canvas coordinates of the click (the shell floors them). `tolerance` is 0..=255. `layerId` null: no layer (needs `sampleAllLayers`). */
+  | {
+      type: 'magicWand';
+      x: number;
+      y: number;
+      mode: SelectionModeId;
+      tolerance: number;
+      contiguous: boolean;
+      antiAlias: boolean;
+      sampleAllLayers: boolean;
+      layerId: number | null;
+    }
+  /** Fills similar pixels of a pixel layer. `color` is gamma-encoded sRGB 0..1; `opacity` is 0..1. */
+  | {
+      type: 'fill';
+      layerId: number;
+      x: number;
+      y: number;
+      color: [number, number, number];
+      opacity: number;
+      blendMode: BlendModeId;
+      tolerance: number;
+      contiguous: boolean;
+      antiAlias: boolean;
+      sampleAllLayers: boolean;
+    }
   /** Deselect, invert, and feather are errors when there is no selection. */
   | { type: 'deselect' }
   /** Restores the selection that the last deselect removed. An error if `canReselect` is false. */
