@@ -234,9 +234,10 @@ impl StrokePoint {
 }
 
 /// A paint blend mode other than normal, with the values that do not
-/// change during the stroke.
+/// change during the stroke. The paint bucket ([`crate::flood`]) uses it
+/// too.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct PaintBlend {
+pub(crate) struct PaintBlend {
     mode: BlendMode,
     space: BlendSpace,
     /// The brush color in the blending space.
@@ -268,9 +269,9 @@ impl PaintBlend {
 }
 
 /// How the stroke computes a result from the original value and the
-/// coverage.
+/// coverage. The paint bucket ([`crate::flood`]) uses the paint modes too.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Mode {
+pub(crate) enum Mode {
     /// `blend` is `None` for [`BlendMode::Normal`] (the fast path).
     Paint {
         color: [f32; 3],
@@ -287,8 +288,32 @@ enum Mode {
 }
 
 impl Mode {
+    /// Makes a paint mode for the straight paint `color`. `keep_alpha` is
+    /// `true` if the layer has the transparency lock. The caller must
+    /// refuse [`BlendMode::Dissolve`] before.
+    pub(crate) fn paint(
+        color: [f32; 3],
+        blend_mode: BlendMode,
+        space: BlendSpace,
+        keep_alpha: bool,
+    ) -> Self {
+        let blend = match blend_mode {
+            BlendMode::Normal => None,
+            mode => Some(PaintBlend {
+                mode,
+                space,
+                color_encoded: space.encode(color),
+            }),
+        };
+        if keep_alpha {
+            Self::PaintKeepAlpha { color, blend }
+        } else {
+            Self::Paint { color, blend }
+        }
+    }
+
     /// Result for a pixel layer. `c == 0` gives `o` exactly.
-    fn pixel(self, o: Rgba, c: f32) -> Rgba {
+    pub(crate) fn pixel(self, o: Rgba, c: f32) -> Rgba {
         match self {
             Self::Paint { color, blend } => {
                 let color = match blend {
@@ -335,7 +360,7 @@ impl Mode {
 }
 
 /// A value type of a layer buffer.
-trait Texel: Copy {
+pub(crate) trait Texel: Copy {
     /// Bitwise equality (exact, also for -0.0 and NaN).
     fn same_bits(&self, other: &Self) -> bool;
 }
@@ -751,23 +776,13 @@ impl Stroke {
         let l = doc.layer(layer).ok_or(EditorError::LayerNotFound(layer))?;
         let locks = doc.effective_locks(layer)?;
         locks.check(layer, LockKind::Pixels)?;
-        let blend_for = |color: [f32; 3]| match settings.blend_mode {
-            BlendMode::Normal => None,
-            mode => Some(PaintBlend {
-                mode,
-                space: doc.blend_space,
-                color_encoded: doc.blend_space.encode(color),
-            }),
-        };
         let mode = match target {
-            StrokeTarget::Paint { color } if locks.transparency => Mode::PaintKeepAlpha {
+            StrokeTarget::Paint { color } => Mode::paint(
                 color,
-                blend: blend_for(color),
-            },
-            StrokeTarget::Paint { color } => Mode::Paint {
-                color,
-                blend: blend_for(color),
-            },
+                settings.blend_mode,
+                doc.blend_space,
+                locks.transparency,
+            ),
             StrokeTarget::Erase if locks.transparency => {
                 return Err(EditorError::TransparencyLocked(layer));
             }
