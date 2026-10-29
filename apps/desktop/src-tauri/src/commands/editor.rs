@@ -481,6 +481,28 @@ pub async fn editor_sample_color(
         .await?)
 }
 
+/// Returns a gray thumbnail of the mask of a layer, over the whole canvas,
+/// as binary data: width and height as little-endian `u32`, then
+/// `width * height` bytes (rows top first; 0 hides the layer, 255 shows
+/// it). The long edge is `min(maxSize, canvas long edge)`. Canvas pixels
+/// outside the mask buffer have the fill value. The `enabled` flag of the
+/// mask does not change the values.
+///
+/// Errors: `notFound` (document, layer), `invalidInput` (`maxSize` not in
+/// 1 to 256, the layer has no mask), `internal`.
+#[tauri::command]
+pub async fn editor_mask_thumbnail(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    layer_id: u64,
+    max_size: u32,
+) -> Result<Response, CommandError> {
+    let thumbnail = engine
+        .mask_thumbnail_async(document_id, layer_id, max_size)
+        .await?;
+    Ok(Response::new(thumbnail.encode()))
+}
+
 /// Undoes the last step of a document. With no step to undo, the document
 /// does not change. Returns the new document info.
 ///

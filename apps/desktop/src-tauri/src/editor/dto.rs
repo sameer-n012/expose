@@ -483,6 +483,10 @@ pub struct LayerInfo {
     /// `true` if the layer has a mask and the mask is on. `false` if there
     /// is no mask.
     pub mask_enabled: bool,
+    /// The content version of the mask ([`expose_editor::Layer::mask_version`]),
+    /// or `null` if the layer has no mask. The value changes when the mask
+    /// pixels change, so the UI can cache a mask thumbnail by it.
+    pub mask_version: Option<u64>,
     /// The own locks of the layer (not the locks that a parent group adds).
     pub locks: LocksDto,
     /// The setting of an adjustment layer; `null` for other kinds.
@@ -516,6 +520,7 @@ impl From<&Layer> for LayerInfo {
             blend_mode: layer.blend_mode().into(),
             has_mask: layer.mask().is_some(),
             mask_enabled: layer.mask().is_some_and(|m| m.enabled),
+            mask_version: layer.mask().map(|_| layer.mask_version()),
             locks: layer.locks().into(),
             adjustment,
             isolated,

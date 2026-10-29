@@ -44,6 +44,7 @@ use super::outline::{MAX_OUTLINE_POINTS, selection_outline};
 use super::sample::{SampleSourceDto, SampledColor, sample_color};
 use super::save::{DocumentOrigin, SaveSnapshot, SavedFiles};
 use super::session::EditSession;
+use super::thumbnail::{MaskThumbnail, mask_thumbnail};
 use crate::preview::frame::{FRAME_HEADER_BYTES, FrameHeader, FrameTimings, rgba8_body_len};
 
 /// The largest view width and height in pixels. The compositor can also
@@ -138,6 +139,13 @@ enum Job {
         source: SampleSourceDto,
         layer: Option<u64>,
         reply: Reply<SampledColor>,
+    },
+    /// Makes a thumbnail of a layer mask.
+    MaskThumbnail {
+        document: DocumentId,
+        layer: u64,
+        max_size: u32,
+        reply: Reply<MaskThumbnail>,
     },
     Close(DocumentId),
 }
@@ -447,6 +455,31 @@ impl EditorEngine {
         receive(receiver).await
     }
 
+    /// Makes a thumbnail of a layer mask on the engine thread and waits
+    /// for it (see [`mask_thumbnail`]).
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`],
+    /// [`EditorEngineError::LayerNotFound`],
+    /// [`EditorEngineError::InvalidThumbnailSize`], and the `NoMask` editor
+    /// error.
+    pub async fn mask_thumbnail_async(
+        &self,
+        document: DocumentId,
+        layer: u64,
+        max_size: u32,
+    ) -> Result<MaskThumbnail, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::MaskThumbnail {
+            document,
+            layer,
+            max_size,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
     /// Undoes the last step of a document and waits for the new info.
     ///
     /// # Errors
@@ -640,6 +673,7 @@ fn fail_job(job: Job, error: &EditorEngineError) {
         Job::StrokePoints { reply, .. } => reply(Err(error())),
         Job::Outline { reply, .. } => reply(Err(error())),
         Job::Sample { reply, .. } => reply(Err(error())),
+        Job::MaskThumbnail { reply, .. } => reply(Err(error())),
         Job::FinishSave { reply, .. } => {
             if let Some(reply) = reply {
                 reply(Err(error()));
@@ -1045,6 +1079,18 @@ impl Renderer {
                 let result = guarded(self, |r| {
                     let session = r.session(document)?;
                     sample_color(session.document(), x, y, size, source, layer)
+                });
+                reply(result);
+            }
+            Job::MaskThumbnail {
+                document,
+                layer,
+                max_size,
+                reply,
+            } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    mask_thumbnail(session.document(), layer, max_size)
                 });
                 reply(result);
             }

@@ -1141,6 +1141,22 @@ mod tests {
     }
 
     #[test]
+    fn mask_version_follows_the_mask() {
+        let mut s = session();
+        let bg = s.info(1).layers[0].id;
+        assert_eq!(s.info(1).layers[0].mask_version, None);
+        let add = |fill| EditDto::AddMask { layer_id: bg, fill };
+        s.edit(add(MaskFillId::Hide), None).unwrap();
+        let first = s.info(1).layers[0].mask_version.unwrap();
+        assert_eq!(s.info(1).layers[0].mask_version, Some(first));
+        s.edit(EditDto::DeleteMask { layer_id: bg }, None).unwrap();
+        assert_eq!(s.info(1).layers[0].mask_version, None);
+        s.edit(add(MaskFillId::Reveal), None).unwrap();
+        let second = s.info(1).layers[0].mask_version.unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn mask_edits_obey_locks() {
         let mut s = session();
         let bg = background(&s);

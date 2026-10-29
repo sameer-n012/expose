@@ -33,6 +33,7 @@ pub mod outline;
 pub mod sample;
 pub mod save;
 pub mod session;
+pub mod thumbnail;
 
 use expose_develop::DevelopError;
 use expose_editor::EditorError;
@@ -69,6 +70,9 @@ pub enum EditorEngineError {
     /// The input of a color sample is not valid.
     #[error("invalid color sample: {0}")]
     InvalidSample(&'static str),
+    /// The `max_size` of a mask thumbnail is not in `1..=256`.
+    #[error("the mask thumbnail size must be 1 to 256")]
+    InvalidThumbnailSize,
     /// The layer has a mask already. The edit does not replace it.
     #[error("the layer {0} has a mask already")]
     MaskExists(u64),
@@ -155,6 +159,7 @@ impl From<EditorEngineError> for CommandError {
             EditorEngineError::InvalidViewSize { .. }
             | EditorEngineError::InvalidStep
             | EditorEngineError::InvalidSample(_)
+            | EditorEngineError::InvalidThumbnailSize
             | EditorEngineError::MaskExists(_)
             | EditorEngineError::StrokeNotActive(_)
             | EditorEngineError::InvalidStrokePoints(_)
