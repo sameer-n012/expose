@@ -51,6 +51,7 @@ import {
   DEFAULT_FOREGROUND,
   defaultBrush,
   defaultEraser,
+  hexToRgb,
   normalizeBrush,
   steppedHardness,
   steppedSize,
@@ -60,6 +61,7 @@ import {
   type PaintTarget,
   type PaintTool,
 } from '../editor/brush';
+import { defaultBucket, defaultWand, fillEdit, magicWandEdit, type FloodSettings, type PaintBucketSettings } from '../editor/flood';
 import { clampFeather, cycleLasso, cycleMarquee, isLassoTool, type EditorTool, type LassoTool } from '../editor/selection';
 import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
@@ -140,6 +142,10 @@ export class EditorStore {
   sampleSize = $state<1 | 3 | 5>(1);
   /** What the eyedropper reads: all layers (the composite) or the selected layer. */
   sampleSource = $state<SampleSource>('composite');
+  /** The settings of the magic wand. Shared by all tabs. */
+  wand = $state<FloodSettings>(defaultWand());
+  /** The settings of the paint bucket. Shared by all tabs. */
+  bucket = $state<PaintBucketSettings>(defaultBucket());
 
   readonly #library: EditorStoreOptions['library'];
   readonly #modules: EditorStoreOptions['modules'];
@@ -744,6 +750,48 @@ export class EditorStore {
     if (this.info !== null) {
       this.edit({ type: 'selectShape', shape, mode, antiAlias: this.antiAlias, feather: this.feather });
     }
+  }
+
+  /**
+   * Magic wand click at a canvas point (the shell floors it). Without
+   * "sample all layers" a selected layer is needed; else a toast shows and
+   * nothing is sent.
+   */
+  magicWandAt(x: number, y: number, mode: SelectionModeId): void {
+    if (this.info === null) {
+      return;
+    }
+    const layerId = this.selectedId;
+    if (layerId === null && !this.wand.sampleAllLayers) {
+      this.#toasts.info('Select a layer to sample, or turn on "Sample all layers".');
+      return;
+    }
+    this.edit(magicWandEdit(x, y, mode, this.wand, layerId));
+  }
+
+  /**
+   * Paint bucket click at a canvas point. It needs a selected pixel layer as
+   * the paint target (not a mask); else a toast shows and nothing is sent.
+   */
+  fillAt(x: number, y: number): void {
+    if (this.info === null) {
+      return;
+    }
+    const layer = this.selected;
+    if (layer === null) {
+      this.#toasts.info('Select a pixel layer to fill.');
+      return;
+    }
+    if (this.paintTarget === 'mask' || layer.kind !== 'pixel') {
+      this.#toasts.info('The paint bucket fills pixel layers. Select a pixel layer, not a mask.');
+      return;
+    }
+    const color = hexToRgb(this.foreground);
+    if (color === null) {
+      this.#toasts.error('The foreground color is not valid.');
+      return;
+    }
+    this.edit(fillEdit(layer.id, x, y, color, this.bucket));
   }
 
   selectAll(): void {

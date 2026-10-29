@@ -59,6 +59,11 @@ describe('module switching', () => {
     expect(moduleView('editor')?.hidden).toBe(false);
     expect(moduleView('develop')?.hidden).toBe(true);
 
+    // In the Editor, G is the paint bucket: it does not leave the Editor.
+    await press('g');
+    expect(app.modules.active).toBe('editor');
+    await press('d', {}, window);
+    await fireEvent.click(screen.getByRole('button', { name: 'Develop' }));
     await press('g');
     expect(moduleView('library')?.hidden).toBe(false);
     expect(moduleView('editor')?.hidden).toBe(true);
@@ -105,6 +110,8 @@ describe('module switching', () => {
     await fireEvent.dblClick(cell);
     expect(screen.getByTestId('library-loupe')).toBeTruthy();
     await press('e');
+    // In the Editor, G is the paint bucket: leave through the Develop button first.
+    await fireEvent.click(screen.getByRole('button', { name: 'Develop' }));
     await press('g');
     expect(screen.getByTestId('library-grid')).toBeTruthy();
   });

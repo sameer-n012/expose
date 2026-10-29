@@ -2,7 +2,7 @@
   The tool strip and the selection options of the Editor canvas.
 
   - Tools: Hand (H), Rotate view (R), Rectangle and Ellipse marquee (M cycles), Polygon lasso (L),
-    Brush (B), Eraser (E). The paint tools show their options in `BrushOptions`.
+    Magic wand (W), Paint bucket (G), Brush (B), Eraser (E). The paint tools show their options in `BrushOptions`.
     They are disabled, with the reason as the tooltip, when the selected layer
     cannot take paint.
   - Options of the selection tools: feather (0 to 250 px) and anti-alias.
@@ -15,6 +15,8 @@
   import type { EditorStore } from '../../lib/stores/editor.svelte';
   import BrushOptions from './BrushOptions.svelte';
   import EyedropperOptions from './EyedropperOptions.svelte';
+  import MagicWandOptions from './MagicWandOptions.svelte';
+  import PaintBucketOptions from './PaintBucketOptions.svelte';
 
   interface Props {
     editor: EditorStore;
@@ -37,6 +39,8 @@
     { id: 'ellipseSelect', label: 'Ellipse', title: 'Ellipse marquee (M). Shift adds, Alt subtracts, Shift+Alt intersects.' },
     { id: 'lasso', label: 'Freehand', title: 'Freehand lasso (L). Drag to draw the outline. Release to close. Shift adds, Alt subtracts.' },
     { id: 'polygonLasso', label: 'Polygon', title: 'Polygon lasso (L). Click for points. Click the first point, double-click, or press Enter to close.' },
+    { id: 'magicWand', label: 'Magic wand', title: 'Magic wand (W). Click to select similar pixels. Shift adds, Alt subtracts, Shift+Alt intersects.' },
+    { id: 'paintBucket', label: 'Paint bucket', title: 'Paint bucket (G). Click to fill similar pixels with the foreground color.' },
     { id: 'eyedropper', label: 'Eyedropper', title: 'Eyedropper (I). Click to pick the foreground color. Alt+click picks the background color.' },
   ];
 
@@ -72,6 +76,14 @@
 
   {#if editor.tool === 'eyedropper'}
     <EyedropperOptions {editor} />
+  {/if}
+
+  {#if editor.tool === 'magicWand'}
+    <MagicWandOptions {editor} />
+  {/if}
+
+  {#if editor.tool === 'paintBucket'}
+    <PaintBucketOptions {editor} />
   {/if}
 
   {#if selecting}
