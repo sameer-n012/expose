@@ -4,12 +4,12 @@
 
 use expose_core::buffer::WorkingImage;
 use expose_editor::{
-    Adjustment, BrushSettings, Document, DocumentSpec, Edit, History, LayerContent, LayerId, Mask,
-    MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
+    Adjustment, BrushSettings, Document, DocumentSpec, Edit, EditorError, History, LayerContent,
+    LayerId, Mask, MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
 };
 
 use super::EditorEngineError;
-use super::dto::{DocumentId, DocumentInfo, EditDto, MaskFillId};
+use super::dto::{DocumentId, DocumentInfo, EditDto, HistoryInfo, MaskFillId};
 use super::save::{DocumentOrigin, SavedFiles};
 
 /// The maximum number of undo steps of a document. A delete step keeps the
@@ -243,6 +243,16 @@ impl EditSession {
         info.saved_photo_id = self.origin.saved.as_ref().map(|s| s.photo_id);
         info.source_photo_id = self.origin.source_photo_id;
         info.name = self.name();
+        info.history = HistoryInfo {
+            steps: self
+                .history
+                .entries()
+                .map(|e| e.name().to_owned())
+                .collect(),
+            // The history holds at most `HISTORY_STEPS` entries, so the
+            // cursor fits in `u32`.
+            cursor: u32::try_from(self.history.cursor()).unwrap_or(u32::MAX),
+        };
         info
     }
 
@@ -308,6 +318,29 @@ impl EditSession {
         self.history
             .redo(&mut self.document)
             .map(drop)
+            .map_err(EditorEngineError::History)
+    }
+
+    /// Undoes or redoes steps until `step` steps are applied. An active
+    /// stroke ends first (it can add a step). A jump to the current cursor
+    /// does nothing.
+    ///
+    /// # Errors
+    ///
+    /// - [`EditorEngineError::Editor`] with `IndexOutOfRange` if `step` is
+    ///   more than the number of steps.
+    /// - [`EditorEngineError::History`] if a step fails.
+    pub fn history_jump(&mut self, step: usize) -> Result<(), EditorEngineError> {
+        self.commit_stroke()?;
+        let len = self.history.entries().len();
+        if step > len {
+            return Err(EditorEngineError::Editor(EditorError::IndexOutOfRange {
+                index: step,
+                len,
+            }));
+        }
+        self.history
+            .jump_to(&mut self.document, step)
             .map_err(EditorEngineError::History)
     }
 }
@@ -1324,6 +1357,94 @@ mod tests {
         assert!(!s.info(1).can_undo);
         s.redo().unwrap();
         assert_ne!(pixels(&s), before);
+    }
+
+    fn two_edits(s: &mut EditSession) {
+        let id = background(s);
+        s.edit(
+            EditDto::SetVisible {
+                layer_id: id,
+                visible: false,
+            },
+            None,
+        )
+        .unwrap();
+        s.edit(
+            EditDto::SetOpacity {
+                layer_id: id,
+                opacity: 0.5,
+            },
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn info_has_the_history() {
+        let mut s = session();
+        let h = s.info(1).history;
+        assert!(h.steps.is_empty() && h.cursor == 0);
+        two_edits(&mut s);
+        let h = s.info(1).history;
+        assert_eq!((h.steps.len(), h.cursor), (2, 2));
+        s.undo().unwrap();
+        let h = s.info(1).history;
+        assert_eq!((h.steps.len(), h.cursor), (2, 1));
+    }
+
+    #[test]
+    fn jump_matches_undo_and_redo() {
+        let mut jumped = session();
+        let mut stepped = session();
+        two_edits(&mut jumped);
+        two_edits(&mut stepped);
+        jumped.history_jump(0).unwrap();
+        stepped.undo().unwrap();
+        stepped.undo().unwrap();
+        assert!(jumped.document().layers()[0].visible());
+        assert_eq!(jumped.info(1).history.cursor, 0);
+        assert_eq!(jumped.is_dirty(), stepped.is_dirty());
+        jumped.history_jump(2).unwrap();
+        stepped.redo().unwrap();
+        stepped.redo().unwrap();
+        let (a, b) = (
+            &jumped.document().layers()[0],
+            &stepped.document().layers()[0],
+        );
+        assert_eq!(a.visible(), b.visible());
+        assert!((a.opacity() - b.opacity()).abs() < f32::EPSILON);
+        assert_eq!(jumped.info(1).history.cursor, 2);
+        // A jump to the current cursor does nothing.
+        let revision = jumped.document().revision();
+        jumped.history_jump(2).unwrap();
+        assert_eq!(jumped.document().revision(), revision);
+    }
+
+    #[test]
+    fn jump_past_the_end_is_refused() {
+        let mut s = session();
+        two_edits(&mut s);
+        assert!(matches!(
+            s.history_jump(3),
+            Err(EditorEngineError::Editor(
+                EditorError::IndexOutOfRange { .. }
+            ))
+        ));
+        assert_eq!(s.info(1).history.cursor, 2);
+    }
+
+    #[test]
+    fn jump_commits_an_active_stroke_first() {
+        let mut s = session();
+        let bg = background(&s);
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        s.history_jump(0).unwrap();
+        assert!(!s.has_stroke());
+        let h = s.info(1).history;
+        assert_eq!((h.steps.len(), h.cursor), (1, 0));
+        s.history_jump(1).unwrap();
+        assert_eq!(s.info(1).history.cursor, 1);
     }
 
     #[test]
