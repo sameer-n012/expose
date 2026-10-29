@@ -159,7 +159,7 @@ pub enum SelectionMode {
 
 impl SelectionMode {
     /// Combines the old value `a` and the shape value `b`.
-    fn combine(self, a: f32, b: f32) -> f32 {
+    pub(crate) fn combine(self, a: f32, b: f32) -> f32 {
         match self {
             Self::Replace => b,
             Self::Add => a.max(b),

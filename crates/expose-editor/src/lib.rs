@@ -22,6 +22,9 @@
 //!   [`Document::selection_version`] changes at each selection change.
 //! - [`brush`]: brush strokes (paint, erase, mask paint) on pixel layers
 //!   and masks ([`Stroke`]). One stroke gives one undo edit.
+//! - [`flood`]: flood regions for the magic wand and the paint bucket
+//!   ([`flood_region`], [`Document::select_region`],
+//!   [`Document::fill_region`]).
 //! - [`history`]: undo and redo. [`History::push_merge`] makes one undo
 //!   step from a gesture (for example, a slider drag).
 //! - [`mod@file`]: the native layered document file (`.exdoc`):
@@ -75,6 +78,7 @@ pub mod composite;
 pub mod document;
 pub mod error;
 pub mod file;
+pub mod flood;
 pub mod gpu;
 pub mod history;
 pub mod layer;
@@ -97,6 +101,7 @@ pub use document::{
 };
 pub use error::{EditorError, EditorResult, SharedGpuError};
 pub use file::{FILE_EXTENSION, FileError, read_document, write_document};
+pub use flood::{FillSettings, FloodSample, FloodSettings, MAX_FLOOD_TOLERANCE, flood_region};
 pub use gpu::{
     CURVE_TABLE_SIZE, GpuCompositor, MAX_VIEW_ORIGIN, MAX_VIEW_SCALE, MIN_VIEW_SCALE, ViewSpec,
 };
