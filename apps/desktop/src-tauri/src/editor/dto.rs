@@ -570,6 +570,8 @@ pub struct DocumentInfo {
     /// at each change of the selection, undo, and redo. The value is a
     /// stamp from a process counter, so it stays far below 2^53.
     pub selection_version: u64,
+    /// `true` if a reselect is possible ([`Document::can_reselect`]).
+    pub can_reselect: bool,
     /// The title of the document for an editor tab: the file stem of the
     /// photo (open), the trimmed name of the spec (new document), or the
     /// file stem of the layered file of the last save.
@@ -594,6 +596,7 @@ impl DocumentInfo {
             source_photo_id: None,
             has_selection: document.selection().is_some(),
             selection_version: document.selection_version(),
+            can_reselect: document.can_reselect(),
             name: String::new(),
         }
     }
@@ -781,6 +784,9 @@ pub enum EditDto {
     SelectAll,
     /// Removes the selection. It is an error if there is no selection.
     Deselect,
+    /// Restores the last removed selection. It is an error if no selection
+    /// is stored.
+    Reselect,
     /// Inverts the selection. It is an error if there is no selection.
     InvertSelection,
     /// Blurs the edge of the selection. It is an error if there is no
@@ -824,6 +830,7 @@ impl EditDto {
             Self::SelectShape { .. } => "Select",
             Self::SelectAll => "Select All",
             Self::Deselect => "Deselect",
+            Self::Reselect => "Reselect",
             Self::InvertSelection => "Invert Selection",
             Self::FeatherSelection { .. } => "Feather Selection",
             Self::MaskFromSelection { .. } => "Mask from Selection",
@@ -907,6 +914,13 @@ pub struct BrushSettingsDto {
     pub spacing: f32,
     pub pressure_size: bool,
     pub pressure_opacity: bool,
+    /// The blend mode of paint strokes. Absent means Normal.
+    #[serde(default = "default_brush_blend")]
+    pub blend_mode: BlendModeId,
+}
+
+const fn default_brush_blend() -> BlendModeId {
+    BlendModeId::Normal
 }
 
 impl From<BrushSettingsDto> for BrushSettings {
@@ -919,7 +933,7 @@ impl From<BrushSettingsDto> for BrushSettings {
             spacing: dto.spacing,
             pressure_size: dto.pressure_size,
             pressure_opacity: dto.pressure_opacity,
-            blend_mode: BlendMode::Normal,
+            blend_mode: dto.blend_mode.into(),
         }
     }
 }
@@ -1282,6 +1296,7 @@ mod tests {
         for (text, expected, name) in [
             ("selectAll", EditDto::SelectAll, "Select All"),
             ("deselect", EditDto::Deselect, "Deselect"),
+            ("reselect", EditDto::Reselect, "Reselect"),
             (
                 "invertSelection",
                 EditDto::InvertSelection,
@@ -1508,6 +1523,15 @@ mod tests {
         )
         .unwrap();
         assert!(brush.pressure_size && !brush.pressure_opacity);
+        assert_eq!(BrushSettings::from(brush).blend_mode, BlendMode::Normal);
+        let multiply: BrushSettingsDto = serde_json::from_str(
+            r#"{"size":10,"hardness":0.5,"opacity":1,"flow":1,"spacing":0.25,"pressureSize":true,"pressureOpacity":false,"blendMode":"multiply"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            BrushSettings::from(multiply).blend_mode,
+            BlendMode::Multiply
+        );
     }
 
     #[test]

@@ -367,6 +367,7 @@ fn next_layer_name(document: &Document) -> String {
 }
 
 /// Applies one edit and returns its inverse.
+#[allow(clippy::too_many_lines, reason = "one arm per edit")]
 fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineError> {
     let undo = match edit {
         EditDto::SetVisible { layer_id, visible } => {
@@ -463,6 +464,7 @@ fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineErr
         edit @ (EditDto::SelectShape { .. }
         | EditDto::SelectAll
         | EditDto::Deselect
+        | EditDto::Reselect
         | EditDto::InvertSelection
         | EditDto::FeatherSelection { .. }
         | EditDto::MaskFromSelection { .. }) => apply_selection(document, edit)?,
@@ -481,6 +483,7 @@ fn apply_selection(document: &mut Document, edit: EditDto) -> Result<Edit, Edito
         } => document.select_shape(&shape.into(), mode.into(), anti_alias, feather)?,
         EditDto::SelectAll => document.select_all()?,
         EditDto::Deselect => document.deselect()?,
+        EditDto::Reselect => document.reselect()?,
         EditDto::InvertSelection => document.invert_selection()?,
         EditDto::FeatherSelection { radius } => document.feather_selection(radius)?,
         EditDto::MaskFromSelection { layer_id } => {
@@ -1058,6 +1061,20 @@ mod tests {
             ));
         }
         assert!(!s.info(1).can_undo);
+    }
+
+    #[test]
+    fn reselect_restores_the_selection() {
+        let mut s = session();
+        assert!(!s.info(1).can_reselect);
+        assert!(s.edit(EditDto::Reselect, None).is_err());
+        s.edit(EditDto::SelectAll, None).unwrap();
+        s.edit(EditDto::Deselect, None).unwrap();
+        let info = s.info(1);
+        assert!(!info.has_selection);
+        assert!(info.can_reselect);
+        s.edit(EditDto::Reselect, None).unwrap();
+        assert!(s.info(1).has_selection);
     }
 
     #[test]
