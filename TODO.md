@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; 2026-10-28)
+- **editor-selections-followups + editor-brushes-followups** (ADR 0024, 2026-10-28) — round 1: `feat/editor-reselect-brush-blend` (crate `Document::reselect`/`can_reselect`, `BrushSettings.blend_mode`; O) and `feat/editor-freehand-lasso` (UI `lasso` tool; S). Round 2 after the merge: shell (reselect edit, `canReselect`, brush `blendMode`, `editor_sample_color`) + UI (reselect `Mod+Shift+D`, blend mode select, eyedropper `I`).
 
 ## Next (suggested order)
 
@@ -25,7 +25,7 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 5. [ ] **editor-tabs-check** (operator) — check in the real webview: open two photos (`Mod+E` on each) → two tabs; `Mod+E` on a photo that has a tab activates it; New document (`Mod+N`) adds a tab; tab names (photo stem, new-document name, saved file stem after Save As); dirty marker; close button, middle-click, `Mod+W` (check that the macOS app menu does not close the window first, ADR 0023 "Open"); `Ctrl+Tab` / `Ctrl+Shift+Tab`; a dirty tab asks before it closes; window close with two dirty tabs asks for each; after the last tab closes, the library photo does not open again until you leave the Editor and come back; zoom/fit and layer selection stay per tab. After the check, mark "Multiple open documents (tabs)" in `FEATURES.md`.
    - Follow-ups: key the compositor cache by document and layer (a tab switch can upload all layers again; O); per-tab tool or layer-list scroll position (optional); shell tests for `name` through `editor_open` / `editor_new` (S); the AppShell editor DOM test prints "The window close guard is not available" (happy-dom has no Tauri window).
 6. [ ] **editor-selections-followups** — freehand lasso (P1 lasso item); reselect (restore the last selection after deselect; P1 item "select all, deselect, reselect, invert").
-7. [ ] **editor-brushes-followups** — brush blend mode (P1 brush item); color picker dialog and eyedropper (P1 colors item).
+7. [ ] **editor-brushes-followups** — brush blend mode (P1 brush item); eyedropper (P1 colors item). The color picker is the native color input (system color panel); the operator check decides if it is sufficient (ADR 0024).
 8. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
 
 ### Follow-ups from editor-gpu (ADR 0012)
