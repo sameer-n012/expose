@@ -35,6 +35,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 interface Sel {
   has: boolean;
   version: number;
+  canReselect?: boolean;
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -60,6 +61,7 @@ async function makeStore(layers: LayerInfo[], start: Sel = { has: false, version
     sourcePhotoId: 1,
     hasSelection: sel.has,
     selectionVersion: sel.version,
+    canReselect: sel.canReselect === true,
   });
   const api = {
     open: vi.fn(async () => doc()),
@@ -72,6 +74,11 @@ async function makeStore(layers: LayerInfo[], start: Sel = { has: false, version
         sel.version += 1;
       } else if (edit.type === 'deselect') {
         sel.has = false;
+        sel.canReselect = true;
+        sel.version += 1;
+      } else if (edit.type === 'reselect') {
+        sel.has = true;
+        sel.canReselect = false;
         sel.version += 1;
       }
       return doc();
@@ -191,6 +198,22 @@ describe('selection shortcuts', () => {
     await flush();
     expect(api.edit).not.toHaveBeenCalled();
     expect(store.featherDialogOpen).toBe(false);
+  });
+
+  it('Mod+Shift+D sends reselect only after a deselect', async () => {
+    const { store, api } = await makeStore([layer(1)], { has: true, version: 1 });
+    expect(find(store, EDITOR_ACTION.reselect)?.defaultBinding).toBe('Mod+Shift+D');
+    find(store, EDITOR_ACTION.reselect)?.run();
+    await flush();
+    expect(api.edit).not.toHaveBeenCalled();
+    store.deselect();
+    await flush();
+    expect(store.canReselect).toBe(true);
+    find(store, EDITOR_ACTION.reselect)?.run();
+    await flush();
+    expect(api.edit.mock.calls.map((c) => c[1].type)).toEqual(['deselect', 'reselect']);
+    expect(store.hasSelection).toBe(true);
+    expect(store.canReselect).toBe(false);
   });
 
   it('sends the edits with a selection', async () => {

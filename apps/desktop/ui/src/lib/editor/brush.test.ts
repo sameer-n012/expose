@@ -12,6 +12,7 @@ import {
   sliderToSize,
   steppedHardness,
   steppedSize,
+  strokeBrush,
   strokeTarget,
 } from './brush';
 
@@ -109,6 +110,19 @@ describe('hardness and settings', () => {
   it('limits every value of the settings', () => {
     const out = normalizeBrush({ ...defaultBrush(), size: 0, hardness: 2, opacity: -1, flow: Number.NaN, spacing: 100 });
     expect(out).toMatchObject({ size: 1, hardness: 1, opacity: 0, flow: 0, spacing: 10 });
+  });
+
+  it('keeps a valid blend mode and replaces dissolve with normal', () => {
+    expect(defaultBrush().blendMode).toBe('normal');
+    expect(normalizeBrush({ ...defaultBrush(), blendMode: 'multiply' }).blendMode).toBe('multiply');
+    expect(normalizeBrush({ ...defaultBrush(), blendMode: 'dissolve' }).blendMode).toBe('normal');
+  });
+
+  it('sends normal for the eraser and for mask paint', () => {
+    const brush = { ...defaultBrush(), blendMode: 'screen' as const };
+    expect(strokeBrush('brush', 'pixels', brush).blendMode).toBe('screen');
+    expect(strokeBrush('brush', 'mask', brush).blendMode).toBe('normal');
+    expect(strokeBrush('eraser', 'pixels', brush).blendMode).toBe('normal');
   });
 });
 

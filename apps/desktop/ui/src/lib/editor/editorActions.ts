@@ -41,6 +41,7 @@ export const EDITOR_ACTION = {
   showMask: 'editor.showMask',
   selectAll: 'editor.selectAll',
   deselect: 'editor.deselect',
+  reselect: 'editor.reselect',
   invertSelection: 'editor.invertSelection',
   featherSelection: 'editor.featherSelection',
   marqueeTool: 'editor.marqueeTool',
@@ -48,6 +49,7 @@ export const EDITOR_ACTION = {
   handTool: 'editor.handTool',
   brushTool: 'editor.brushTool',
   eraserTool: 'editor.eraserTool',
+  eyedropperTool: 'editor.eyedropperTool',
   brushSizeDown: 'editor.brushSizeDown',
   brushSizeUp: 'editor.brushSizeUp',
   brushHarder: 'editor.brushHarder',
@@ -73,6 +75,7 @@ export interface EditorCommands {
   toggleShowMask(): void;
   selectAll(): void;
   deselect(): void;
+  reselect(): void;
   invertSelection(): void;
   openFeatherDialog(): void;
   cycleMarquee(): void;
@@ -103,6 +106,8 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     // The store does nothing for deselect, invert, and feather when there is no selection.
     { id: EDITOR_ACTION.selectAll, label: 'Editor: select all', scope: 'editor', defaultBinding: 'Mod+A', run: () => commands.selectAll() },
     { id: EDITOR_ACTION.deselect, label: 'Editor: deselect', scope: 'editor', defaultBinding: 'Mod+D', run: () => commands.deselect() },
+    // The store sends no edit when there is nothing to reselect.
+    { id: EDITOR_ACTION.reselect, label: 'Editor: reselect', scope: 'editor', defaultBinding: 'Mod+Shift+D', run: () => commands.reselect() },
     { id: EDITOR_ACTION.invertSelection, label: 'Editor: invert selection', scope: 'editor', defaultBinding: 'Mod+Shift+I', run: () => commands.invertSelection() },
     { id: EDITOR_ACTION.featherSelection, label: 'Editor: feather selection…', scope: 'editor', defaultBinding: 'Shift+F6', run: () => commands.openFeatherDialog() },
     { id: EDITOR_ACTION.marqueeTool, label: 'Editor: marquee tool (rectangle, ellipse)', scope: 'editor', defaultBinding: 'M', run: () => commands.cycleMarquee() },
@@ -111,6 +116,7 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     // In the editor scope, `E` and `D` take precedence over the global module keys.
     { id: EDITOR_ACTION.brushTool, label: 'Editor: brush tool', scope: 'editor', defaultBinding: 'B', run: () => commands.selectPaintTool('brush') },
     { id: EDITOR_ACTION.eraserTool, label: 'Editor: eraser tool', scope: 'editor', defaultBinding: 'E', run: () => commands.selectPaintTool('eraser') },
+    { id: EDITOR_ACTION.eyedropperTool, label: 'Editor: eyedropper tool', scope: 'editor', defaultBinding: 'I', run: () => commands.setTool('eyedropper') },
     { id: EDITOR_ACTION.brushSizeDown, label: 'Editor: brush smaller', scope: 'editor', defaultBinding: '[', allowRepeat: true, run: () => commands.stepBrushSize(-1) },
     { id: EDITOR_ACTION.brushSizeUp, label: 'Editor: brush larger', scope: 'editor', defaultBinding: ']', allowRepeat: true, run: () => commands.stepBrushSize(1) },
     // Shift+[ and Shift+] give the keys `{` and `}`. The key registry ignores Shift for symbols, so "Shift+[" would be the same chord as "[".

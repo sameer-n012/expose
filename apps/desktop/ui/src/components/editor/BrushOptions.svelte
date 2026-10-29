@@ -12,6 +12,7 @@
 -->
 <script lang="ts">
   import { MAX_SIZE, hexToRgb, rgbToHex, sizeToSlider, sliderToSize, type PaintTool } from '../../lib/editor/brush';
+  import { BLEND_GROUPS } from '../../lib/editor/layers';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
 
   interface Props {
@@ -22,6 +23,17 @@
   let { editor, tool }: Props = $props();
 
   const settings = $derived(editor.brushOf(tool));
+  const onMask = $derived(editor.paintTarget === 'mask');
+
+  /** The layer blend modes without dissolve (strokes do not support it). */
+  const BRUSH_MODE_GROUPS = BLEND_GROUPS.map((group) => group.filter((mode) => mode.id !== 'dissolve')).filter((group) => group.length > 0);
+
+  function setMode(value: string): void {
+    const mode = BRUSH_MODE_GROUPS.flat().find((m) => m.id === value);
+    if (mode !== undefined) {
+      editor.updateBrush(tool, { blendMode: mode.id });
+    }
+  }
 
   /** Sets a 0..1 setting from a percent text. A text that is not a number is dropped. */
   function setPercent(key: 'hardness' | 'opacity' | 'flow' | 'spacing', event: Event & { currentTarget: HTMLInputElement }): void {
@@ -89,6 +101,18 @@
       onchange={(e) => setSize(Number(e.currentTarget.value), e)}
     />
   </div>
+  {#if tool === 'brush'}
+    <label title={onMask ? 'Mask paint always uses Normal.' : 'The blend mode of the paint'}>
+      Mode
+      <select aria-label="Blend mode" disabled={onMask} value={onMask ? 'normal' : settings.blendMode} onchange={(e) => setMode(e.currentTarget.value)}>
+        {#each BRUSH_MODE_GROUPS as group, index (index)}
+          {#each group as mode (mode.id)}
+            <option value={mode.id}>{mode.label}</option>
+          {/each}
+        {/each}
+      </select>
+    </label>
+  {/if}
   <label>
     Hardness
     <input
@@ -167,6 +191,7 @@
     color: var(--color-text-muted);
   }
   button,
+  select,
   input[type='number'] {
     background: var(--color-bg-panel-raised);
     color: var(--color-text);

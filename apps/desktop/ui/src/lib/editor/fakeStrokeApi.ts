@@ -3,10 +3,11 @@
  * import this file. A test that checks strokes replaces the calls.
  */
 import { vi } from 'vitest';
-import type { DocumentInfo } from './api';
+import type { DocumentInfo, SampledColor } from './api';
 
 export function strokeStubs() {
   return {
+    sampleColor: vi.fn(async (..._args: unknown[]): Promise<SampledColor> => ({ color: '#336699', alpha: 1 })),
     strokeBegin: vi.fn(async (..._args: unknown[]) => 1),
     strokePoints: vi.fn(async (..._args: unknown[]) => null),
     strokeEnd: vi.fn(async (..._args: unknown[]): Promise<DocumentInfo> => {

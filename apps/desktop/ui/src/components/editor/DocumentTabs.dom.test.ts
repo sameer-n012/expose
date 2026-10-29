@@ -26,6 +26,7 @@ function doc(documentId: number, extra: Partial<DocumentInfo> = {}): DocumentInf
     sourcePhotoId: documentId,
     hasSelection: false,
     selectionVersion: 0,
+    canReselect: false,
     ...extra,
   };
 }
