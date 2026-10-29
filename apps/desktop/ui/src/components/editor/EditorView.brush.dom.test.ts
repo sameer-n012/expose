@@ -177,7 +177,7 @@ describe('EditorView strokes', () => {
     render(EditorView, { editor: made.store, toasts: made.toasts });
     await flush();
     // happy-dom has no layout: set the view by hand (100 % zoom, origin 0).
-    made.store.view = { zoom: 1, originX: 0, originY: 0 };
+    made.store.view = { zoom: 1, originX: 0, originY: 0, rotation: 0 };
     made.store.setTool(tool);
     await flush();
     return { ...made, viewport: screen.getByTestId('editor-viewport') };
@@ -310,7 +310,7 @@ describe('eyedropper', () => {
     const made = await makeStore(layers);
     render(EditorView, { editor: made.store, toasts: made.toasts });
     await flush();
-    made.store.view = { zoom: 2, originX: 0, originY: 0 };
+    made.store.view = { zoom: 2, originX: 0, originY: 0, rotation: 0 };
     made.store.setTool(tool);
     await flush();
     return { ...made, viewport: screen.getByTestId('editor-viewport') };

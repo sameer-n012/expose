@@ -108,7 +108,7 @@ afterEach(cleanup);
 describe('SelectionOverlay', () => {
   it('draws nothing without a selection and asks for nothing', async () => {
     const { store, api } = await makeStore([layer(1)]);
-    store.view = { zoom: 1, originX: 0, originY: 0 };
+    store.view = { zoom: 1, originX: 0, originY: 0, rotation: 0 };
     render(SelectionOverlay, { editor: store });
     await flush();
     expect(screen.queryByTestId('selection-outline')).toBeNull();
@@ -117,7 +117,7 @@ describe('SelectionOverlay', () => {
 
   it('fetches the outline when the selection version changes', async () => {
     const { store, api } = await makeStore([layer(1)]);
-    store.view = { zoom: 1, originX: 0, originY: 0 };
+    store.view = { zoom: 1, originX: 0, originY: 0, rotation: 0 };
     render(SelectionOverlay, { editor: store });
     store.selectAll();
     await flush();
@@ -127,7 +127,7 @@ describe('SelectionOverlay', () => {
     const svg = screen.getByTestId('selection-outline');
     expect(svg.querySelector('path')?.getAttribute('d')).toBe('M0 0 L10 0 L10 10 Z');
     // A pan or a zoom (same step) does not ask again.
-    store.view = { zoom: 2, originX: 5, originY: 5 };
+    store.view = { zoom: 2, originX: 5, originY: 5, rotation: 0 };
     await flush();
     expect(api.selectionOutline).toHaveBeenCalledTimes(1);
     // A new version asks again.
@@ -139,17 +139,17 @@ describe('SelectionOverlay', () => {
 
   it('asks again when the zoom step changes', async () => {
     const { store, api } = await makeStore([layer(1)], { has: true, version: 5 });
-    store.view = { zoom: 1, originX: 0, originY: 0 };
+    store.view = { zoom: 1, originX: 0, originY: 0, rotation: 0 };
     render(SelectionOverlay, { editor: store });
     await flush();
-    store.view = { zoom: 0.25, originX: 0, originY: 0 };
+    store.view = { zoom: 0.25, originX: 0, originY: 0, rotation: 0 };
     await flush();
     expect(api.selectionOutline.mock.calls.map((c) => c[1])).toEqual([1, 4]);
   });
 
   it('drops a late answer of an old request', async () => {
     const { store, api, sel } = await makeStore([layer(1)], { has: true, version: 1 });
-    store.view = { zoom: 1, originX: 0, originY: 0 };
+    store.view = { zoom: 1, originX: 0, originY: 0, rotation: 0 };
     let releaseFirst: (value: SelectionOutline) => void = () => undefined;
     api.selectionOutline.mockImplementationOnce(() => new Promise<SelectionOutline>((resolve) => (releaseFirst = resolve)));
     render(SelectionOverlay, { editor: store });
@@ -167,7 +167,7 @@ describe('SelectionOverlay', () => {
 
   it('clears the outline after a deselect', async () => {
     const { store } = await makeStore([layer(1)], { has: true, version: 1 });
-    store.view = { zoom: 1, originX: 0, originY: 0 };
+    store.view = { zoom: 1, originX: 0, originY: 0, rotation: 0 };
     render(SelectionOverlay, { editor: store });
     await flush();
     expect(screen.queryByTestId('selection-outline')).not.toBeNull();
@@ -321,7 +321,7 @@ describe('EditorView gestures', () => {
     render(EditorView, { editor: made.store, toasts: new ToastStore() });
     await flush();
     // happy-dom has no layout: set the view by hand (100 % zoom, origin 0).
-    made.store.view = { zoom: 1, originX: 0, originY: 0 };
+    made.store.view = { zoom: 1, originX: 0, originY: 0, rotation: 0 };
     made.store.setTool(tool);
     await flush();
     return { ...made, viewport: screen.getByTestId('editor-viewport') };

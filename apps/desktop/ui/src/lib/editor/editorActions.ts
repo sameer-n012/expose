@@ -10,8 +10,9 @@
  * - `Mod+Z`, `Mod+Shift+Z` (scope `editor`): undo and redo.
  * - `Mod+A`, `Mod+D`, `Mod+Shift+I`, `Shift+F6` (scope `editor`): select all,
  *   deselect, invert the selection, open the Feather dialog.
- * - `M`, `L`, `H` (scope `editor`): marquee tool (rectangle, then ellipse),
- *   lasso (the last used kind; `L` again: freehand or polygon), hand.
+ * - `M`, `L`, `H`, `R` (scope `editor`): marquee tool (rectangle, then ellipse),
+ *   lasso (the last used kind; `L` again: freehand or polygon), hand, rotate view.
+ * - "Editor: reset view rotation" (scope `editor`, no default key).
  * - `B`, `E` (scope `editor`): brush and eraser tool.
  * - `[`, `]`, `{`, `}` (scope `editor`): brush size and hardness (`{` and `}`
  *   are Shift+`[` and Shift+`]`).
@@ -47,6 +48,8 @@ export const EDITOR_ACTION = {
   marqueeTool: 'editor.marqueeTool',
   lassoTool: 'editor.lassoTool',
   handTool: 'editor.handTool',
+  rotateTool: 'editor.rotateTool',
+  resetRotation: 'editor.resetRotation',
   brushTool: 'editor.brushTool',
   eraserTool: 'editor.eraserTool',
   eyedropperTool: 'editor.eyedropperTool',
@@ -70,6 +73,7 @@ export interface EditorCommands {
   zoomStep(direction: 1 | -1): void;
   fitToWindow(): void;
   zoomTo(zoom: number): void;
+  resetRotation(): void;
   requestNewDocument(): void;
   addPixelLayer(): void;
   toggleShowMask(): void;
@@ -113,6 +117,9 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     { id: EDITOR_ACTION.marqueeTool, label: 'Editor: marquee tool (rectangle, ellipse)', scope: 'editor', defaultBinding: 'M', run: () => commands.cycleMarquee() },
     { id: EDITOR_ACTION.lassoTool, label: 'Editor: lasso tool (freehand, polygon)', scope: 'editor', defaultBinding: 'L', run: () => commands.cycleLasso() },
     { id: EDITOR_ACTION.handTool, label: 'Editor: hand tool', scope: 'editor', defaultBinding: 'H', run: () => commands.setTool('hand') },
+    // The develop crop `R` is in the develop scope: no collision.
+    { id: EDITOR_ACTION.rotateTool, label: 'Editor: rotate view tool', scope: 'editor', defaultBinding: 'R', run: () => commands.setTool('rotate') },
+    { id: EDITOR_ACTION.resetRotation, label: 'Editor: reset view rotation', scope: 'editor', defaultBinding: null, run: () => commands.resetRotation() },
     // In the editor scope, `E` and `D` take precedence over the global module keys.
     { id: EDITOR_ACTION.brushTool, label: 'Editor: brush tool', scope: 'editor', defaultBinding: 'B', run: () => commands.selectPaintTool('brush') },
     { id: EDITOR_ACTION.eraserTool, label: 'Editor: eraser tool', scope: 'editor', defaultBinding: 'E', run: () => commands.selectPaintTool('eraser') },

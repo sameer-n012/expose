@@ -1,14 +1,15 @@
 /**
  * Pure geometry of the selection tools.
  *
- * Gestures run in screen space (CSS pixels of the viewport). The shapes
- * that go to the shell are in canvas pixels. `view.ts` converts between them.
+ * Gestures run in content space (CSS pixels of the viewport before the view
+ * rotation; the view unrotates each pointer point first). The shapes that go
+ * to the shell are in canvas pixels. `view.ts` converts between them.
  */
 import type { SelectionModeId, SelectionShapeDto } from './api';
-import { screenToCanvas, type Point, type View } from './view';
+import { screenToCanvas, type Point, type ViewMapping } from './view';
 
 /** The tools of the Editor canvas. */
-export type EditorTool = 'hand' | 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso' | 'brush' | 'eraser' | 'eyedropper';
+export type EditorTool = 'hand' | 'rotate' | 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso' | 'brush' | 'eraser' | 'eyedropper';
 
 /** The two lasso tools: freehand and polygon. */
 export type LassoTool = 'lasso' | 'polygonLasso';
@@ -118,7 +119,7 @@ export function boxBetween(a: Point, b: Point): Box {
  * The corners are rounded to whole canvas pixels. Returns null if the
  * rounded box has no area.
  */
-export function dragShape(tool: 'rectSelect' | 'ellipseSelect', a: Point, b: Point, view: View): SelectionShapeDto | null {
+export function dragShape(tool: 'rectSelect' | 'ellipseSelect', a: Point, b: Point, view: ViewMapping): SelectionShapeDto | null {
   const start = screenToCanvas(view, a);
   const end = screenToCanvas(view, b);
   const x0 = Math.round(Math.min(start.x, end.x));
