@@ -1247,6 +1247,7 @@ mod tests {
             spacing: 0.25,
             pressure_size: false,
             pressure_opacity: false,
+            ..BrushSettings::default()
         }
     }
 
