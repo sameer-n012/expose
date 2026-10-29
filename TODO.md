@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; 2026-10-28)
+- **editor-tabs** (ADR 0023, 2026-10-28) — two parallel agents: `feat/editor-doc-name` (shell `DocumentInfo.name`, S) and `feat/editor-tabs-ui` (`EditorTab` store split, tab strip, `Mod+W` / `Ctrl+Tab`, O).
 
 ## Next (suggested order)
 
@@ -23,7 +23,7 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 4. [ ] **editor-brushes-check** (operator) — check in the real webview: brush (`B`) and eraser (`E`) on a pixel layer; size slider and `[` / `]`, hardness `{` / `}`, opacity, flow, spacing; foreground/background colors, `X` swaps, `D` resets (note: in the Editor, `E` and `D` now win over the global module keys); a plain click on the mask chip makes the mask the paint target (brush = foreground luminance, eraser = background luminance); a selection limits the paint; one undo step per stroke; Escape cancels a stroke; brush cursor circle; pen pressure on a tablet. After the check, mark the P1 brush items in `FEATURES.md` (ADR 0022).
    - Follow-ups: `expose-gpu` sub-region texture writes and kernel runs on a sub-rectangle (removes the full-texture copies in partial updates, the 2 × 128 MiB spare textures at 4096², and the full pyramid rebuild; frame after a batch ~12 ms → ~2–3 ms, O); partial updates for `render_mask_view` while the mask is shown; undo of a long diagonal stroke gives one large rect (more than half the canvas → full view composite); CPU dab speed-ups (falloff lookup table, no square root in the hard core).
 5. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
-6. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); the auto-open of the focused library photo can run while the New document dialog shows; dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
+6. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
