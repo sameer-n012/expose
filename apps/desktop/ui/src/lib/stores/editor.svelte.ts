@@ -1,23 +1,32 @@
 /**
- * State of the Editor module: the open document, the layer selection, the
- * canvas view, and the edit queue.
+ * State of the Editor module: the open documents (tabs), the tools, and the
+ * canvas viewport.
  *
- * - One document is open at a time. `openPhoto` closes the old document
- *   first. A late answer for an old request is dropped (generation
- *   counter), and a document that opens too late is closed again.
- * - Edits go to the shell one after the other, in order. A live edit
- *   (slider drag) replaces a waiting live edit of the same stream, so at
- *   most one edit of a stream is in flight and the newest value is kept.
+ * - Each open document is one `EditorTab`. One tab is active; the getters
+ *   and commands of this store (`info`, `view`, `edit`, `save`, …) work on
+ *   the active tab. An async result (open, edit, save) changes only the tab
+ *   that started it, also when another tab is active now.
+ * - `openPhoto` and `newDocument` open a new tab and make it active. A photo
+ *   that has a tab already (its source photo or its saved photo) activates
+ *   that tab. A failed open leaves an error tab, which the user can close.
+ * - `closeTab` asks about unsaved changes of that tab first (Save, Don't
+ *   save, or Cancel). A tab that closes while its document opens closes the
+ *   document when the open finishes.
+ * - Edits of a tab go to the shell one after the other, in order. A live
+ *   edit (slider drag) replaces a waiting live edit of the same stream, so
+ *   at most one edit of a stream is in flight and the newest value is kept.
  * - A drag uses one `gesture` number, so that the shell merges the drag
  *   into one undo step. A gesture ends on `endGesture()`, on any other
- *   edit, on undo and redo, and after `GESTURE_IDLE_MS` without a live edit.
+ *   edit, on undo and redo, on a tab switch, and after `GESTURE_IDLE_MS`
+ *   without a live edit.
  * - After each edit, undo, or redo, the document info is replaced. The
  *   canvas view watches `info.revision` and requests a new frame.
- * - `save()` waits for the queued edits, and then saves the document to the
- *   library (a layered `.exdoc` file and a flattened TIFF). Edits during a
- *   save go on; they keep the document dirty.
- * - Before the open document is replaced, a dirty document asks the user
- *   (`leavePrompt`: Save, Don't save, or Cancel).
+ * - `save()` waits for the queued edits of the tab, and then saves the
+ *   document to the library (a layered `.exdoc` file and a flattened TIFF).
+ *   Edits during a save go on; they keep the document dirty.
+ * - Auto-open: while the Editor module shows no tab, the view opens the
+ *   library photo (`openTarget`). After the user closes the last tab,
+ *   auto-open stays off until the user leaves the Editor module.
  */
 import { pickFolder, type PhotoId } from '../catalog';
 import type { DisplaySpace } from '../develop/transport';
@@ -52,24 +61,13 @@ import {
 import { clampFeather, cycleMarquee, type EditorTool } from '../editor/selection';
 import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
-import {
-  clampView,
-  clampZoom,
-  fitView,
-  hasArea,
-  panBy,
-  steppedZoom,
-  zoomAbout,
-  type Point,
-  type Size,
-  type View,
-} from '../editor/view';
+import { clampZoom, panBy, steppedZoom, zoomAbout, type Point, type Size, type View } from '../editor/view';
+import { EditorTab } from './editorTab.svelte';
 import type { LibraryStore } from './library.svelte';
 import type { ModuleStore } from './modules.svelte';
 import { describeError, type ToastStore } from './toasts.svelte';
 
-/** A live edit stream keeps its gesture for this time after the last live edit. */
-export const GESTURE_IDLE_MS = 600;
+export { EditorTab, GESTURE_IDLE_MS, type EditorTabStatus } from './editorTab.svelte';
 
 export interface EditorStoreOptions {
   readonly library: Pick<LibraryStore, 'focusIndex' | 'photoAt' | 'selectedIds'>;
@@ -85,7 +83,7 @@ export interface EditorStoreOptions {
   readonly pickFolder?: () => Promise<string | null>;
 }
 
-/** What the Editor view shows. */
+/** What the Editor view shows ('empty': no tab is active). */
 export type EditorStatus = 'empty' | 'loading' | 'ready' | 'error';
 
 /** The answer to the unsaved-changes question. */
@@ -112,27 +110,10 @@ function errorKind(error: unknown): string | null {
 }
 
 export class EditorStore {
-  /** The photo of the open document, or null. */
-  photoId = $state<PhotoId | null>(null);
-  /** The newest document info, or null. */
-  info = $state.raw<DocumentInfo | null>(null);
-  status = $state<EditorStatus>('empty');
-  loadError = $state<string | null>(null);
-  /** The selected layer id, or null. */
-  selectedId = $state<number | null>(null);
-  /** The layer that the user asked to show the mask of (see `showMaskLayerId`). */
-  #maskTarget = $state<number | null>(null);
-  /** Ids of the expanded groups. */
-  expanded = $state.raw<ReadonlySet<number>>(new Set());
-  /** The canvas view, or null until the document and the viewport are known. */
-  view = $state.raw<View | null>(null);
-  /** True while the view follows "fit to window". */
-  fit = $state(true);
+  /** The open tabs, in strip order. */
+  #tabs = $state.raw<readonly EditorTab[]>([]);
+  #activeTab = $state.raw<EditorTab | null>(null);
   viewport = $state.raw<Size>({ width: 0, height: 0 });
-  /** The number of edits that wait or run. */
-  pending = $state(0);
-  /** True while a save runs. */
-  saving = $state(false);
   /** The open unsaved-changes question, or null. */
   leavePrompt = $state.raw<LeavePrompt | null>(null);
   /** True while the New document dialog is open. */
@@ -152,8 +133,6 @@ export class EditorStore {
   foreground = $state(DEFAULT_FOREGROUND);
   /** The background color, "#rrggbb". */
   background = $state(DEFAULT_BACKGROUND);
-  /** The layer whose mask the user chose as the paint target (see `paintTarget`). */
-  #paintMaskId = $state<number | null>(null);
 
   readonly #library: EditorStoreOptions['library'];
   readonly #modules: EditorStoreOptions['modules'];
@@ -164,17 +143,14 @@ export class EditorStore {
   readonly #onSaved: ((result: SaveResult) => void) | undefined;
   readonly #pickFolder: () => Promise<string | null>;
   #answerLeave: ((choice: LeaveChoice) => void) | null = null;
-  /** The running save, or null. */
-  #saveRun: Promise<boolean> | null = null;
   /** The number in the next suggested "Untitled-N" name. */
   #untitled = 1;
-
-  #generation = 0;
-  #chain: Promise<void> = Promise.resolve();
-  /** Waiting live edits by stream key. */
-  readonly #live = new Map<string, { edit: EditDto; gesture: number }>();
-  #gesture: { key: string; id: number; at: number } | null = null;
-  #nextGesture = 1;
+  #nextTabId = 1;
+  /**
+   * True after the user closed the last tab: auto-open is off. This is not
+   * reactive state on purpose, because `openTarget` clears it (see there).
+   */
+  #autoOpenOff = false;
 
   constructor(options: EditorStoreOptions) {
     this.#library = options.library;
@@ -187,14 +163,213 @@ export class EditorStore {
     this.#pickFolder = options.pickFolder ?? pickFolder;
   }
 
-  /** True if the open document has changes after its last save (or its open). */
+  // ---- Tabs ----
+
+  /** The open tabs, in strip order. */
+  get tabs(): readonly EditorTab[] {
+    return this.#tabs;
+  }
+
+  /** The active tab, or null when no tab is open. */
+  get activeTab(): EditorTab | null {
+    return this.#activeTab;
+  }
+
+  /** True if a tab has unsaved changes. */
+  get anyDirty(): boolean {
+    return this.#tabs.some((tab) => tab.dirty);
+  }
+
+  /**
+   * Makes a tab active. The gesture of the old tab ends. The view of the new
+   * tab follows the current viewport (a tab in fit mode fits again).
+   */
+  activate(tab: EditorTab): void {
+    const old = this.#activeTab;
+    if (tab === old || !this.#tabs.includes(tab)) {
+      return;
+    }
+    old?.endGesture();
+    this.#activeTab = tab;
+    tab.fitTo(this.viewport);
+  }
+
+  /** Activates the next (1) or the previous (-1) tab. It wraps at the ends. */
+  nextTab(step: 1 | -1): void {
+    const tabs = this.#tabs;
+    const active = this.#activeTab;
+    if (tabs.length < 2 || active === null) {
+      return;
+    }
+    const index = tabs.indexOf(active);
+    const next = tabs[(index + step + tabs.length) % tabs.length];
+    if (next !== undefined) {
+      this.activate(next);
+    }
+  }
+
+  /** Closes the active tab (`Mod+W`). */
+  closeActiveTab(): void {
+    const tab = this.#activeTab;
+    if (tab !== null) {
+      void this.closeTab(tab);
+    }
+  }
+
+  /**
+   * Closes a tab. A dirty tab becomes active and asks first. Then the shell
+   * closes the document, and the tab to the right (else to the left)
+   * becomes active. Returns false if the tab stays open (Cancel, or a failed
+   * save).
+   */
+  async closeTab(tab: EditorTab): Promise<boolean> {
+    if (!this.#tabs.includes(tab)) {
+      return true;
+    }
+    if (tab.info !== null) {
+      // Queued edits and a running save change `dirty`.
+      await this.#settle(tab);
+      if (tab.dirty) {
+        this.activate(tab);
+        if (!(await this.#confirmTab(tab))) {
+          return false;
+        }
+      }
+      if (!this.#tabs.includes(tab)) {
+        // The tab closed while the question was open.
+        return true;
+      }
+    }
+    this.#removeTab(tab);
+    if (this.#tabs.length === 0) {
+      this.#autoOpenOff = true;
+    }
+    if (tab.info !== null) {
+      await this.#closeDocument(tab.info.documentId);
+    }
+    return true;
+  }
+
+  /**
+   * Asks about the unsaved changes of all tabs before the window closes. Each
+   * dirty tab becomes active in turn and asks. Returns false on Cancel or a
+   * failed save (the window stays open).
+   */
+  async confirmCloseAll(): Promise<boolean> {
+    for (const tab of [...this.#tabs]) {
+      if (!this.#tabs.includes(tab)) {
+        continue;
+      }
+      await this.#settle(tab);
+      if (!tab.dirty) {
+        continue;
+      }
+      this.activate(tab);
+      if (!(await this.#confirmTab(tab))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Removes a tab from the strip and activates its neighbor (right, else left). */
+  #removeTab(tab: EditorTab): void {
+    const tabs = this.#tabs;
+    const index = tabs.indexOf(tab);
+    if (index < 0) {
+      return;
+    }
+    tab.markClosed();
+    const rest = tabs.filter((t) => t !== tab);
+    this.#tabs = rest;
+    if (this.#activeTab === tab) {
+      this.#activeTab = null;
+      const next = rest[index] ?? rest[index - 1];
+      if (next !== undefined) {
+        this.activate(next);
+      }
+    }
+  }
+
+  /** Waits for the queued edits and the running save of a tab. */
+  async #settle(tab: EditorTab): Promise<void> {
+    await tab.chain;
+    if (tab.saveRun !== null) {
+      await tab.saveRun;
+    }
+  }
+
+  /** The open tab (not an error tab) that shows the photo, or null. */
+  #tabFor(photoId: PhotoId): EditorTab | null {
+    return this.#tabs.find((tab) => tab.status !== 'error' && tab.showsPhoto(photoId)) ?? null;
+  }
+
+  // ---- Active tab ----
+
+  /** The photo of the active tab, or null. */
+  get photoId(): PhotoId | null {
+    return this.#activeTab?.photoId ?? null;
+  }
+
+  /** The newest document info of the active tab, or null. */
+  get info(): DocumentInfo | null {
+    return this.#activeTab?.info ?? null;
+  }
+
+  get status(): EditorStatus {
+    return this.#activeTab?.status ?? 'empty';
+  }
+
+  get loadError(): string | null {
+    return this.#activeTab?.loadError ?? null;
+  }
+
+  /** The selected layer id of the active tab, or null. */
+  get selectedId(): number | null {
+    return this.#activeTab?.selectedId ?? null;
+  }
+
+  /** Ids of the expanded groups of the active tab. */
+  get expanded(): ReadonlySet<number> {
+    return this.#activeTab?.expanded ?? new Set();
+  }
+
+  /** The canvas view of the active tab, or null. */
+  get view(): View | null {
+    return this.#activeTab?.view ?? null;
+  }
+
+  /** Sets the view of the active tab as it is (for tests). */
+  set view(view: View | null) {
+    const tab = this.#activeTab;
+    if (tab !== null) {
+      tab.view = view;
+    }
+  }
+
+  /** True while the view of the active tab follows "fit to window". */
+  get fit(): boolean {
+    return this.#activeTab?.fit ?? true;
+  }
+
+  /** The number of edits of the active tab that wait or run. */
+  get pending(): number {
+    return this.#activeTab?.pending ?? 0;
+  }
+
+  /** True while a save of the active tab runs. */
+  get saving(): boolean {
+    return this.#activeTab?.saving ?? false;
+  }
+
+  /** True if the active document has changes after its last save (or its open). */
   get dirty(): boolean {
-    return this.info?.dirty ?? false;
+    return this.#activeTab?.dirty ?? false;
   }
 
   /** True if the Save command can run now. */
   get canSave(): boolean {
-    return this.status === 'ready' && this.info !== null && !this.saving;
+    return this.#activeTab?.canSave ?? false;
   }
 
   /** The display color space of the document (null: the shell default). */
@@ -202,7 +377,7 @@ export class EditorStore {
     return this.#displaySpace;
   }
 
-  /** True when no edit waits or runs. */
+  /** True when no edit of the active tab waits or runs. */
   get idle(): boolean {
     return this.pending === 0;
   }
@@ -220,7 +395,7 @@ export class EditorStore {
    * selection, a lost mask, or a new document turns the mask view off.
    */
   get showMaskLayerId(): number | null {
-    const target = this.#maskTarget;
+    const target = this.#activeTab?.maskTarget ?? null;
     if (target === null || target !== this.selectedId) {
       return null;
     }
@@ -238,30 +413,33 @@ export class EditorStore {
    * selected becomes selected first.
    */
   toggleShowMask(layerId: number | null = this.selectedId): void {
-    const info = this.info;
-    if (info === null || layerId === null) {
+    const tab = this.#activeTab;
+    const info = tab?.info ?? null;
+    if (tab === null || info === null || layerId === null) {
       return;
     }
     if (findLayer(info.layers, layerId)?.hasMask !== true) {
       return;
     }
     if (layerId === this.showMaskLayerId) {
-      this.#maskTarget = null;
+      tab.maskTarget = null;
       return;
     }
-    this.selectedId = layerId;
-    this.#maskTarget = layerId;
+    tab.selectedId = layerId;
+    tab.maskTarget = layerId;
   }
 
   get selected(): LayerInfo | null {
     const info = this.info;
-    return info === null || this.selectedId === null ? null : findLayer(info.layers, this.selectedId);
+    const id = this.selectedId;
+    return info === null || id === null ? null : findLayer(info.layers, id);
   }
 
   /** The locks that apply to the selected layer (own and from ancestor groups). */
   get selectedLocks(): LocksDto {
     const info = this.info;
-    return info === null || this.selectedId === null ? NO_LOCKS : effectiveLocks(info.layers, this.selectedId);
+    const id = this.selectedId;
+    return info === null || id === null ? NO_LOCKS : effectiveLocks(info.layers, id);
   }
 
   /** Sets the own locks of a layer. */
@@ -299,7 +477,7 @@ export class EditorStore {
 
   // ---- Selection ----
 
-  /** True if the open document has a selection. */
+  /** True if the active document has a selection. */
   get hasSelection(): boolean {
     return this.info?.hasSelection ?? false;
   }
@@ -324,22 +502,23 @@ export class EditorStore {
    * and that layer still has a mask. Else the target is the pixels.
    */
   get paintTarget(): PaintTarget {
-    const id = this.#paintMaskId;
+    const id = this.#activeTab?.paintMaskId ?? null;
     return id !== null && id === this.selectedId && this.selected?.hasMask === true ? 'mask' : 'pixels';
   }
 
   /** Chooses the mask of a layer as the paint target. Does nothing if the layer has no mask. */
   selectMaskTarget(layerId: number): void {
-    const info = this.info;
-    if (info === null || findLayer(info.layers, layerId)?.hasMask !== true) {
+    const tab = this.#activeTab;
+    const info = tab?.info ?? null;
+    if (tab === null || info === null || findLayer(info.layers, layerId)?.hasMask !== true) {
       return;
     }
     // Not `select()`: it would set the target to the pixels.
-    if (layerId !== this.#maskTarget) {
-      this.#maskTarget = null;
+    if (layerId !== tab.maskTarget) {
+      tab.maskTarget = null;
     }
-    this.selectedId = layerId;
-    this.#paintMaskId = layerId;
+    tab.selectedId = layerId;
+    tab.paintMaskId = layerId;
   }
 
   /**
@@ -433,9 +612,13 @@ export class EditorStore {
     return this.#api;
   }
 
-  /** Takes the document info that a finished stroke returns. */
+  /**
+   * Takes the document info that a finished stroke returns. It goes to the
+   * tab of that document (which can be inactive now), or nowhere if that
+   * tab is closed.
+   */
   applyInfo(next: DocumentInfo): void {
-    this.#apply(next);
+    this.#tabs.find((tab) => tab.info?.documentId === next.documentId)?.apply(next);
   }
 
   /** Sets the feather of the selection tools (0..250 px). */
@@ -521,10 +704,22 @@ export class EditorStore {
 
   /**
    * The photo to open now: the library `candidate`, if the Editor module is
-   * active and no document is open. Else null. The view opens this photo.
+   * active, no tab is open, the New document dialog is closed, and the user
+   * did not close the last tab. Else null. The view opens this photo.
+   *
+   * This getter turns auto-open on again while another module is active.
+   * The view reads it in an effect that runs at each module change, so the
+   * next visit of the Editor module opens the photo again.
    */
   get openTarget(): PhotoId | null {
-    return this.#modules.active === 'editor' && this.status === 'empty' ? this.candidate : null;
+    if (this.#modules.active !== 'editor') {
+      this.#autoOpenOff = false;
+      return null;
+    }
+    if (this.#autoOpenOff || this.newDocumentOpen || this.#tabs.length > 0) {
+      return null;
+    }
+    return this.candidate;
   }
 
   /** Opens a photo in the Editor and shows the module. */
@@ -534,22 +729,21 @@ export class EditorStore {
       return;
     }
     this.#modules.switchTo('editor');
-    const info = this.info;
-    // The saved photo of the open document opens the same layered file:
-    // keep the open document.
-    if (info !== null && (photoId === this.photoId || photoId === info.savedPhotoId)) {
-      return;
-    }
     await this.openPhoto(photoId);
   }
 
   /**
-   * Closes the old document and opens a document for the photo. If the old
-   * document has unsaved changes, the user is asked first; on Cancel the old
-   * document stays open.
+   * Opens a photo in a new tab and makes the tab active. If a tab shows the
+   * photo already (its source photo or its saved photo, which opens the same
+   * layered file), that tab becomes active instead.
    */
   async openPhoto(photoId: PhotoId): Promise<void> {
-    await this.#replaceDocument(photoId, () => this.#api.open(photoId, this.#displaySpace), 'Open the photo in the Editor');
+    const existing = this.#tabFor(photoId);
+    if (existing !== null) {
+      this.activate(existing);
+      return;
+    }
+    await this.#openTab(new EditorTab(this.#nextTabId++, photoId), () => this.#api.open(photoId, this.#displaySpace), 'Open the photo in the Editor');
   }
 
   /** The name that the New document dialog suggests ("Untitled-N", N counts per session). */
@@ -567,13 +761,10 @@ export class EditorStore {
     this.newDocumentOpen = false;
   }
 
-  /**
-   * Makes a new empty document and shows it. Like `openPhoto`, it asks about
-   * unsaved changes of the old document first. Returns true if the document
-   * opened.
-   */
+  /** Makes a new empty document in a new tab. Returns true if the document opened. */
   async newDocument(spec: NewDocumentSpec): Promise<boolean> {
-    const ok = await this.#replaceDocument(null, () => this.#api.newDocument(spec, this.#displaySpace), 'Make the new document');
+    const tab = new EditorTab(this.#nextTabId++, null, spec.name);
+    const ok = await this.#openTab(tab, () => this.#api.newDocument(spec, this.#displaySpace), 'Make the new document');
     if (ok) {
       this.#untitled += 1;
     }
@@ -581,98 +772,85 @@ export class EditorStore {
   }
 
   /**
-   * The shared flow of `openPhoto` and `newDocument`: confirm, close the old
-   * document, and open the new one. Returns true if the new document is open.
+   * The shared flow of `openPhoto` and `newDocument`: add the tab, make it
+   * active, and open its document. Returns true if the document is open.
    */
-  async #replaceDocument(photoId: PhotoId | null, open: () => Promise<DocumentInfo>, action: string): Promise<boolean> {
-    if (this.info !== null && !(await this.confirmLeave())) {
-      return false;
-    }
-    const generation = ++this.#generation;
-    const old = this.info;
-    this.#live.clear();
-    this.#gesture = null;
-    this.photoId = photoId;
-    this.info = null;
-    this.view = null;
-    this.fit = true;
-    this.selectedId = null;
-    this.#maskTarget = null;
-    this.#paintMaskId = null;
-    this.expanded = new Set();
-    this.status = 'loading';
-    this.loadError = null;
-    if (old !== null) {
-      await this.#closeDocument(old.documentId);
-      if (generation !== this.#generation) {
-        return false;
-      }
-    }
+  async #openTab(tab: EditorTab, open: () => Promise<DocumentInfo>, action: string): Promise<boolean> {
+    // The tab goes into the strip before the first await, so that auto-open
+    // sees it at once.
+    this.#tabs = [...this.#tabs, tab];
+    this.activate(tab);
     let info: DocumentInfo;
     try {
       info = await open();
     } catch (error: unknown) {
-      if (generation !== this.#generation) {
+      if (tab.closed) {
         return false;
       }
-      this.status = 'error';
-      this.loadError = this.#describe(error);
+      tab.status = 'error';
+      tab.loadError = describeError(error);
       this.#toasts.error(this.#messageFor(action, error), error);
       return false;
     }
-    if (generation !== this.#generation) {
-      // Another document was requested while this one opened.
+    if (tab.closed) {
+      // The user closed the tab while the document opened.
       await this.#closeDocument(info.documentId);
       return false;
     }
-    this.info = info;
-    this.status = 'ready';
-    this.selectedId = info.layers[info.layers.length - 1]?.id ?? null;
-    this.#refit();
+    tab.opened(info);
+    if (tab === this.#activeTab) {
+      tab.refit(this.viewport);
+    }
     return true;
   }
 
-  /** Closes the open document (the view is destroyed). */
+  /** Closes all documents (the view is destroyed). */
   async dispose(): Promise<void> {
     // An open question has no view any more.
     this.answerLeave('cancel');
-    this.#generation += 1;
-    const old = this.info;
-    this.#live.clear();
-    this.info = null;
-    this.#maskTarget = null;
-    this.view = null;
-    this.status = 'empty';
-    this.photoId = null;
-    if (old !== null) {
-      await this.#closeDocument(old.documentId);
+    const tabs = this.#tabs;
+    for (const tab of tabs) {
+      tab.markClosed();
     }
+    this.#tabs = [];
+    this.#activeTab = null;
+    await Promise.all(tabs.flatMap((tab) => (tab.info === null ? [] : [this.#closeDocument(tab.info.documentId)])));
   }
 
   // ---- Save ----
 
   /**
-   * Saves the open document to the library. Waits for the queued edits
+   * Saves the active document to the library. Waits for the queued edits
    * first. A second call while a save runs returns the same result.
    * Returns true on success. Errors show a toast.
    */
   save(): Promise<boolean> {
-    // A new document has no source photo and no saved files: it needs a folder.
-    const info = this.info;
-    if (info !== null && info.savedPhotoId === null && info.sourcePhotoId === null) {
-      return this.saveAs();
-    }
-    return this.#startSave();
+    const tab = this.#activeTab;
+    return tab === null ? Promise.resolve(false) : this.#saveTab(tab);
   }
 
   /**
-   * "Save As": asks for a folder, then saves the document as new files in
-   * that folder (a new library photo). The earlier files stay as they are.
-   * Returns false if the user cancels the dialog or the save fails.
+   * "Save As": asks for a folder, then saves the active document as new
+   * files in that folder (a new library photo). The earlier files stay as
+   * they are. Returns false if the user cancels the dialog or the save fails.
    */
-  async saveAs(): Promise<boolean> {
-    if (!this.canSave) {
-      return this.#saveRun ?? false;
+  saveAs(): Promise<boolean> {
+    const tab = this.#activeTab;
+    return tab === null ? Promise.resolve(false) : this.#saveTabAs(tab);
+  }
+
+  #saveTab(tab: EditorTab): Promise<boolean> {
+    // A new document has no source photo and no saved files: it needs a folder.
+    const info = tab.info;
+    if (info !== null && info.savedPhotoId === null && info.sourcePhotoId === null) {
+      return this.#saveTabAs(tab);
+    }
+    return this.#startSave(tab);
+  }
+
+  async #saveTabAs(tab: EditorTab): Promise<boolean> {
+    if (!tab.canSave) {
+      return tab.saveRun ?? false;
     }
     let folder: string | null;
     try {
@@ -681,46 +859,43 @@ export class EditorStore {
       this.#toasts.error('Open the folder picker failed.', error);
       return false;
     }
-    if (folder === null) {
+    if (folder === null || tab.closed) {
       return false;
     }
-    return this.#startSave(folder);
+    return this.#startSave(tab, folder);
   }
 
-  #startSave(folder?: string): Promise<boolean> {
-    if (this.#saveRun !== null) {
-      return this.#saveRun;
+  #startSave(tab: EditorTab, folder?: string): Promise<boolean> {
+    if (tab.saveRun !== null) {
+      return tab.saveRun;
     }
-    if (!this.canSave) {
+    if (!tab.canSave) {
       return Promise.resolve(false);
     }
-    const run = this.#runSave(folder).finally(() => {
-      this.#saveRun = null;
+    const run = this.#runSave(tab, folder).finally(() => {
+      tab.saveRun = null;
     });
-    this.#saveRun = run;
+    tab.saveRun = run;
     return run;
   }
 
-  async #runSave(folder?: string): Promise<boolean> {
-    this.endGesture();
-    this.saving = true;
-    const generation = this.#generation;
+  async #runSave(tab: EditorTab, folder?: string): Promise<boolean> {
+    tab.endGesture();
+    tab.saving = true;
     try {
       // The save must contain the edits that the user made before it.
-      await this.#chain;
-      const info = this.info;
-      if (info === null || generation !== this.#generation) {
+      await tab.chain;
+      const info = tab.info;
+      if (info === null || tab.closed) {
         return false;
       }
       const result = await this.#api.save(info.documentId, folder);
-      if (generation === this.#generation) {
-        this.#applySaved(result);
-      }
+      this.#applySaved(tab, result);
       this.#toasts.success(`Saved to library: ${fileNameOf(result.imagePath)}`);
       this.#onSaved?.(result);
       return true;
     } catch (error: unknown) {
-      if (generation === this.#generation) {
+      if (!tab.closed) {
         let message = this.#messageFor('Save the document', error);
         // A plain save writes next to the source photo; that folder can be read-only.
         if (folder === undefined && errorKind(error) === 'io') {
@@ -730,35 +905,41 @@ export class EditorStore {
       }
       return false;
     } finally {
-      this.saving = false;
+      tab.saving = false;
     }
   }
 
   /** Takes the save result. Edits after the save snapshot keep their newer info. */
-  #applySaved(result: SaveResult): void {
-    const current = this.info;
-    if (current === null || current.documentId !== result.info.documentId) {
+  #applySaved(tab: EditorTab, result: SaveResult): void {
+    const current = tab.info;
+    if (tab.closed || current === null || current.documentId !== result.info.documentId) {
       return;
     }
     if (current.revision === result.info.revision) {
-      this.#apply(result.info);
+      tab.apply(result.info);
     } else {
-      this.info = { ...current, savedPhotoId: result.info.savedPhotoId };
+      // The saved file can have a new name (Save As), so the name comes from the save, too.
+      tab.info = { ...current, savedPhotoId: result.info.savedPhotoId, name: result.info.name };
     }
   }
 
   /**
-   * Asks the user what to do with unsaved changes before the document is
-   * replaced. Returns true if the caller may go on (saved, or the user does
-   * not want to save), false on Cancel or a failed save.
+   * Asks the user what to do with the unsaved changes of the active tab.
+   * Returns true if the caller may go on (saved, or the user does not want
+   * to save), false on Cancel or a failed save.
    */
   async confirmLeave(): Promise<boolean> {
-    // Queued edits and a running save change `dirty`.
-    await this.#chain;
-    if (this.#saveRun !== null) {
-      await this.#saveRun;
+    const tab = this.#activeTab;
+    if (tab === null) {
+      return true;
     }
-    if (!this.dirty) {
+    await this.#settle(tab);
+    return this.#confirmTab(tab);
+  }
+
+  /** Asks about the unsaved changes of a tab (the caller waited for its edits). */
+  async #confirmTab(tab: EditorTab): Promise<boolean> {
+    if (!tab.dirty) {
       return true;
     }
     if (this.#answerLeave !== null) {
@@ -767,7 +948,7 @@ export class EditorStore {
     }
     const choice = await new Promise<LeaveChoice>((resolve) => {
       this.#answerLeave = resolve;
-      this.leavePrompt = { message: 'The document has changes that are not saved.' };
+      this.leavePrompt = { message: `"${tab.title}" has changes that are not saved.` };
     });
     if (choice === 'cancel') {
       return false;
@@ -775,7 +956,7 @@ export class EditorStore {
     if (choice === 'discard') {
       return true;
     }
-    return this.save();
+    return this.#saveTab(tab);
   }
 
   /** Answers the open unsaved-changes question (the dialog calls this). */
@@ -794,43 +975,55 @@ export class EditorStore {
     }
   }
 
-  // ---- Selection ----
+  // ---- Layer selection ----
 
   select(id: number | null): void {
-    if (id !== this.#maskTarget) {
-      this.#maskTarget = null;
+    const tab = this.#activeTab;
+    if (tab === null) {
+      return;
+    }
+    if (id !== tab.maskTarget) {
+      tab.maskTarget = null;
     }
     // A click on a layer row chooses the pixels as the paint target.
-    this.#paintMaskId = null;
-    this.selectedId = id;
+    tab.paintMaskId = null;
+    tab.selectedId = id;
   }
 
   toggleExpanded(id: number): void {
-    const next = new Set(this.expanded);
+    const tab = this.#activeTab;
+    if (tab === null) {
+      return;
+    }
+    const next = new Set(tab.expanded);
     if (!next.delete(id)) {
       next.add(id);
     }
-    this.expanded = next;
+    tab.expanded = next;
   }
 
   // ---- Edits ----
 
-  /** Sends one edit, after the edits before it. */
+  /** Sends one edit to the active document, after the edits before it. */
   edit(edit: EditDto): void {
-    this.endGesture();
-    this.#enqueue(async (info, generation) => {
+    const tab = this.#activeTab;
+    if (tab === null) {
+      return;
+    }
+    tab.endGesture();
+    this.#enqueue(tab, async (info) => {
       const before = allLayerIds(info.layers);
       const next = await this.#api.edit(info.documentId, edit, null);
-      if (generation !== this.#generation) {
+      if (tab.closed) {
         return;
       }
-      this.#apply(next);
+      tab.apply(next);
       if (edit.type === 'duplicate' || edit.type === 'addAdjustment' || edit.type === 'addPixelLayer') {
         const added = newLayerIds(before, next.layers);
         const top = added[added.length - 1];
         if (top !== undefined) {
-          this.#maskTarget = null;
-          this.selectedId = top;
+          tab.maskTarget = null;
+          tab.selectedId = top;
         }
       }
     });
@@ -842,41 +1035,30 @@ export class EditorStore {
    * most one edit of the stream is in flight.
    */
   liveEdit(streamKey: string, edit: EditDto): void {
-    const gesture = this.#gestureFor(streamKey);
-    const queued = this.#live.has(streamKey);
-    this.#live.set(streamKey, { edit, gesture });
+    const tab = this.#activeTab;
+    if (tab === null) {
+      return;
+    }
+    const gesture = tab.gestureFor(streamKey, this.#now());
+    const queued = tab.live.has(streamKey);
+    tab.live.set(streamKey, { edit, gesture });
     if (queued) {
       return;
     }
-    this.#enqueue(async (info, generation) => {
-      const entry = this.#live.get(streamKey);
-      this.#live.delete(streamKey);
+    this.#enqueue(tab, async (info) => {
+      const entry = tab.live.get(streamKey);
+      tab.live.delete(streamKey);
       if (entry === undefined) {
         return;
       }
       const next = await this.#api.edit(info.documentId, entry.edit, entry.gesture);
-      if (generation === this.#generation) {
-        this.#apply(next);
-      }
+      tab.apply(next);
     });
   }
 
   /** Ends the current gesture (the slider is released). The next live edit starts a new undo step. */
   endGesture(): void {
-    this.#gesture = null;
-  }
-
-  #gestureFor(key: string): number {
-    const now = this.#now();
-    const current = this.#gesture;
-    if (current !== null && current.key === key && now - current.at < GESTURE_IDLE_MS) {
-      current.at = now;
-      return current.id;
-    }
-    const id = this.#nextGesture;
-    this.#nextGesture += 1;
-    this.#gesture = { key, id, at: now };
-    return id;
+    this.#activeTab?.endGesture();
   }
 
   undo(): void {
@@ -888,12 +1070,14 @@ export class EditorStore {
   }
 
   #history(kind: 'undo' | 'redo'): void {
-    this.endGesture();
-    this.#enqueue(async (info, generation) => {
+    const tab = this.#activeTab;
+    if (tab === null) {
+      return;
+    }
+    tab.endGesture();
+    this.#enqueue(tab, async (info) => {
       const next = kind === 'undo' ? await this.#api.undo(info.documentId) : await this.#api.redo(info.documentId);
-      if (generation === this.#generation) {
-        this.#apply(next);
-      }
+      tab.apply(next);
     });
   }
 
@@ -925,128 +1109,84 @@ export class EditorStore {
   // ---- View ----
 
   get zoomPercent(): number | null {
-    return this.view === null ? null : Math.round(this.view.zoom * 100);
+    const view = this.view;
+    return view === null ? null : Math.round(view.zoom * 100);
   }
 
+  /** Sets the viewport size. The active tab fits again, or keeps its view inside the limits. */
   setViewport(size: Size): void {
     if (size.width === this.viewport.width && size.height === this.viewport.height) {
       return;
     }
     this.viewport = size;
-    if (this.view === null || this.fit) {
-      this.#refit();
-    } else {
-      this.#setView(this.view);
-    }
+    this.#activeTab?.fitTo(size);
   }
 
   fitToWindow(): void {
-    this.fit = true;
-    this.#refit();
+    const tab = this.#activeTab;
+    if (tab !== null) {
+      tab.fit = true;
+      tab.refit(this.viewport);
+    }
   }
 
   /** Zooms to a fixed value about the center of the viewport. */
   zoomTo(zoom: number): void {
-    const view = this.view;
-    if (view === null) {
-      return;
-    }
-    this.fit = false;
-    this.#setView(zoomAbout(view, clampZoom(zoom), { x: this.viewport.width / 2, y: this.viewport.height / 2 }));
+    this.#changeView((view) => zoomAbout(view, clampZoom(zoom), { x: this.viewport.width / 2, y: this.viewport.height / 2 }));
   }
 
   zoomStep(direction: 1 | -1, anchor?: Point): void {
-    const view = this.view;
-    if (view === null) {
-      return;
-    }
-    this.fit = false;
     const at = anchor ?? { x: this.viewport.width / 2, y: this.viewport.height / 2 };
-    this.#setView(zoomAbout(view, steppedZoom(view.zoom, direction), at));
+    this.#changeView((view) => zoomAbout(view, steppedZoom(view.zoom, direction), at));
   }
 
   /** Zooms by a factor about a screen point (wheel and pinch). */
   zoomBy(factor: number, anchor: Point): void {
-    const view = this.view;
-    if (view === null || !Number.isFinite(factor)) {
-      return;
+    if (Number.isFinite(factor)) {
+      this.#changeView((view) => zoomAbout(view, view.zoom * factor, anchor));
     }
-    this.fit = false;
-    this.#setView(zoomAbout(view, view.zoom * factor, anchor));
   }
 
   /** Moves the content by a screen distance. */
   pan(dx: number, dy: number): void {
-    const view = this.view;
-    if (view === null) {
-      return;
-    }
-    this.fit = false;
-    this.#setView(panBy(view, dx, dy));
+    this.#changeView((view) => panBy(view, dx, dy));
   }
 
-  #refit(): void {
-    const info = this.info;
-    if (info === null || !hasArea(this.viewport)) {
+  /** Changes the view of the active tab by the user; the view stops following "fit". */
+  #changeView(change: (view: View) => View): void {
+    const tab = this.#activeTab;
+    const view = tab?.view ?? null;
+    if (tab === null || view === null) {
       return;
     }
-    this.view = fitView(this.viewport, info);
-  }
-
-  #setView(view: View): void {
-    const info = this.info;
-    if (info === null || !hasArea(this.viewport)) {
-      return;
-    }
-    this.view = clampView(view, this.viewport, info);
+    tab.fit = false;
+    tab.setView(change(view), this.viewport);
   }
 
   // ---- Internal ----
 
-  /** Replaces the info and repairs the selection. */
-  #apply(next: DocumentInfo): void {
-    const current = this.info;
-    if (current === null || next.documentId !== current.documentId) {
-      return;
-    }
-    this.info = next;
-    const ids = allLayerIds(next.layers);
-    if (this.selectedId !== null && !ids.has(this.selectedId)) {
-      this.selectedId = null;
-    }
-    // Forget the mask target when its layer is gone or has lost its mask.
-    if (this.#maskTarget !== null && findLayer(next.layers, this.#maskTarget)?.hasMask !== true) {
-      this.#maskTarget = null;
-    }
-    if ([...this.expanded].some((id) => !ids.has(id))) {
-      this.expanded = new Set([...this.expanded].filter((id) => ids.has(id)));
-    }
-  }
-
-  /** Runs a task after the tasks before it. Errors go to a toast. */
-  #enqueue(task: (info: DocumentInfo, generation: number) => Promise<void>): void {
-    const generation = this.#generation;
-    this.pending += 1;
-    this.#chain = this.#chain
+  /**
+   * Runs a task of a tab after the tasks of the tab before it. The task gets
+   * the info at its start. Errors go to a toast. A closed tab skips its tasks.
+   */
+  #enqueue(tab: EditorTab, task: (info: DocumentInfo) => Promise<void>): void {
+    tab.pending += 1;
+    tab.chain = tab.chain
       .then(async () => {
-        const info = this.info;
-        if (info === null || generation !== this.#generation) {
+        const info = tab.info;
+        if (info === null || tab.closed) {
           return;
         }
-        await task(info, generation);
+        await task(info);
       })
       .catch((error: unknown) => {
-        if (generation === this.#generation) {
+        if (!tab.closed) {
           this.#toasts.error(this.#messageFor('Edit the document', error), error);
         }
       })
       .finally(() => {
-        this.pending -= 1;
+        tab.pending -= 1;
       });
-  }
-
-  #describe(error: unknown): string {
-    return describeError(error);
   }
 
   #messageFor(action: string, error: unknown): string {

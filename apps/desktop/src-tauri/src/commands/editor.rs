@@ -127,11 +127,16 @@ pub async fn editor_open<R: Runtime>(
             (document, origin)
         }
         OpenSource::Photo { path, stored } => {
+            // The name is the title of the tab. A save ignores it, because
+            // the source photo gives the file stem.
+            let name = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned());
             let document = develop_document(path, stored).await?;
             let origin = DocumentOrigin {
                 source_photo_id: Some(photo_id),
                 saved: None,
-                name: None,
+                name,
             };
             (document, origin)
         }

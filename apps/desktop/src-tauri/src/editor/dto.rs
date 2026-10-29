@@ -570,12 +570,16 @@ pub struct DocumentInfo {
     /// at each change of the selection, undo, and redo. The value is a
     /// stamp from a process counter, so it stays far below 2^53.
     pub selection_version: u64,
+    /// The title of the document for an editor tab: the file stem of the
+    /// photo (open), the trimmed name of the spec (new document), or the
+    /// file stem of the layered file of the last save.
+    pub name: String,
 }
 
 impl DocumentInfo {
     /// Makes the info of `document` with the ID `id`. The info is not
-    /// dirty and has no saved photo; [`crate::editor::EditSession::info`]
-    /// sets these two fields.
+    /// dirty, has no saved photo, and has an empty name;
+    /// [`crate::editor::EditSession::info`] sets these fields.
     pub fn new(id: DocumentId, document: &Document, can_undo: bool, can_redo: bool) -> Self {
         Self {
             document_id: id,
@@ -590,6 +594,7 @@ impl DocumentInfo {
             source_photo_id: None,
             has_selection: document.selection().is_some(),
             selection_version: document.selection_version(),
+            name: String::new(),
         }
     }
 }

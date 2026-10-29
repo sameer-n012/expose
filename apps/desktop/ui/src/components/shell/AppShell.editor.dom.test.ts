@@ -16,6 +16,7 @@ let editorCalls: Array<{ command: string; args: Record<string, unknown> }>;
 
 const info: DocumentInfo = {
   documentId: 11,
+  name: 'photo',
   width: 100,
   height: 80,
   layers: [{ id: 1, name: 'Photo', kind: 'pixel', visible: true, opacity: 1, fillOpacity: 1, blendMode: 'normal', hasMask: false, maskEnabled: false, adjustment: null, isolated: null, children: null, locks: { transparency: false, pixels: false, position: false, all: false } }],
@@ -32,9 +33,14 @@ const info: DocumentInfo = {
 beforeEach(() => {
   const catalog = new FakeCatalog(5);
   editorCalls = [];
+  // Each open gives a new document: 11 "photo", 12 "photo-12", ...
+  let nextDocument = 11;
   vi.mocked(invoke).mockImplementation((command: string, args?: unknown) => {
     if (command.startsWith('editor_')) {
-      editorCalls.push({ command, args: (args ?? {}) as Record<string, unknown> });
+      const params = (args ?? {}) as Record<string, unknown>;
+      editorCalls.push({ command, args: params });
+      const documentId = typeof params['documentId'] === 'number' ? params['documentId'] : 11;
+      const name = documentId === 11 ? 'photo' : `photo-${documentId}`;
       // The render result is not a frame: the test does not need pixels.
       if (command === 'editor_close') {
         return Promise.resolve(null);
@@ -43,13 +49,14 @@ beforeEach(() => {
         return Promise.resolve(new ArrayBuffer(0));
       }
       if (command === 'editor_edit') {
-        return Promise.resolve({ ...info, revision: 1, dirty: true });
+        return Promise.resolve({ ...info, documentId, name, revision: 1, dirty: true });
       }
       if (command === 'editor_save') {
-        const saved = { ...info, revision: 1, dirty: false, savedPhotoId: 99 };
+        const saved = { ...info, documentId, name, revision: 1, dirty: false, savedPhotoId: 99 };
         return Promise.resolve({ photoId: 99, documentPath: '/p/a-edit.exdoc', imagePath: '/p/a-edit.tif', created: true, info: saved });
       }
-      return Promise.resolve(info);
+      const opened = nextDocument++;
+      return Promise.resolve({ ...info, documentId: opened, name: opened === 11 ? 'photo' : `photo-${opened}` });
     }
     return catalog.invoke(command, args as never);
   });
@@ -97,23 +104,33 @@ describe('Edit in Editor', () => {
     expect(toasts.items.some((t) => t.message === 'Saved to library: a-edit.tif')).toBe(true);
   });
 
-  it('asks before another photo replaces a document with unsaved changes', async () => {
+  it('another photo opens in a second document, and the dirty document stays open', async () => {
     await openEditedDocument();
     const opens = () => editorCalls.filter((c) => c.command === 'editor_open').length;
     expect(opens()).toBe(1);
-    // Another photo: the question shows; Cancel keeps the document.
     app.library.click(1, { toggle: false, range: false });
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    await waitFor(() => expect(opens()).toBe(2));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(editorCalls.some((c) => c.command === 'editor_close')).toBe(false);
+    // The tab strip shows both documents; the new one is active.
+    await waitFor(() => expect(screen.getAllByRole('tab').length).toBe(2));
+    expect(screen.getByRole('tab', { name: /^photo-12/ }).getAttribute('aria-selected')).toBe('true');
+    // Close the dirty tab: the question shows; Cancel keeps the tab.
+    await fireEvent.click(screen.getByRole('button', { name: 'Close photo' }));
     const dialog = await screen.findByRole('alertdialog');
     expect(dialog.textContent).toContain('Save the changes?');
+    // The tab that asks is active (the open dialog hides the strip from the role queries).
+    expect(document.querySelector('[role="tab"][aria-selected="true"] .title')?.textContent).toBe('photo');
     await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
-    expect(opens()).toBe(1);
-    // Again: Don't save opens the other photo.
-    await fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    expect(screen.getAllByRole('tab').length).toBe(2);
+    // Again with Mod+W: Don't save closes the document.
+    await fireEvent.keyDown(window, { key: 'w', metaKey: true });
     await screen.findByRole('alertdialog');
     await fireEvent.click(screen.getByRole('button', { name: "Don't save" }));
-    await waitFor(() => expect(opens()).toBe(2));
+    await waitFor(() => expect(editorCalls.some((c) => c.command === 'editor_close' && c.args['documentId'] === 11)).toBe(true));
+    expect(screen.getAllByRole('tab').map((t) => t.textContent?.trim())).toEqual(['photo-12']);
     expect(editorCalls.some((c) => c.command === 'editor_save')).toBe(false);
   });
 

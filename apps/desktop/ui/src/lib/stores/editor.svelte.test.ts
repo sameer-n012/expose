@@ -25,7 +25,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 }
 
 function info(documentId: number, revision: number, layers: LayerInfo[] = [layer(1), layer(2)], extra: Partial<DocumentInfo> = {}): DocumentInfo {
-  return { documentId, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, ...extra };
+  return { documentId, name: `doc${documentId}`, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, ...extra };
 }
 
 function saveResult(documentId: number, revision: number, photoId = 77, created = true): SaveResult {
@@ -187,59 +187,98 @@ describe('EditorStore unsaved changes', () => {
     return s;
   }
 
-  it('a clean document opens another photo with no question', async () => {
-    const { store, api } = setup();
-    await store.openPhoto(5);
+  it('another photo opens in a new tab with no question', async () => {
+    const { store, api } = await dirtyStore();
     await store.openPhoto(6);
     expect(store.leavePrompt).toBeNull();
     expect(api.open).toHaveBeenCalledTimes(2);
+    expect(api.close).not.toHaveBeenCalled();
+    expect(store.tabs.length).toBe(2);
+    expect(store.photoId).toBe(6);
+    expect(store.anyDirty).toBe(true);
+    expect(store.dirty).toBe(false);
   });
 
-  it('Cancel keeps the dirty document open', async () => {
+  it('closeTab on a dirty tab asks, and Cancel keeps the tab', async () => {
     const { store, api } = await dirtyStore();
-    const opening = store.openPhoto(6);
+    const first = store.activeTab!;
+    await store.openPhoto(6);
+    const closing = store.closeTab(first);
     await tick();
-    expect(store.leavePrompt).not.toBeNull();
+    // The tab that asks becomes active.
+    expect(store.activeTab).toBe(first);
+    expect(store.leavePrompt?.message).toContain('doc1');
     store.answerLeave('cancel');
-    await opening;
-    expect(store.leavePrompt).toBeNull();
-    expect(api.open).toHaveBeenCalledOnce();
+    expect(await closing).toBe(false);
+    expect(store.tabs).toContain(first);
     expect(api.close).not.toHaveBeenCalled();
-    expect(store.photoId).toBe(5);
     expect(store.dirty).toBe(true);
   });
 
-  it("Don't save opens the other photo and drops the changes", async () => {
+  it("Don't save closes the tab and drops the changes", async () => {
     const { store, api } = await dirtyStore();
-    const opening = store.openPhoto(6);
+    const closing = store.closeTab(store.activeTab!);
     await tick();
     store.answerLeave('discard');
-    await opening;
+    expect(await closing).toBe(true);
     expect(api.save).not.toHaveBeenCalled();
     expect(api.close).toHaveBeenCalledWith(1);
-    expect(store.photoId).toBe(6);
+    expect(store.tabs.length).toBe(0);
+    expect(store.status).toBe('empty');
   });
 
-  it('Save saves first, then opens the other photo', async () => {
+  it('Save saves first, then closes the tab', async () => {
     const { store, api } = await dirtyStore();
-    const opening = store.openPhoto(6);
+    const closing = store.closeTab(store.activeTab!);
     await tick();
     store.answerLeave('save');
-    await opening;
+    expect(await closing).toBe(true);
     expect(api.save).toHaveBeenCalledWith(1, undefined);
     expect(api.save.mock.invocationCallOrder[0]).toBeLessThan(api.close.mock.invocationCallOrder[0] ?? 0);
-    expect(store.photoId).toBe(6);
   });
 
-  it('a failed save on Save keeps the document open', async () => {
+  it('a failed save on Save keeps the tab open', async () => {
     const { store, api } = await dirtyStore();
     api.save.mockRejectedValueOnce({ kind: 'io', message: 'read-only' });
-    const opening = store.openPhoto(6);
+    const closing = store.closeTab(store.activeTab!);
     await tick();
     store.answerLeave('save');
-    await opening;
+    expect(await closing).toBe(false);
     expect(api.close).not.toHaveBeenCalled();
     expect(store.photoId).toBe(5);
+  });
+
+  it('confirmCloseAll asks for each dirty tab in turn', async () => {
+    const { store, api } = await dirtyStore();
+    const first = store.activeTab!;
+    await store.openPhoto(6);
+    const clean = store.activeTab!;
+    await store.openPhoto(7);
+    const third = store.activeTab!;
+    store.edit({ type: 'setVisible', layerId: 1, visible: false });
+    await tick();
+    store.activate(clean);
+    const all = store.confirmCloseAll();
+    await tick();
+    expect(store.activeTab).toBe(first);
+    store.answerLeave('discard');
+    await tick();
+    await tick();
+    expect(store.activeTab).toBe(third);
+    expect(store.leavePrompt).not.toBeNull();
+    store.answerLeave('save');
+    expect(await all).toBe(true);
+    expect(api.save).toHaveBeenCalledOnce();
+    expect(api.save).toHaveBeenCalledWith(third.info?.documentId, undefined);
+  });
+
+  it('confirmCloseAll gives false on Cancel', async () => {
+    const { store } = await dirtyStore();
+    const all = store.confirmCloseAll();
+    await tick();
+    store.answerLeave('cancel');
+    expect(await all).toBe(false);
+    expect(store.tabs.length).toBe(1);
   });
 
   it('the saved photo of the open document keeps the document', async () => {
@@ -264,16 +303,17 @@ describe('EditorStore documents', () => {
     expect(store.zoomPercent).not.toBeNull();
   });
 
-  it('closes the old document before it opens another', async () => {
+  it('keeps the old document open when another photo opens', async () => {
     const { store, api } = setup();
     await store.openPhoto(5);
     await store.openPhoto(6);
-    expect(api.close).toHaveBeenCalledWith(1);
+    expect(api.close).not.toHaveBeenCalled();
     expect(store.info?.documentId).toBe(2);
     expect(store.photoId).toBe(6);
+    expect(store.tabs.map((t) => t.photoId)).toEqual([5, 6]);
   });
 
-  it('closes a document that opens too late', async () => {
+  it('closing a tab that still opens closes its document when the open finishes', async () => {
     const { store, api } = setup();
     let release!: () => void;
     api.open.mockImplementationOnce(
@@ -282,21 +322,30 @@ describe('EditorStore documents', () => {
           release = () => resolve(info(9, 0));
         }),
     );
-    const first = store.openPhoto(1);
-    await store.openPhoto(2);
+    const opening = store.openPhoto(1);
+    const tab = store.activeTab!;
+    expect(tab.status).toBe('loading');
+    expect(tab.title).toBe('Loading…');
+    expect(await store.closeTab(tab)).toBe(true);
+    expect(store.tabs.length).toBe(0);
+    expect(api.close).not.toHaveBeenCalled();
     release();
-    await first;
+    await opening;
     expect(api.close).toHaveBeenCalledWith(9);
-    expect(store.info?.documentId).toBe(1);
+    expect(store.info).toBeNull();
   });
 
-  it('shows an open error in the status and a toast', async () => {
+  it('shows an open error in the status and a toast, and the error tab can close', async () => {
     const { store, api, toasts } = setup();
     api.open.mockRejectedValueOnce({ kind: 'unavailable', message: 'no gpu' });
     await store.openPhoto(1);
     expect(store.status).toBe('error');
     expect(store.loadError).toContain('no gpu');
+    expect(store.activeTab?.title).toBe('Error');
     expect(toasts.items[0]?.message).toContain('GPU');
+    expect(await store.closeTab(store.activeTab!)).toBe(true);
+    expect(store.status).toBe('empty');
+    expect(api.close).not.toHaveBeenCalled();
   });
 
   it('opens the candidate only while the editor is active and empty', () => {
@@ -306,6 +355,28 @@ describe('EditorStore documents', () => {
     expect(store.openTarget).toBe(3);
     modules.active = 'develop';
     expect(store.openTarget).toBeNull();
+  });
+
+  it('does not auto-open while the New document dialog is open', () => {
+    const { store, library } = setup();
+    library.selectedIds = [3];
+    store.requestNewDocument();
+    expect(store.openTarget).toBeNull();
+    store.closeNewDocument();
+    expect(store.openTarget).toBe(3);
+  });
+
+  it('closing the last tab turns auto-open off until the module is left', async () => {
+    const { store, library, modules } = setup();
+    library.selectedIds = [3];
+    await store.openPhoto(3);
+    expect(store.openTarget).toBeNull();
+    await store.closeTab(store.activeTab!);
+    expect(store.openTarget).toBeNull();
+    modules.active = 'library';
+    expect(store.openTarget).toBeNull();
+    modules.active = 'editor';
+    expect(store.openTarget).toBe(3);
   });
 
   it('editInEditor switches the module and does not reopen the same photo', async () => {
@@ -502,18 +573,19 @@ describe('EditorStore new document', () => {
     expect(store.suggestedName).toBe('Untitled-2');
   });
 
-  it('asks about unsaved changes first and keeps the document on Cancel', async () => {
+  it('opens in a new tab next to a dirty document, with no question', async () => {
     const { store, api } = setup();
     await store.openPhoto(5);
     editsAreDirty(api);
     store.edit({ type: 'setVisible', layerId: 1, visible: false });
     const run = store.newDocument(defaultSpec('Untitled-1'));
-    await tick();
-    expect(store.leavePrompt).not.toBeNull();
-    store.answerLeave('cancel');
-    expect(await run).toBe(false);
-    expect(api.newDocument).not.toHaveBeenCalled();
-    expect(store.photoId).toBe(5);
+    // The tab shows the name of the new document while it opens.
+    expect(store.activeTab?.title).toBe('Untitled-1');
+    expect(await run).toBe(true);
+    expect(store.leavePrompt).toBeNull();
+    expect(store.tabs.length).toBe(2);
+    expect(store.photoId).toBeNull();
+    expect(store.anyDirty).toBe(true);
   });
 
   it('shows an error and keeps the name when the shell refuses', async () => {
@@ -575,5 +647,156 @@ describe('EditorStore layers', () => {
     expect(store.selectedLocks.all).toBe(true);
     store.select(null);
     expect(store.selectedLocks.all).toBe(false);
+  });
+});
+
+describe('EditorStore tabs', () => {
+  it('opens two photos in two tabs, and a reopened photo activates its tab', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    const first = store.activeTab!;
+    await store.openPhoto(6);
+    expect(store.tabs.length).toBe(2);
+    expect(store.activeTab).not.toBe(first);
+    await store.openPhoto(5);
+    expect(store.activeTab).toBe(first);
+    expect(api.open).toHaveBeenCalledTimes(2);
+    expect(store.tabs.map((t) => t.title)).toEqual(['doc1', 'doc2']);
+  });
+
+  it('the saved photo of a tab activates that tab', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    const first = store.activeTab!;
+    await store.save();
+    await store.openPhoto(6);
+    await store.editInEditor(77);
+    expect(store.activeTab).toBe(first);
+    expect(api.open).toHaveBeenCalledTimes(2);
+  });
+
+  it('an edit result that arrives after a tab switch updates its own tab', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(5);
+    const first = store.activeTab!;
+    await store.openPhoto(6);
+    const second = store.activeTab!;
+    store.activate(first);
+    let release!: () => void;
+    api.edit.mockImplementationOnce(
+      (documentId: number) =>
+        new Promise<DocumentInfo>((resolve) => {
+          release = () => resolve(info(documentId, 42, [layer(1), layer(2), layer(3)], { dirty: true }));
+        }),
+    );
+    store.addPixelLayer();
+    await tick();
+    store.activate(second);
+    release();
+    await tick();
+    expect(first.info?.revision).toBe(42);
+    expect(first.selectedId).toBe(3);
+    expect(first.dirty).toBe(true);
+    expect(second.info?.revision).toBe(0);
+    expect(store.info?.documentId).toBe(2);
+    expect(store.dirty).toBe(false);
+  });
+
+  it('a stroke result goes to the tab of its document', async () => {
+    const { store } = setup();
+    await store.openPhoto(5);
+    const first = store.activeTab!;
+    await store.openPhoto(6);
+    store.applyInfo(info(1, 9, undefined, { dirty: true }));
+    expect(first.info?.revision).toBe(9);
+    expect(store.info?.revision).toBe(0);
+  });
+
+  it('closing the active tab activates the right neighbor, else the left one', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(1);
+    await store.openPhoto(2);
+    await store.openPhoto(3);
+    const [a, b, c] = store.tabs;
+    store.activate(b!);
+    await store.closeTab(b!);
+    expect(api.close).toHaveBeenCalledWith(2);
+    expect(store.activeTab).toBe(c);
+    await store.closeTab(c!);
+    expect(store.activeTab).toBe(a);
+  });
+
+  it('closing an inactive tab keeps the active tab', async () => {
+    const { store } = setup();
+    await store.openPhoto(1);
+    const first = store.activeTab!;
+    await store.openPhoto(2);
+    const second = store.activeTab!;
+    await store.closeTab(first);
+    expect(store.activeTab).toBe(second);
+    expect(store.tabs).toEqual([second]);
+  });
+
+  it('nextTab wraps at both ends', async () => {
+    const { store } = setup();
+    await store.openPhoto(1);
+    await store.openPhoto(2);
+    await store.openPhoto(3);
+    const [a, b, c] = store.tabs;
+    expect(store.activeTab).toBe(c);
+    store.nextTab(1);
+    expect(store.activeTab).toBe(a);
+    store.nextTab(-1);
+    expect(store.activeTab).toBe(c);
+    store.nextTab(-1);
+    expect(store.activeTab).toBe(b);
+  });
+
+  it('a tab switch ends the gesture of the old tab', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(1);
+    const first = store.activeTab!;
+    await store.openPhoto(2);
+    store.activate(first);
+    store.liveEdit('opacity:1', { type: 'setOpacity', layerId: 1, opacity: 0.5 });
+    await tick();
+    store.nextTab(1);
+    store.activate(first);
+    store.liveEdit('opacity:1', { type: 'setOpacity', layerId: 1, opacity: 0.4 });
+    await tick();
+    const gestures = api.edit.mock.calls.map((call) => call[2]);
+    expect(gestures.length).toBe(2);
+    expect(gestures[0]).not.toBe(gestures[1]);
+  });
+
+  it('a tab in fit mode fits the current viewport when it becomes active', async () => {
+    const { store } = setup();
+    store.setViewport({ width: 800, height: 600 });
+    await store.openPhoto(1);
+    const first = store.activeTab!;
+    const fitted = store.view?.zoom ?? 0;
+    await store.openPhoto(2);
+    store.setViewport({ width: 1600, height: 1200 });
+    store.activate(first);
+    expect(store.view?.zoom ?? 0).toBeGreaterThan(fitted);
+  });
+
+  it('Mod+W closes the active tab', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(1);
+    store.closeActiveTab();
+    await tick();
+    expect(api.close).toHaveBeenCalledWith(1);
+    expect(store.tabs.length).toBe(0);
+  });
+
+  it('dispose closes the documents of all tabs', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(1);
+    await store.openPhoto(2);
+    await store.dispose();
+    expect(api.close).toHaveBeenCalledWith(1);
+    expect(api.close).toHaveBeenCalledWith(2);
+    expect(store.tabs.length).toBe(0);
   });
 });

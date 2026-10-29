@@ -84,8 +84,9 @@ pub struct DocumentOrigin {
     /// The files of the last save (or of the link that the document was
     /// opened from). The next save writes the same files.
     pub saved: Option<SavedFiles>,
-    /// The name of a new document (the file stem of a "save as" when the
-    /// document has no source photo and no earlier save), or `None`.
+    /// The name of the document: the title for the tab, and the file stem
+    /// of a "save as" when the document has no source photo and no earlier
+    /// save. `None` if not known.
     pub name: Option<String>,
 }
 

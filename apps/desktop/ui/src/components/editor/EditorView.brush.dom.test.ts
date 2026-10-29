@@ -36,6 +36,7 @@ async function makeStore(layers: LayerInfo[]) {
   let revision = 0;
   const doc = (): DocumentInfo => ({
     documentId: 1,
+    name: 'doc',
     width: 100,
     height: 80,
     layers,
