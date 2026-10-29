@@ -56,6 +56,9 @@
     }
   });
 
+  /** True if a lock of the layer or of a parent group blocks changes to its properties. */
+  const locked = $derived(editor.selectedLocks.all);
+
   const current = $derived(draft ?? adjustment);
   const points = $derived<readonly CurvePoint[]>(current[channel]);
   const path = $derived(
@@ -108,7 +111,7 @@
   }
 
   function onplotdown(event: PointerEvent): void {
-    if (event.button !== 0) {
+    if (locked || event.button !== 0) {
       return;
     }
     const at = locate(event);
@@ -127,7 +130,7 @@
   function onpointdown(event: PointerEvent, index: number): void {
     // A point must not start the "add" of the plot.
     event.stopPropagation();
-    if (event.button !== 0) {
+    if (locked || event.button !== 0) {
       return;
     }
     editor.endGesture();
@@ -161,7 +164,7 @@
   function onkey(event: KeyboardEvent, index: number): void {
     const step = event.shiftKey ? BIG_STEP : STEP;
     const point = points[index];
-    if (point === undefined) {
+    if (locked || point === undefined) {
       return;
     }
     let dx = 0;
@@ -241,14 +244,15 @@
         aria-valuetext="input {point.x.toFixed(2)}, output {point.y.toFixed(2)}"
         data-testid="curve-point"
         onpointerdown={(event) => onpointdown(event, index)}
-        ondblclick={() => commit(removePoint(points, index))}
+        aria-disabled={locked}
+        ondblclick={() => !locked && commit(removePoint(points, index))}
         onkeydown={(event) => onkey(event, index)}
         onkeyup={() => editor.endGesture()}
       />
     {/each}
   </svg>
   <div class="actions">
-    <button type="button" disabled={isIdentity(points)} onclick={() => commit([{ x: 0, y: 0 }, { x: 1, y: 1 }])}
+    <button type="button" disabled={locked || isIdentity(points)} onclick={() => commit([{ x: 0, y: 0 }, { x: 1, y: 1 }])}
       >Reset {LABELS[channel].toLowerCase()}</button
     >
   </div>

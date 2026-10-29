@@ -44,6 +44,9 @@
     }
   });
 
+  /** True if a lock of the layer or of a parent group blocks changes to its properties. */
+  const locked = $derived(editor.selectedLocks.all);
+
   const current = $derived(draft ?? adjustment);
   const values = $derived(current[channel]);
 
@@ -79,6 +82,7 @@
     {/each}
   </div>
   <EditorSlider
+    disabled={locked}
     label="Input black"
     value={toShown(values.inputBlack)}
     min={0}
@@ -88,6 +92,7 @@
     onreset={() => resetField('inputBlack')}
   />
   <EditorSlider
+    disabled={locked}
     label="Gamma"
     value={values.gamma}
     min={0.01}
@@ -99,6 +104,7 @@
     onreset={() => resetField('gamma')}
   />
   <EditorSlider
+    disabled={locked}
     label="Input white"
     value={toShown(values.inputWhite)}
     min={1}
@@ -108,6 +114,7 @@
     onreset={() => resetField('inputWhite')}
   />
   <EditorSlider
+    disabled={locked}
     label="Output black"
     value={toShown(values.outputBlack)}
     min={0}
@@ -117,6 +124,7 @@
     onreset={() => resetField('outputBlack')}
   />
   <EditorSlider
+    disabled={locked}
     label="Output white"
     value={toShown(values.outputWhite)}
     min={0}
@@ -126,7 +134,7 @@
     onreset={() => resetField('outputWhite')}
   />
   <div class="actions">
-    <button type="button" disabled={isIdentityChannel(values)} onclick={resetChannel}
+    <button type="button" disabled={locked || isIdentityChannel(values)} onclick={resetChannel}
       >Reset {LABELS[channel].toLowerCase()}</button
     >
   </div>
