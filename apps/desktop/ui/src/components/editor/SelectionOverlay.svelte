@@ -72,7 +72,8 @@
     inset: 0;
     width: 100%;
     height: 100%;
-    overflow: hidden;
+    /* The view can rotate this layer: the viewport clips it, not the layer box. */
+    overflow: visible;
     pointer-events: none;
   }
   path {
