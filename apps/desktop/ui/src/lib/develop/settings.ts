@@ -8,7 +8,7 @@
  */
 import { identityCurve, type CurveChannel, type CurvePoint, type ToneCurveSettings } from './curve';
 
-/** The ranges of the sliders. Keep them equal to `expose_core::develop::ranges`. */
+/** The ranges of the sliders. Keep them equal to `expose_core::develop::ranges`. `lib/rustConstants.test.ts` checks min and max. */
 export const RANGES = {
   temperature: { min: 2000, max: 25000, step: 50 },
   tint: { min: -150, max: 150, step: 1 },
@@ -19,6 +19,7 @@ export const RANGES = {
 /**
  * The ranges of the sharpening sliders. Keep them equal to the constants
  * `ranges::SHARPEN_*` in `crates/expose-core/src/develop.rs`.
+ * `lib/rustConstants.test.ts` checks min and max.
  */
 export const SHARPEN_RANGES = {
   amount: { min: 0, max: 150, step: 1 },

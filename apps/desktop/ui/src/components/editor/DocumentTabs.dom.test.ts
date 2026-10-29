@@ -17,7 +17,7 @@ function doc(documentId: number, extra: Partial<DocumentInfo> = {}): DocumentInf
     name: `photo-${documentId}`,
     width: 100,
     height: 80,
-    layers: [{ id: 1, name: 'Photo', kind: 'pixel', visible: true, opacity: 1, fillOpacity: 1, blendMode: 'normal', hasMask: false, maskEnabled: false, adjustment: null, isolated: null, children: null, locks: NONE }],
+    layers: [{ id: 1, name: 'Photo', kind: 'pixel', visible: true, opacity: 1, fillOpacity: 1, blendMode: 'normal', hasMask: false, maskEnabled: false, maskVersion: null, adjustment: null, isolated: null, children: null, locks: NONE }],
     canUndo: false,
     canRedo: false,
     revision: 0,

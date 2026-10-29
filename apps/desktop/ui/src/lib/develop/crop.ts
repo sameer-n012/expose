@@ -41,7 +41,7 @@ export interface CropSettings {
   readonly aspect: CropAspect;
 }
 
-/** The range of the angle slider. Keep it equal to `ranges::CROP_ANGLE`. */
+/** The range of the angle slider. Keep it equal to `ranges::CROP_ANGLE`. `lib/rustConstants.test.ts` checks min and max. */
 export const CROP_ANGLE_RANGE = { min: -45, max: 45, step: 0.1 } as const;
 
 /** The default crop. Keep it equal to `Default` of `Crop` in `expose_core::develop`. */

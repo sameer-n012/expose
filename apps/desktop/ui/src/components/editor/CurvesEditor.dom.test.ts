@@ -30,6 +30,7 @@ function makeLayers(): LayerInfo[] {
       blendMode: 'normal',
       hasMask: false,
       maskEnabled: false,
+      maskVersion: null,
       locks: { transparency: false, pixels: false, position: false, all: false },
       adjustment: curves,
       isolated: null,

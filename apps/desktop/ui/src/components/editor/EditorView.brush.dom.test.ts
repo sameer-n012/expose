@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentInfo, EditorApi, LayerInfo, SampledColor } from '../../lib/editor/api';
 import { EDITOR_ACTION, editorActions } from '../../lib/editor/editorActions';
+import { thumbnailBuffer } from '../../lib/editor/fakeStrokeApi';
 import { EditorStore } from '../../lib/stores/editor.svelte';
 import { ToastStore } from '../../lib/stores/toasts.svelte';
 import EditorView from './EditorView.svelte';
@@ -22,6 +23,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
     blendMode: 'normal',
     hasMask: false,
     maskEnabled: false,
+    maskVersion: null,
     adjustment: null,
     isolated: null,
     children: null,
@@ -60,6 +62,7 @@ async function makeStore(layers: LayerInfo[]) {
     save: vi.fn(),
     close: vi.fn(async () => undefined),
     selectionOutline: vi.fn(async () => ({ selectionVersion: 0, step: 1, contours: [] })),
+    maskThumbnail: vi.fn(async (..._args: unknown[]) => thumbnailBuffer(2, 2)),
     sampleColor: vi.fn(async (..._args: unknown[]): Promise<SampledColor> => ({ color: '#336699', alpha: 1 })),
     strokeBegin: vi.fn(async (..._args: unknown[]) => 5),
     strokePoints: vi.fn(async (..._args: unknown[]) => null),
