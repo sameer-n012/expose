@@ -25,12 +25,12 @@ export type BrushSettings = BrushSettingsDto;
 
 /** The start settings of the brush tool. */
 export function defaultBrush(): BrushSettings {
-  return { size: 30, hardness: 0.8, opacity: 1, flow: 1, spacing: 0.25, pressureSize: false, pressureOpacity: false };
+  return { size: 30, hardness: 0.8, opacity: 1, flow: 1, blendMode: 'normal', spacing: 0.25, pressureSize: false, pressureOpacity: false };
 }
 
 /** The start settings of the eraser tool. */
 export function defaultEraser(): BrushSettings {
-  return { size: 50, hardness: 1, opacity: 1, flow: 1, spacing: 0.25, pressureSize: false, pressureOpacity: false };
+  return { size: 50, hardness: 1, opacity: 1, flow: 1, blendMode: 'normal', spacing: 0.25, pressureSize: false, pressureOpacity: false };
 }
 
 function clamp(value: number, min: number, max: number, fallback: number): number {
@@ -104,6 +104,8 @@ export function normalizeBrush(brush: BrushSettings): BrushSettings {
     opacity: clampUnit(brush.opacity),
     flow: clampUnit(brush.flow),
     spacing: clampSpacing(brush.spacing),
+    // The shell refuses dissolve for strokes.
+    blendMode: brush.blendMode === 'dissolve' ? 'normal' : brush.blendMode,
     pressureSize: brush.pressureSize,
     pressureOpacity: brush.pressureOpacity,
   };
@@ -161,6 +163,15 @@ export function strokeTarget(tool: PaintTool, target: PaintTarget, foreground: s
     return { type: 'mask', value: luminance(tool === 'brush' ? fg : bg) };
   }
   return tool === 'brush' ? { type: 'paint', color: fg } : { type: 'erase' };
+}
+
+/**
+ * The brush that a stroke sends. Only paint strokes of the brush tool use
+ * the blend mode; the eraser and mask paint always send 'normal'.
+ */
+export function strokeBrush(tool: PaintTool, target: PaintTarget, brush: BrushSettings): BrushSettings {
+  const normal = tool === 'eraser' || target === 'mask';
+  return { ...brush, blendMode: normal ? 'normal' : brush.blendMode };
 }
 
 /** The pressure of a pointer event: the pen pressure for a pen, else 1. */

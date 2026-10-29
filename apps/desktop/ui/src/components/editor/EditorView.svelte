@@ -19,6 +19,11 @@
     selection and the preview of a gesture are SVG layers over the canvas.
   - Brush and eraser: a drag is one stroke (`StrokeClient`). Escape or a
     cancelled pointer cancels it. A circle of the brush size follows the pointer.
+    Alt+click with the brush does not paint: it samples the composite color
+    under the pointer (current sample size) into the foreground color.
+  - Eyedropper: a click samples the color under the pointer into the
+    foreground color; Alt+click sets the background color. The options are
+    the sample size and the source (all layers or the selected layer).
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
@@ -451,6 +456,25 @@
     }
   }
 
+  /**
+   * Samples the pixel under the pointer. A point outside the canvas is
+   * ignored. The eyedropper uses its source option; the brush Alt+click
+   * always reads all layers.
+   */
+  function sampleAtPointer(event: PointerEvent, node: HTMLElement, view: View, toBackground: boolean): void {
+    const info = editor.info;
+    if (info === null) {
+      return;
+    }
+    const point = screenToCanvas(view, local(event, node));
+    const x = Math.floor(point.x);
+    const y = Math.floor(point.y);
+    if (x < 0 || y < 0 || x >= info.width || y >= info.height) {
+      return;
+    }
+    void editor.sampleAt(x, y, { toBackground, source: editor.tool === 'eyedropper' ? editor.sampleSource : 'composite' });
+  }
+
   function onpointerdown(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
     if (event.button === 1 || (event.button === 0 && spaceDown)) {
       event.preventDefault();
@@ -465,6 +489,11 @@
       return;
     }
     event.preventDefault();
+    if (tool === 'eyedropper' || (tool === 'brush' && event.altKey)) {
+      // Alt+click with the brush samples to the foreground (all layers); it paints nothing.
+      sampleAtPointer(event, event.currentTarget, view, tool === 'eyedropper' && event.altKey);
+      return;
+    }
     if (tool === 'brush' || tool === 'eraser') {
       if (stroke === null) {
         startStroke(event, event.currentTarget, view);
@@ -622,7 +651,7 @@
       class="viewport"
       class:grab={spaceDown && !panning}
       class:grabbing={panning}
-      class:crosshair={isSelectionTool(editor.tool) && !spaceDown && !panning}
+      class:crosshair={(isSelectionTool(editor.tool) || editor.tool === 'eyedropper') && !spaceDown && !panning}
       class:no-cursor={cursorShape !== null}
       onpointerleave={() => (cursor = null)}
       hidden={editor.status !== 'ready'}

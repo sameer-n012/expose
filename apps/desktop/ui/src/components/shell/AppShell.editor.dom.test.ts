@@ -28,6 +28,7 @@ const info: DocumentInfo = {
   sourcePhotoId: 1,
   hasSelection: false,
   selectionVersion: 0,
+  canReselect: false,
 };
 
 beforeEach(() => {

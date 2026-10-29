@@ -25,7 +25,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 }
 
 function info(documentId: number, revision: number, layers: LayerInfo[] = [layer(1), layer(2)], extra: Partial<DocumentInfo> = {}): DocumentInfo {
-  return { documentId, name: `doc${documentId}`, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, ...extra };
+  return { documentId, name: `doc${documentId}`, width: 4000, height: 3000, layers, canUndo: revision > 0, canRedo: false, revision, dirty: false, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false, ...extra };
 }
 
 function saveResult(documentId: number, revision: number, photoId = 77, created = true): SaveResult {
@@ -519,6 +519,67 @@ describe('EditorStore edits', () => {
     await tick();
     expect(store.info).toBeNull();
     expect(api.edit.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('EditorStore reselect and sampling', () => {
+  it('reselect sends the edit only when the document can reselect', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(1);
+    store.reselect();
+    await tick();
+    expect(api.edit).not.toHaveBeenCalled();
+    api.open.mockResolvedValueOnce(info(9, 0, undefined, { canReselect: true }));
+    await store.openPhoto(2);
+    expect(store.canReselect).toBe(true);
+    store.reselect();
+    await tick();
+    expect(api.edit.mock.calls[0]?.[1]).toEqual({ type: 'reselect' });
+  });
+
+  it('sampleAt sets the foreground, or the background, and floors the point', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(1);
+    api.sampleColor.mockResolvedValueOnce({ color: '#aabbcc', alpha: 1 });
+    expect(await store.sampleAt(3.7, 4.2)).toBe(true);
+    expect(api.sampleColor).toHaveBeenLastCalledWith(1, 3, 4, 1, 'composite', null);
+    expect(store.foreground).toBe('#aabbcc');
+    api.sampleColor.mockResolvedValueOnce({ color: '#010203', alpha: 1 });
+    await store.sampleAt(0, 0, { toBackground: true });
+    expect(store.background).toBe('#010203');
+  });
+
+  it('sampleAt shows a toast for transparent pixels and for an error', async () => {
+    const { store, api, toasts } = setup();
+    await store.openPhoto(1);
+    api.sampleColor.mockResolvedValueOnce({ color: null, alpha: 0 });
+    expect(await store.sampleAt(1, 1)).toBe(false);
+    expect(toasts.items.at(-1)?.message).toBe('No color here: the pixels are transparent.');
+    api.sampleColor.mockRejectedValueOnce(new Error('boom'));
+    expect(await store.sampleAt(1, 1)).toBe(false);
+    expect(toasts.items.at(-1)?.message).toBe('Sample the color failed.');
+  });
+
+  it('sampleAt with the layer source needs a selected pixel layer', async () => {
+    const { store, api, toasts } = setup();
+    await store.openPhoto(1);
+    store.select(null);
+    store.sampleSource = 'layer';
+    expect(await store.sampleAt(1, 1)).toBe(false);
+    expect(api.sampleColor).not.toHaveBeenCalled();
+    expect(toasts.items.length).toBeGreaterThan(0);
+  });
+
+  it('sampleAt still sets the colors when the tab changed during the call', async () => {
+    const { store, api } = setup();
+    await store.openPhoto(1);
+    let release: (value: { color: string; alpha: number }) => void = () => undefined;
+    api.sampleColor.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
+    const pending = store.sampleAt(1, 1);
+    await store.openPhoto(2);
+    release({ color: '#123456', alpha: 1 });
+    expect(await pending).toBe(true);
+    expect(store.foreground).toBe('#123456');
   });
 });
 

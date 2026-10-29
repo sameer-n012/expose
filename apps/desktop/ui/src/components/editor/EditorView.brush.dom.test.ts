@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { DocumentInfo, EditorApi, LayerInfo } from '../../lib/editor/api';
+import type { DocumentInfo, EditorApi, LayerInfo, SampledColor } from '../../lib/editor/api';
 import { EDITOR_ACTION, editorActions } from '../../lib/editor/editorActions';
 import { EditorStore } from '../../lib/stores/editor.svelte';
 import { ToastStore } from '../../lib/stores/toasts.svelte';
@@ -48,6 +48,7 @@ async function makeStore(layers: LayerInfo[]) {
     sourcePhotoId: 1,
     hasSelection: false,
     selectionVersion: 0,
+    canReselect: false,
   });
   const api = {
     open: vi.fn(async () => doc()),
@@ -59,6 +60,7 @@ async function makeStore(layers: LayerInfo[]) {
     save: vi.fn(),
     close: vi.fn(async () => undefined),
     selectionOutline: vi.fn(async () => ({ selectionVersion: 0, step: 1, contours: [] })),
+    sampleColor: vi.fn(async (..._args: unknown[]): Promise<SampledColor> => ({ color: '#336699', alpha: 1 })),
     strokeBegin: vi.fn(async (..._args: unknown[]) => 5),
     strokePoints: vi.fn(async (..._args: unknown[]) => null),
     strokeEnd: vi.fn(async (..._args: unknown[]) => {
@@ -165,7 +167,7 @@ describe('paint target', () => {
 });
 
 describe('EditorView strokes', () => {
-  async function ready(tool: 'brush' | 'eraser', layers: LayerInfo[] = [layer(1)]) {
+  async function ready(tool: 'brush' | 'eraser' | 'eyedropper', layers: LayerInfo[] = [layer(1)]) {
     const made = await makeStore(layers);
     render(EditorView, { editor: made.store, toasts: made.toasts });
     await flush();
@@ -230,6 +232,29 @@ describe('EditorView strokes', () => {
     expect(eraserTarget.value).toBeCloseTo(1, 6);
   });
 
+  it('the brush sends its blend mode; the eraser and mask paint send normal', async () => {
+    const { store, api, viewport } = await ready('brush', [layer(1, { hasMask: true, maskEnabled: true })]);
+    store.updateBrush('brush', { blendMode: 'multiply' });
+    store.updateBrush('eraser', { blendMode: 'multiply' });
+    const tap = async () => {
+      await fireEvent.pointerDown(viewport, point(5, 5));
+      await fireEvent.pointerUp(viewport, point(5, 5));
+      await flush();
+      await flush();
+    };
+    await tap();
+    expect(api.strokeBegin.mock.calls[0]?.[3]).toMatchObject({ blendMode: 'multiply' });
+    store.setTool('eraser');
+    await flush();
+    await tap();
+    expect(api.strokeBegin.mock.calls[1]?.[3]).toMatchObject({ blendMode: 'normal' });
+    store.setTool('brush');
+    store.selectMaskTarget(1);
+    await flush();
+    await tap();
+    expect(api.strokeBegin.mock.calls[2]?.[3]).toMatchObject({ blendMode: 'normal' });
+  });
+
   it('Escape cancels the stroke', async () => {
     const { api, viewport } = await ready('brush');
     await fireEvent.pointerDown(viewport, point(10, 20));
@@ -272,5 +297,89 @@ describe('EditorView strokes', () => {
     store.updateBrush('brush', { size: 3 });
     await flush();
     expect(screen.getByTestId('brush-cursor').querySelector('path')).not.toBeNull();
+  });
+});
+
+describe('eyedropper', () => {
+  async function ready(tool: 'brush' | 'eyedropper', layers: LayerInfo[] = [layer(1)]) {
+    const made = await makeStore(layers);
+    render(EditorView, { editor: made.store, toasts: made.toasts });
+    await flush();
+    made.store.view = { zoom: 2, originX: 0, originY: 0 };
+    made.store.setTool(tool);
+    await flush();
+    return { ...made, viewport: screen.getByTestId('editor-viewport') };
+  }
+
+  it('binds I', async () => {
+    const { store } = await makeStore([layer(1)]);
+    find(store, EDITOR_ACTION.eyedropperTool)?.run();
+    expect(find(store, EDITOR_ACTION.eyedropperTool)?.defaultBinding).toBe('I');
+    expect(store.tool).toBe('eyedropper');
+  });
+
+  it('a click samples the floored canvas pixel into the foreground; Alt+click into the background', async () => {
+    const { store, api, viewport } = await ready('eyedropper');
+    await fireEvent.pointerDown(viewport, point(21, 31));
+    await flush();
+    expect(api.sampleColor).toHaveBeenLastCalledWith(1, 10, 15, 1, 'composite', null);
+    expect(store.foreground).toBe('#336699');
+    api.sampleColor.mockResolvedValueOnce({ color: '#112233', alpha: 1 });
+    await fireEvent.pointerDown(viewport, point(21, 31, { altKey: true }));
+    await flush();
+    expect(store.background).toBe('#112233');
+    expect(store.foreground).toBe('#336699');
+  });
+
+  it('ignores a click outside the canvas', async () => {
+    const { api, viewport } = await ready('eyedropper');
+    await fireEvent.pointerDown(viewport, point(500, 500));
+    await flush();
+    expect(api.sampleColor).not.toHaveBeenCalled();
+  });
+
+  it('uses the size and source options, and the selected pixel layer', async () => {
+    const { store, api, viewport } = await ready('eyedropper', [layer(7)]);
+    store.sampleSize = 5;
+    store.sampleSource = 'layer';
+    await fireEvent.pointerDown(viewport, point(4, 4));
+    await flush();
+    expect(api.sampleColor).toHaveBeenLastCalledWith(1, 2, 2, 5, 'layer', 7);
+  });
+
+  it('asks for a pixel layer when the source is the current layer', async () => {
+    const { store, api, viewport, toasts } = await ready('eyedropper', [layer(1, { kind: 'adjustment' })]);
+    store.sampleSource = 'layer';
+    await fireEvent.pointerDown(viewport, point(4, 4));
+    await flush();
+    expect(api.sampleColor).not.toHaveBeenCalled();
+    expect(toasts.items.some((t) => t.message.includes('pixel layer'))).toBe(true);
+  });
+
+  it('shows a toast for transparent pixels and keeps the color', async () => {
+    const { store, api, viewport, toasts } = await ready('eyedropper');
+    api.sampleColor.mockResolvedValueOnce({ color: null, alpha: 0 });
+    await fireEvent.pointerDown(viewport, point(4, 4));
+    await flush();
+    expect(store.foreground).toBe('#000000');
+    expect(toasts.items.some((t) => t.message === 'No color here: the pixels are transparent.')).toBe(true);
+  });
+
+  it('shows an error toast when the call fails', async () => {
+    const { api, viewport, toasts } = await ready('eyedropper');
+    api.sampleColor.mockRejectedValueOnce({ kind: 'invalidInput', message: 'bad' });
+    await fireEvent.pointerDown(viewport, point(4, 4));
+    await flush();
+    expect(toasts.items.some((t) => t.message.startsWith('Sample the color failed'))).toBe(true);
+  });
+
+  it('Alt+click with the brush samples and starts no stroke', async () => {
+    const { store, api, viewport } = await ready('brush');
+    await fireEvent.pointerDown(viewport, point(20, 20, { altKey: true }));
+    await fireEvent.pointerUp(viewport, point(20, 20, { altKey: true }));
+    await flush();
+    expect(api.strokeBegin).not.toHaveBeenCalled();
+    expect(api.sampleColor).toHaveBeenLastCalledWith(1, 10, 10, 1, 'composite', null);
+    expect(store.foreground).toBe('#336699');
   });
 });

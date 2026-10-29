@@ -108,6 +108,8 @@ export interface DocumentInfo {
   hasSelection: boolean;
   /** Changes at each selection change, also at undo and redo. */
   selectionVersion: number;
+  /** True if Reselect can restore the selection that the last Deselect removed. */
+  canReselect: boolean;
 }
 
 /** How a new selection shape joins the selection that exists. */
@@ -169,6 +171,8 @@ export type EditDto =
   | { type: 'selectAll' }
   /** Deselect, invert, and feather are errors when there is no selection. */
   | { type: 'deselect' }
+  /** Restores the selection that the last deselect removed. An error if `canReselect` is false. */
+  | { type: 'reselect' }
   | { type: 'invertSelection' }
   /** `radius` is 0..=250 px. */
   | { type: 'featherSelection'; radius: number }
@@ -225,10 +229,21 @@ export interface BrushSettingsDto {
   opacity: number;
   /** 0..1 */
   flow: number;
+  /** Paint strokes only; the eraser and mask paint must send 'normal'. 'dissolve' is not allowed. */
+  blendMode: BlendModeId;
   /** A fraction of the size, 0.01..10. */
   spacing: number;
   pressureSize: boolean;
   pressureOpacity: boolean;
+}
+
+export type SampleSource = 'composite' | 'layer';
+
+export interface SampledColor {
+  /** "#rrggbb" (gamma-encoded sRGB), or null if the sampled pixels are fully transparent. */
+  color: string | null;
+  /** Mean alpha of the sampled pixels, 0..1. */
+  alpha: number;
 }
 
 /** The backend calls of the Editor. Tests replace them. */
@@ -244,6 +259,8 @@ export interface EditorApi {
   close(documentId: number): Promise<void>;
   /** The outline of the selection. `step` is the sample step in canvas pixels (1 or more). */
   selectionOutline(documentId: number, step: number): Promise<SelectionOutline>;
+  /** Samples the color at canvas pixel (x, y), integers inside the canvas. size: 1, 3, or 5 (square, clipped to the canvas). layerId is required for 'layer' (a pixel layer). */
+  sampleColor(documentId: number, x: number, y: number, size: 1 | 3 | 5, source: SampleSource, layerId: number | null): Promise<SampledColor>;
   /** Starts a stroke on a layer. Returns the stroke id. One stroke is active in a document. */
   strokeBegin(documentId: number, layerId: number, target: StrokeTargetDto, brush: BrushSettingsDto): Promise<number>;
   /** Adds points: a flat list [x, y, pressure, ...] in canvas pixels. 1 to 3000 points per call. */
@@ -267,6 +284,7 @@ export const editorApi: EditorApi = {
     await invoke<null>('editor_close', { documentId });
   },
   selectionOutline: (documentId, step) => invoke<SelectionOutline>('editor_selection_outline', { documentId, step }),
+  sampleColor: (documentId, x, y, size, source, layerId) => invoke<SampledColor>('editor_sample_color', { documentId, x, y, size, source, layerId }),
   strokeBegin: (documentId, layerId, target, brush) => invoke<number>('editor_stroke_begin', { documentId, layerId, target, brush }),
   strokePoints: (documentId, strokeId, points) => invoke<null>('editor_stroke_points', { documentId, strokeId, points }),
   strokeEnd: (documentId, strokeId) => invoke<DocumentInfo>('editor_stroke_end', { documentId, strokeId }),

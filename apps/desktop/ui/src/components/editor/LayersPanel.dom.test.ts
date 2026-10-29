@@ -30,7 +30,7 @@ function layer(id: number, extra: Partial<LayerInfo> = {}): LayerInfo {
 const bc = { type: 'brightnessContrast', brightness: 0, contrast: 0 } as const;
 
 function doc(layers: LayerInfo[], revision = 0): DocumentInfo {
-  return { documentId: 1, name: 'doc', width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, revision, dirty: revision > 0, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0 };
+  return { documentId: 1, name: 'doc', width: 100, height: 80, layers, canUndo: revision > 0, canRedo: false, revision, dirty: revision > 0, savedPhotoId: null, sourcePhotoId: 1, hasSelection: false, selectionVersion: 0, canReselect: false };
 }
 
 async function makeStore(layers: LayerInfo[]) {
