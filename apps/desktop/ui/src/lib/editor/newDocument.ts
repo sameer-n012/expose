@@ -4,11 +4,14 @@
  */
 import type { NewDocumentSpec } from './api';
 
-/** Largest side of a document in pixels. */
+// The four limits below are copies of Rust constants. `lib/rustConstants.test.ts` checks them.
+/** Largest side of a document in pixels. Copy of `MAX_DIMENSION` in crates/expose-editor/src/document.rs. */
 export const MAX_DIMENSION = 30000;
 /** Largest pixel count of a document. Copy of `MAX_PIXELS` in crates/expose-editor/src/document.rs (1 << 28). */
 export const MAX_PIXELS = 2 ** 28;
+/** Copy of `MAX_NAME_CHARS` in apps/desktop/src-tauri/src/editor/dto.rs. */
 export const MAX_NAME_LENGTH = 120;
+/** Copy of `MAX_RESOLUTION_PPI` in crates/expose-editor/src/document.rs. */
 export const MAX_RESOLUTION_PPI = 10000;
 
 export interface DocumentPreset {

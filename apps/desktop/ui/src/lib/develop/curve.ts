@@ -6,7 +6,7 @@
  * is only for the drawing of the curve. The backend is the reference.
  */
 
-/** The maximum number of points in one curve. Equal to `MAX_CURVE_POINTS` in `expose_core::develop`. */
+/** The maximum number of points in one curve. Equal to `MAX_CURVE_POINTS` in `expose_core::develop`. `lib/rustConstants.test.ts` checks it. */
 export const MAX_CURVE_POINTS = 32;
 
 /** The smallest distance in x between two neighbour points. */
