@@ -14,6 +14,11 @@
  *   document is not an error: the request was in flight when the document
  *   closed. `isCurrent` tells the client which document is open now (the
  *   store knows it before the client gets `setDocument`).
+ * - An error for a request that shows a mask (`showMaskLayerId` is not
+ *   null) is not an error if that request is not the newest one (a newer
+ *   request is sent, or waits), or if `showsMask` says the view does not
+ *   show that mask now. The layer can lose its mask while the request is
+ *   in flight, and the shell then refuses it with `invalidInput` (ADR 0018).
  */
 import { parseFrame, type Frame } from '../develop/frame';
 import { isSuperseded } from '../develop/previewClient';
@@ -35,6 +40,8 @@ export interface EditorFrameClientOptions {
   readonly maxInFlight?: number;
   /** True if the document is the open document now. Default: the document of `setDocument`. */
   readonly isCurrent?: (documentId: number) => boolean;
+  /** True if the view shows the mask of the layer now. Default: always true. */
+  readonly showsMask?: (layerId: number) => boolean;
 }
 
 /** Returns true if the error is a command error of kind `notFound`. */
@@ -48,6 +55,7 @@ export class EditorFrameClient {
   readonly #onError: EditorFrameClientOptions['onError'];
   readonly #maxInFlight: number;
   readonly #isCurrent: (documentId: number) => boolean;
+  readonly #showsMask: (layerId: number) => boolean;
 
   #documentId: number | null = null;
   #waiting: RenderArea | null = null;
@@ -64,6 +72,7 @@ export class EditorFrameClient {
     this.#onError = options.onError;
     this.#maxInFlight = Math.max(1, Math.floor(options.maxInFlight ?? EDITOR_MAX_IN_FLIGHT));
     this.#isCurrent = options.isCurrent ?? ((documentId) => documentId === this.#documentId);
+    this.#showsMask = options.showsMask ?? (() => true);
   }
 
   get inFlight(): number {
@@ -115,7 +124,9 @@ export class EditorFrameClient {
     } catch (error: unknown) {
       this.#release();
       const closed = isNotFound(error) && !this.#isCurrent(documentId);
-      if (!isSuperseded(error) && !closed && !this.#disposed && generation === this.#generation) {
+      const maskLayerId = area.showMaskLayerId ?? null;
+      const staleMask = maskLayerId !== null && (id !== this.#nextRequest - 1 || this.#waiting !== null || !this.#showsMask(maskLayerId));
+      if (!isSuperseded(error) && !closed && !staleMask && !this.#disposed && generation === this.#generation) {
         this.#onError(error);
       }
       return;

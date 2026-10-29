@@ -136,6 +136,8 @@
     render: (documentId, area) => editorApi.render(documentId, area),
     // The store drops the old document before it closes it in the shell.
     isCurrent: (documentId) => editor.info?.documentId === documentId,
+    // A frame that shows a mask can fail after the layer lost its mask: not an error then.
+    showsMask: (layerId) => editor.showMaskLayerId === layerId,
     onFrame,
     onError: (error) => {
       // One toast per run of failed frames, so a slow drag does not fill the screen.
