@@ -12,7 +12,7 @@
 
 ### Shell
 
-- `DocumentInfo` gets `name: string`: the title of the document for the tab. For a photo: the file stem of the photo. For a new document: the name of the new-document spec. After a save: the file stem of the saved layered file. The rest of the shell does not change.
+- `DocumentInfo` gets `name: string`: the title of the document for the tab. For a photo: the file stem of the photo. For a new document: the name of the new-document spec. After a save: the file stem of the saved layered file. If none of these exists: "Untitled". The value comes from `EditSession::name` (it uses `DocumentOrigin.name` and `origin.saved`). The rest of the shell does not change (PR #76).
 
 ### UI store
 
@@ -29,6 +29,9 @@
 ### UI view
 
 - A tab strip above the canvas: one tab per document with the name, a dirty marker, and a close button. Click activates, middle-click closes. A tab that loads shows "Loading…"; a tab that failed to open shows the error in the canvas area and can be closed.
+- The right panels (`LayersPanel`, `AdjustmentPanel`) re-mount on a tab switch (`{#key}` on the tab id), so open menus, rename fields, and drag values of one document do not show for another.
+- New tabs go at the end of the strip. A tab that failed to open does not match its photo: opening the photo again makes a new tab (a retry).
+- Gesture numbers are counted per tab. The unsaved-changes question names the tab.
 - Shortcuts (scope `editor`): `Mod+W` closes the active tab; `Ctrl+Tab` and `Ctrl+Shift+Tab` activate the next and the previous tab.
 
 ## Consequences

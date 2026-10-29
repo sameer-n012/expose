@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- **editor-tabs** (ADR 0023, 2026-10-28) — two parallel agents: `feat/editor-doc-name` (shell `DocumentInfo.name`, S) and `feat/editor-tabs-ui` (`EditorTab` store split, tab strip, `Mod+W` / `Ctrl+Tab`, O).
+- (none — all agent branches are merged; 2026-10-28)
 
 ## Next (suggested order)
 
@@ -22,7 +22,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
    - Follow-ups (S): the UI rounds shape corners and lasso points to whole canvas pixels (no sub-pixel precision when zoomed in); `feather_selection` takes about 200 ms at 4096² with a 20 px radius (speed-up: blur only the edge band).
 4. [ ] **editor-brushes-check** (operator) — check in the real webview: brush (`B`) and eraser (`E`) on a pixel layer; size slider and `[` / `]`, hardness `{` / `}`, opacity, flow, spacing; foreground/background colors, `X` swaps, `D` resets (note: in the Editor, `E` and `D` now win over the global module keys); a plain click on the mask chip makes the mask the paint target (brush = foreground luminance, eraser = background luminance); a selection limits the paint; one undo step per stroke; Escape cancels a stroke; brush cursor circle; pen pressure on a tablet. After the check, mark in `FEATURES.md`: eraser (ADR 0022). The brush item and the "foreground/background colors, color picker, eyedropper" item stay open (see editor-brushes-followups).
    - Follow-ups: `expose-gpu` sub-region texture writes and kernel runs on a sub-rectangle (removes the full-texture copies in partial updates, the 2 × 128 MiB spare textures at 4096², and the full pyramid rebuild; frame after a batch ~12 ms → ~2–3 ms, O); partial updates for `render_mask_view` while the mask is shown; undo of a long diagonal stroke gives one large rect (more than half the canvas → full view composite); CPU dab speed-ups (falloff lookup table, no square root in the hard core).
-5. [ ] **editor-tabs** — multiple open documents (P1); the engine already holds several documents.
+5. [ ] **editor-tabs-check** (operator) — check in the real webview: open two photos (`Mod+E` on each) → two tabs; `Mod+E` on a photo that has a tab activates it; New document (`Mod+N`) adds a tab; tab names (photo stem, new-document name, saved file stem after Save As); dirty marker; close button, middle-click, `Mod+W` (check that the macOS app menu does not close the window first, ADR 0023 "Open"); `Ctrl+Tab` / `Ctrl+Shift+Tab`; a dirty tab asks before it closes; window close with two dirty tabs asks for each; after the last tab closes, the library photo does not open again until you leave the Editor and come back; zoom/fit and layer selection stay per tab. After the check, mark "Multiple open documents (tabs)" in `FEATURES.md`.
+   - Follow-ups: key the compositor cache by document and layer (a tab switch can upload all layers again; O); per-tab tool or layer-list scroll position (optional); shell tests for `name` through `editor_open` / `editor_new` (S); the AppShell editor DOM test prints "The window close guard is not available" (happy-dom has no Tauri window).
 6. [ ] **editor-selections-followups** — freehand lasso (P1 lasso item); reselect (restore the last selection after deselect; P1 item "select all, deselect, reselect, invert").
 7. [ ] **editor-brushes-followups** — brush blend mode (P1 brush item); color picker dialog and eyedropper (P1 colors item).
 8. [ ] **editor-layers-followups** (S) — the mask chip is always white (add the mask fill or a mask thumbnail to `LayerInfo`); a frame in flight when a layer loses its mask can give one `NoMask` toast (ADR 0018); `AdjustmentPanel` must disable its controls for the `all` lock (use `editor.selectedLocks`); dialog values are lost if the user cancels the unsaved-changes question; optional levels input bar with draggable handles; the TS limits in `lib/editor/newDocument.ts` are copies of Rust constants (ADR 0017).
@@ -58,6 +59,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-tabs** (PRs #76, #77, ADR 0023) — shell `DocumentInfo.name` (photo stem, new-document name, saved file stem; fallback "Untitled"); UI `EditorTab` (`lib/stores/editorTab.svelte.ts`) per-document state with `EditorStore` forwarding to the active tab; `openPhoto`/`newDocument` open tabs, `closeTab`, `nextTab`, `confirmCloseAll` window guard; auto-open stops after the last tab closes and while the New document dialog is open; `DocumentTabs.svelte`; `Mod+W`, `Ctrl+Tab`, `Ctrl+Shift+Tab`. Waits for the operator check (item 5 in "Next").
 
 - [x] **editor-brushes** (PRs #71–#74, ADR 0022) — brush engine (`expose_editor::brush`: `Stroke` begin/points/end/cancel, tiled undo, `StrokeConflict`; 9–11 ms per 16 × 300 px dabs at 4096²); per-layer change log + partial layer/mask texture updates + view patch composite (frame after a batch 66–121 → 11–17 ms at 4096², 10 layers); shell `editor_stroke_begin/points/end/cancel` (one active stroke per document, implicit commit; `StrokeNotActive`, `InvalidStrokePoints`); UI brush/eraser tools, options, colors, mask paint target, `StrokeClient`, brush cursor. Waits for the operator check (item 4 in "Next").
 
