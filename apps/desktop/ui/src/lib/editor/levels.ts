@@ -15,7 +15,7 @@ export const LEVELS_CHANNELS = ['master', 'red', 'green', 'blue'] as const;
 export type LevelsChannelName = (typeof LEVELS_CHANNELS)[number];
 export type LevelsField = keyof LevelsChannelDto;
 
-/** Equal to `LEVELS_GAMMA_MIN` and `LEVELS_GAMMA_MAX` in `adjust.rs`. */
+/** Equal to `LEVELS_GAMMA_MIN` and `LEVELS_GAMMA_MAX` in `adjust.rs`. `lib/rustConstants.test.ts` checks them. */
 export const GAMMA_MIN = 0.01;
 export const GAMMA_MAX = 10;
 /** The least distance between the input points: one step of an 8-bit value. */

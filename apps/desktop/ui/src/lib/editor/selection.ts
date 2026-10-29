@@ -16,7 +16,7 @@ export type LassoTool = 'lasso' | 'polygonLasso';
 /** The shell accepts at most this many polygon points. */
 export const MAX_POLYGON_POINTS = 100_000;
 
-/** The range of the feather radius, in canvas pixels. */
+/** The range of the feather radius, in canvas pixels. Copy of `MAX_FEATHER_RADIUS` in crates/expose-editor/src/selection.rs; `lib/rustConstants.test.ts` checks it. */
 export const MAX_FEATHER = 250;
 /** A drag shorter than this (screen pixels) is a click. */
 export const CLICK_DISTANCE = 2;

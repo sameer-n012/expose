@@ -76,6 +76,8 @@ export interface LayerInfo {
   hasMask: boolean;
   /** True if the layer has a mask and the mask is on. False if there is no mask. */
   maskEnabled: boolean;
+  /** The content version of the mask, or null without a mask. It changes when the mask pixels change. */
+  maskVersion: number | null;
   /** For kind `adjustment`. */
   adjustment: AdjustmentDto | null;
   /** For kind `group`: false means pass-through. */
@@ -261,6 +263,8 @@ export interface EditorApi {
   selectionOutline(documentId: number, step: number): Promise<SelectionOutline>;
   /** Samples the color at canvas pixel (x, y), integers inside the canvas. size: 1, 3, or 5 (square, clipped to the canvas). layerId is required for 'layer' (a pixel layer). */
   sampleColor(documentId: number, x: number, y: number, size: 1 | 3 | 5, source: SampleSource, layerId: number | null): Promise<SampledColor>;
+  /** A gray thumbnail of the whole mask of a layer (see `decodeMaskThumbnail`). maxSize: 1 to 256. */
+  maskThumbnail(documentId: number, layerId: number, maxSize: number): Promise<ArrayBuffer>;
   /** Starts a stroke on a layer. Returns the stroke id. One stroke is active in a document. */
   strokeBegin(documentId: number, layerId: number, target: StrokeTargetDto, brush: BrushSettingsDto): Promise<number>;
   /** Adds points: a flat list [x, y, pressure, ...] in canvas pixels. 1 to 3000 points per call. */
@@ -285,6 +289,7 @@ export const editorApi: EditorApi = {
   },
   selectionOutline: (documentId, step) => invoke<SelectionOutline>('editor_selection_outline', { documentId, step }),
   sampleColor: (documentId, x, y, size, source, layerId) => invoke<SampledColor>('editor_sample_color', { documentId, x, y, size, source, layerId }),
+  maskThumbnail: (documentId, layerId, maxSize) => invoke<ArrayBuffer>('editor_mask_thumbnail', { documentId, layerId, maxSize }),
   strokeBegin: (documentId, layerId, target, brush) => invoke<number>('editor_stroke_begin', { documentId, layerId, target, brush }),
   strokePoints: (documentId, strokeId, points) => invoke<null>('editor_stroke_points', { documentId, strokeId, points }),
   strokeEnd: (documentId, strokeId) => invoke<DocumentInfo>('editor_stroke_end', { documentId, strokeId }),

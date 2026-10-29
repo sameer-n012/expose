@@ -21,6 +21,7 @@
     maskCommands,
     positionOf,
   } from '../../lib/editor/layers';
+  import { thumbnailSizeFor, type MaskThumbnail } from '../../lib/editor/maskThumbnail';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
   import EditorSlider from './EditorSlider.svelte';
 
@@ -47,6 +48,28 @@
   });
 
   let drafts = $state<Record<string, number>>({});
+  // Fetch the thumbnail of each visible mask chip. The store keeps one per layer and `maskVersion`.
+  $effect(() => {
+    const size = thumbnailSizeFor(window.devicePixelRatio);
+    for (const { layer } of rows) {
+      if (layer.hasMask) {
+        editor.requestMaskThumbnail(layer, size);
+      }
+    }
+  });
+
+  /** Draws the thumbnail on a chip canvas. The canvas CSS size letterboxes it with `object-fit`. */
+  function drawThumb(canvas: HTMLCanvasElement, thumb: MaskThumbnail): { update(next: MaskThumbnail): void } {
+    const draw = (t: MaskThumbnail): void => {
+      canvas.width = t.width;
+      canvas.height = t.height;
+      // `getContext` can return null where there is no canvas (tests). The chip stays plain.
+      canvas.getContext('2d')?.putImageData(new ImageData(t.data, t.width, t.height), 0, 0);
+    };
+    draw(thumb);
+    return { update: draw };
+  }
+
   let renaming = $state<number | null>(null);
   let menuOpen = $state(false);
   let maskMenuOpen = $state(false);
@@ -332,6 +355,12 @@
                 title="{maskChipTitle(layer)} Click to paint on the mask."
                 onclick={(e) => onChip(e, layer)}
               >
+                {#if editor.maskThumbnailOf(layer) !== null}
+                  {@const thumb = editor.maskThumbnailOf(layer)}
+                  {#if thumb !== null}
+                    <canvas class="thumb" data-testid="mask-thumb" use:drawThumb={thumb}></canvas>
+                  {/if}
+                {/if}
                 {#if !layer.maskEnabled}<span class="x" aria-hidden="true">✕</span>{/if}
               </button>
             {/if}
@@ -551,6 +580,13 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
     background: var(--color-text);
+  }
+  .mask-chip .thumb {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
   }
   .mask-chip.off {
     background: var(--color-bg-panel-raised);

@@ -13,6 +13,8 @@ export type PaintTool = 'brush' | 'eraser';
 /** What a stroke changes in the selected layer. */
 export type PaintTarget = 'pixels' | 'mask';
 
+// The size and spacing limits are copies of `MIN_BRUSH_*` and `MAX_BRUSH_*` in
+// crates/expose-editor/src/brush.rs. `lib/rustConstants.test.ts` checks them.
 export const MIN_SIZE = 1;
 export const MAX_SIZE = 5000;
 export const MIN_SPACING = 0.01;

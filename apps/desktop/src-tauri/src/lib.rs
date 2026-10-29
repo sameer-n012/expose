@@ -160,6 +160,7 @@ pub fn run() -> tauri::Result<()> {
             commands::editor::editor_stroke_cancel,
             commands::editor::editor_selection_outline,
             commands::editor::editor_sample_color,
+            commands::editor::editor_mask_thumbnail,
             commands::editor::editor_undo,
             commands::editor::editor_redo,
             commands::editor::editor_close,

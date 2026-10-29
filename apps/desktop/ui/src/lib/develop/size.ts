@@ -14,10 +14,10 @@
  * (the crop), and limit it with the session long edge.
  */
 
-/** The smallest target long edge. Keep equal to `MIN_LONG_EDGE` in the shell. */
+/** The smallest target long edge. Keep equal to `MIN_LONG_EDGE` in the shell. `lib/rustConstants.test.ts` checks it. */
 export const MIN_TARGET_LONG_EDGE = 64;
 
-/** The largest target long edge. Keep equal to `MAX_LONG_EDGE` in the shell. */
+/** The largest target long edge. Keep equal to `MAX_LONG_EDGE` in the shell. `lib/rustConstants.test.ts` checks it. */
 export const MAX_TARGET_LONG_EDGE = 8192;
 
 /**

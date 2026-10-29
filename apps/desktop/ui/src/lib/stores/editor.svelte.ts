@@ -63,6 +63,7 @@ import {
 import { clampFeather, cycleLasso, cycleMarquee, isLassoTool, type EditorTool, type LassoTool } from '../editor/selection';
 import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
+import { decodeMaskThumbnail, type MaskThumbnail } from '../editor/maskThumbnail';
 import { clampZoom, panBy, steppedZoom, zoomAbout, type Point, type Size, type View } from '../editor/view';
 import { EditorTab } from './editorTab.svelte';
 import type { LibraryStore } from './library.svelte';
@@ -669,6 +670,54 @@ export class EditorStore {
       this.#toasts.error('Sample the color failed.', error);
       return false;
     }
+  }
+
+  /**
+   * The mask thumbnail of a layer of the active tab, or null while it loads or
+   * if it failed. A thumbnail of an old `maskVersion` is not returned.
+   */
+  maskThumbnailOf(layer: LayerInfo): MaskThumbnail | null {
+    const entry = this.#activeTab?.maskThumbs.get(layer.id);
+    return entry !== undefined && entry.version === layer.maskVersion ? entry.thumb : null;
+  }
+
+  /**
+   * Fetches the mask thumbnail of a layer of the active tab if the cache has
+   * no thumbnail for its `maskVersion`. A late result for an old version or
+   * a closed tab is dropped. An error is logged only (the chip stays plain).
+   */
+  requestMaskThumbnail(layer: LayerInfo, maxSize: number): void {
+    const tab = this.#activeTab;
+    const version = layer.maskVersion;
+    const documentId = tab?.info?.documentId;
+    if (tab === null || documentId === undefined || version === null || !layer.hasMask) {
+      return;
+    }
+    if (tab.maskThumbs.get(layer.id)?.version === version || tab.maskThumbPending.get(layer.id) === version) {
+      return;
+    }
+    tab.maskThumbPending.set(layer.id, version);
+    const layerId = layer.id;
+    this.#api
+      .maskThumbnail(documentId, layerId, maxSize)
+      .then((buffer) => {
+        const thumb = decodeMaskThumbnail(buffer);
+        const current = tab.info !== null ? findLayer(tab.info.layers, layerId) : null;
+        if (tab.closed || current === null || current.maskVersion !== version) {
+          return;
+        }
+        const next = new Map(tab.maskThumbs);
+        next.set(layerId, { version, thumb });
+        tab.maskThumbs = next;
+      })
+      .catch((error: unknown) => {
+        console.error('Mask thumbnail failed.', error);
+      })
+      .finally(() => {
+        if (tab.maskThumbPending.get(layerId) === version) {
+          tab.maskThumbPending.delete(layerId);
+        }
+      });
   }
 
   /** The backend calls of this store. A stroke uses the same calls. */

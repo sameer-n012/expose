@@ -9,6 +9,7 @@
 import type { PhotoId } from '../catalog';
 import type { DocumentInfo, EditDto } from '../editor/api';
 import { allLayerIds, findLayer } from '../editor/layers';
+import type { MaskThumbnail } from '../editor/maskThumbnail';
 import { clampView, fitView, hasArea, type Size, type View } from '../editor/view';
 
 /** What a tab shows: the document is opening, is open, or did not open. */
@@ -44,6 +45,11 @@ export class EditorTab {
   pending = $state(0);
   /** True while a save runs. */
   saving = $state(false);
+
+  /** Mask thumbnails by layer id, each with the `maskVersion` it shows. Replaced on each change. */
+  maskThumbs = $state.raw<ReadonlyMap<number, { version: number; thumb: MaskThumbnail }>>(new Map());
+  /** Mask thumbnail fetches in flight: layer id to the `maskVersion` that is requested. */
+  readonly maskThumbPending = new Map<number, number>();
 
   /** True after the tab closed. Late results of the tab are dropped. */
   closed = false;

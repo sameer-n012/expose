@@ -130,6 +130,73 @@ describe('EditorFrameClient', () => {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
+  describe('errors of frames that show a mask', () => {
+    const invalid = { kind: 'invalidInput', message: 'layer has no mask' };
+    const masked = (n: number): RenderArea => ({ ...area(n), showMaskLayerId: 7 });
+
+    function maskSetup(showsMask: (id: number) => boolean) {
+      const calls: Array<ReturnType<typeof deferred>> = [];
+      const onError = vi.fn();
+      const client = new EditorFrameClient({
+        render: () => {
+          const d = deferred();
+          calls.push(d);
+          return d.promise;
+        },
+        onFrame: vi.fn(),
+        onError,
+        showsMask,
+      });
+      client.setDocument(1);
+      return { client, calls, onError };
+    }
+
+    it('reports the error of the newest request while the view shows the mask', async () => {
+      const { client, calls, onError } = maskSetup(() => true);
+      client.request(masked(1));
+      calls[0]?.reject(invalid);
+      await tick();
+      expect(onError).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores the error when a newer request was sent', async () => {
+      const { client, calls, onError } = maskSetup(() => true);
+      client.request(masked(1));
+      client.request(area(2));
+      calls[0]?.reject(invalid);
+      await tick();
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('ignores the error when a newer request waits', async () => {
+      const { client, calls, onError } = maskSetup(() => true);
+      client.request(masked(1));
+      client.request(masked(2));
+      client.request(masked(3));
+      calls[0]?.reject(invalid);
+      await tick();
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('ignores the error when the view does not show that mask now', async () => {
+      let shown = true;
+      const { client, calls, onError } = maskSetup(() => shown);
+      client.request(masked(1));
+      shown = false;
+      calls[0]?.reject(invalid);
+      await tick();
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('still reports the error of a request without a mask', async () => {
+      const { client, calls, onError } = maskSetup(() => false);
+      client.request(area(1));
+      calls[0]?.reject(invalid);
+      await tick();
+      expect(onError).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('reports a bad frame body', async () => {
     const { client, calls, onError, frames } = setup();
     client.setDocument(1);

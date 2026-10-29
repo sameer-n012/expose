@@ -19,6 +19,9 @@
   const layer = $derived(editor.selected);
   const adjustment = $derived(layer !== null && layer.kind === 'adjustment' ? layer.adjustment : null);
 
+  /** True if a lock of the layer or of a parent group blocks changes to its properties. */
+  const locked = $derived(editor.selectedLocks.all);
+
   /** Dragged values by `layerId:field`; they stay until all edits are done. */
   let drafts = $state<Record<string, number>>({});
 
@@ -65,6 +68,7 @@
       <p class="note">Select an adjustment layer to edit it.</p>
     {:else if adjustment.type === 'brightnessContrast'}
       <EditorSlider
+        disabled={locked}
         label="Brightness"
         value={shown('brightness', adjustment.brightness)}
         min={-100}
@@ -74,6 +78,7 @@
         onreset={() => reset('brightness')}
       />
       <EditorSlider
+        disabled={locked}
         label="Contrast"
         value={shown('contrast', adjustment.contrast)}
         min={-100}
@@ -84,6 +89,7 @@
       />
     {:else if adjustment.type === 'hueSaturation'}
       <EditorSlider
+        disabled={locked}
         label="Hue"
         value={shown('hue', adjustment.hue)}
         min={-180}
@@ -94,6 +100,7 @@
         onreset={() => reset('hue')}
       />
       <EditorSlider
+        disabled={locked}
         label="Saturation"
         value={shown('saturation', adjustment.saturation)}
         min={-100}
@@ -103,6 +110,7 @@
         onreset={() => reset('saturation')}
       />
       <EditorSlider
+        disabled={locked}
         label="Lightness"
         value={shown('lightness', adjustment.lightness)}
         min={-100}
