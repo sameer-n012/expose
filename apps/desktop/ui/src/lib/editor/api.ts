@@ -88,6 +88,8 @@ export interface LayerInfo {
 
 export interface DocumentInfo {
   documentId: number;
+  /** The title of the document for its tab: the photo file stem, the new-document name, or the stem of the saved file. */
+  name: string;
   width: number;
   height: number;
   /** The root list, bottom-first (index 0 is the bottom layer). */
