@@ -122,6 +122,16 @@ fn soft_dab_falloff_values() {
 
 #[test]
 fn batch_split_gives_same_pixels() {
+    for blend_mode in [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Luminosity,
+    ] {
+        batch_split_gives_same_pixels_with(blend_mode);
+    }
+}
+
+fn batch_split_gives_same_pixels_with(blend_mode: BlendMode) {
     let settings = BrushSettings {
         size: 9.0,
         hardness: 0.3,
@@ -130,6 +140,7 @@ fn batch_split_gives_same_pixels() {
         spacing: 0.1,
         pressure_size: true,
         pressure_opacity: true,
+        blend_mode,
     };
     let points: Vec<StrokePoint> = (0..40)
         .map(|i| {
@@ -543,4 +554,219 @@ fn brush_timing_4096() {
         "brush 300 px, 16 dabs per batch: {times:.2?} ms; end {end_ms:.2} ms; edit {} MiB",
         edit.memory_bytes() / (1 << 20)
     );
+}
+
+// ---------------------------------------------------------------------
+// Blend modes.
+// ---------------------------------------------------------------------
+
+fn with_mode(blend_mode: BlendMode, size: f32) -> BrushSettings {
+    BrushSettings {
+        blend_mode,
+        ..hard(size)
+    }
+}
+
+/// A soft, partly opaque stroke, so that the coverage has many values.
+fn soft_points() -> (BrushSettings, Vec<StrokePoint>) {
+    let settings = BrushSettings {
+        hardness: 0.2,
+        opacity: 0.7,
+        flow: 0.4,
+        spacing: 0.1,
+        ..hard(12.0)
+    };
+    let points = (0..20)
+        .map(|i| pt(4.0 + f64::from(i) * 1.3, 16.0 + f64::from(i % 5)))
+        .collect();
+    (settings, points)
+}
+
+fn close3(a: [f32; 3], b: [f32; 3], eps: f32) -> bool {
+    a.iter().zip(b).all(|(x, y)| (x - y).abs() <= eps)
+}
+
+#[test]
+fn normal_mode_keeps_the_old_formula_bit_for_bit() {
+    let (settings, points) = soft_points();
+    let color = [0.9, 0.3, 0.05];
+    let target = StrokeTarget::Paint { color };
+    // On a transparent layer the result alpha is the coverage `c`.
+    let (mut clear, cid) = doc_with_layer(32, (32, 32), [0.0; 4], (0, 0));
+    stroke(&mut clear, cid, target, settings, &points);
+    let o: Rgba = [0.1, 0.2, 0.3, 0.5];
+    let (mut doc, id) = doc_with_layer(32, (32, 32), o, (0, 0));
+    stroke(&mut doc, id, target, settings, &points);
+    let mut partial = 0;
+    for y in 0..32 {
+        for x in 0..32 {
+            let c = px(&clear, cid, x, y)[3];
+            if c > 0.0 && c < 1.0 {
+                partial += 1;
+            }
+            let k = 1.0 - c;
+            let expected = [
+                color[0] * c + o[0] * k,
+                color[1] * c + o[1] * k,
+                color[2] * c + o[2] * k,
+                c + o[3] * k,
+            ];
+            let got = px(&doc, id, x, y);
+            if c == 0.0 {
+                assert_eq!(got, o);
+            } else {
+                assert_eq!(got.map(f32::to_bits), expected.map(f32::to_bits));
+            }
+        }
+    }
+    assert!(partial > 20);
+}
+
+#[test]
+fn multiply_with_white_and_screen_with_black_change_nothing() {
+    let (settings, points) = soft_points();
+    let o: Rgba = [0.2, 0.4, 0.6, 1.0];
+    for space in [BlendSpace::Perceptual, BlendSpace::Linear] {
+        for (mode, color) in [
+            (BlendMode::Multiply, [1.0; 3]),
+            (BlendMode::Screen, [0.0; 3]),
+        ] {
+            let (mut doc, id) = doc_with_layer(32, (32, 32), o, (0, 0));
+            doc.set_blend_space(space).unwrap();
+            let s = BrushSettings {
+                blend_mode: mode,
+                ..settings
+            };
+            stroke(&mut doc, id, StrokeTarget::Paint { color }, s, &points);
+            for y in 0..32 {
+                for x in 0..32 {
+                    let p = px(&doc, id, x, y);
+                    assert!(
+                        close3([p[0], p[1], p[2]], [o[0], o[1], o[2]], 1e-5),
+                        "{mode:?} {space:?} at {x},{y}: {p:?}"
+                    );
+                    assert_eq!(p[3], 1.0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn blend_mode_on_transparent_pixels_equals_normal() {
+    let (settings, points) = soft_points();
+    let target = StrokeTarget::Paint {
+        color: [0.7, 0.2, 0.9],
+    };
+    let run = |mode: BlendMode| {
+        let (mut doc, id) = doc_with_layer(32, (32, 32), [0.0; 4], (0, 0));
+        let s = BrushSettings {
+            blend_mode: mode,
+            ..settings
+        };
+        stroke(&mut doc, id, target, s, &points);
+        bits(&doc, id)
+    };
+    let normal = run(BlendMode::Normal);
+    assert_eq!(run(BlendMode::Multiply), normal);
+    assert_eq!(run(BlendMode::Luminosity), normal);
+}
+
+#[test]
+fn luminosity_on_an_opaque_pixel() {
+    let o: Rgba = [0.6, 0.2, 0.1, 1.0];
+    let color = [0.1, 0.1, 0.8];
+    let (mut doc, id) = doc_with_layer(64, (64, 64), o, (0, 0));
+    let space = doc.blend_space();
+    stroke(
+        &mut doc,
+        id,
+        StrokeTarget::Paint { color },
+        with_mode(BlendMode::Luminosity, 20.0),
+        &[pt(32.5, 32.5)],
+    );
+    // Center: coverage 1, so the result is `B` (ab = 1).
+    let expected = space
+        .decode(BlendMode::Luminosity.blend(space.encode([o[0], o[1], o[2]]), space.encode(color)));
+    let p = px(&doc, id, 32, 32);
+    assert!(close3([p[0], p[1], p[2]], expected, 1e-6), "{p:?}");
+    assert_eq!(p[3], 1.0);
+    // The result is not the brush color and not the original.
+    assert!(!close3([p[0], p[1], p[2]], color, 1e-2));
+    assert!(!close3([p[0], p[1], p[2]], [o[0], o[1], o[2]], 1e-2));
+    // The encoded luminance is the luminance of the encoded brush color.
+    let lum = |c: [f32; 3]| expose_core::color::luminance(space.encode(c));
+    assert!((lum([p[0], p[1], p[2]]) - lum(color)).abs() < 1e-5);
+    // Outside the dab: no change.
+    assert_eq!(px(&doc, id, 2, 2), o);
+}
+
+#[test]
+fn blend_mode_with_transparency_lock_keeps_alpha() {
+    let o: Rgba = [0.25, 0.25, 0.25, 0.5];
+    let (mut doc, id) = doc_with_layer(32, (32, 32), o, (0, 0));
+    let locks = Locks {
+        transparency: true,
+        ..Locks::NONE
+    };
+    doc.set_locks(id, locks).unwrap();
+    let color = [1.0, 0.0, 0.0];
+    stroke(
+        &mut doc,
+        id,
+        StrokeTarget::Paint { color },
+        with_mode(BlendMode::Multiply, 10.0),
+        &[pt(16.5, 16.5)],
+    );
+    // c = 1: rgb = Cs' * a, Cs' = 0.5 * red + 0.5 * multiply(gray, red).
+    let space = doc.blend_space();
+    let b = space.decode(BlendMode::Multiply.blend(space.encode([0.5; 3]), space.encode(color)));
+    let cs = [0.5 + 0.5 * b[0], 0.5 * b[1], 0.5 * b[2]];
+    let p = px(&doc, id, 16, 16);
+    assert!(
+        close3([p[0], p[1], p[2]], cs.map(|v| v * 0.5), 1e-6),
+        "{p:?}"
+    );
+    assert_eq!(p[3], 0.5);
+}
+
+#[test]
+fn blend_mode_errors() {
+    let (mut doc, id) = doc_with_layer(32, (32, 32), [1.0; 4], (0, 0));
+    let mask = Mask::new(
+        MaskImage::new_filled(32, 32, 1.0).unwrap(),
+        (0, 0),
+        MaskFill::White,
+    );
+    doc.set_mask(id, Some(mask)).unwrap();
+    let multiply = with_mode(BlendMode::Multiply, 5.0);
+    for target in [StrokeTarget::Erase, StrokeTarget::Mask { value: 0.0 }] {
+        assert!(matches!(
+            Stroke::begin(&doc, id, target, multiply).unwrap_err(),
+            EditorError::InvalidBrush(_)
+        ));
+        // Normal is good for both targets.
+        Stroke::begin(&doc, id, target, hard(5.0))
+            .unwrap()
+            .cancel(&mut doc)
+            .unwrap();
+    }
+    let dissolve = with_mode(BlendMode::Dissolve, 5.0);
+    assert!(matches!(
+        dissolve.validate(),
+        Err(EditorError::InvalidBrush(_))
+    ));
+    assert!(matches!(
+        Stroke::begin(&doc, id, RED, dissolve).unwrap_err(),
+        EditorError::InvalidBrush(_)
+    ));
+    // All other modes are good for paint.
+    for mode in BlendMode::ALL {
+        if mode != BlendMode::Dissolve {
+            Stroke::begin(&doc, id, RED, with_mode(mode, 5.0))
+                .unwrap()
+                .cancel(&mut doc)
+                .unwrap();
+        }
+    }
 }

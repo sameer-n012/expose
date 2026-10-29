@@ -50,6 +50,28 @@
 //! - Erase: `result = original * (1 - c)`.
 //! - Mask: `m = lerp(orig_m, value, c)`.
 //!
+//! # Blend mode
+//!
+//! A paint stroke can use a [`BlendMode`] ([`BrushSettings::blend_mode`]).
+//! For each pixel, the stroke computes a source color `Cs'` from the
+//! original pixel, and then applies the paint rule above with `Cs'` in
+//! place of the brush color `Cs`:
+//!
+//! ```text
+//! Cb, ab = straight color and alpha of the original pixel
+//! B      = decode(mode(encode(Cb), encode(Cs)))   (document blend space)
+//! Cs'    = (1 - ab) * Cs + ab * B
+//! ```
+//!
+//! `encode` and `decode` are [`BlendSpace::encode`] and
+//! [`BlendSpace::decode`] of the document blend space at the start of the
+//! stroke. This is the same rule that the compositor uses for a layer
+//! with a blend mode. On a transparent pixel (`ab = 0`) each mode gives
+//! the normal result. [`BlendMode::Normal`] uses the brush color directly
+//! (no encode and decode), so its result does not change. Erase and mask
+//! strokes accept only [`BlendMode::Normal`]. No stroke accepts
+//! [`BlendMode::Dissolve`].
+//!
 //! # Memory
 //!
 //! The stroke keeps the original values and the coverage in tiles of
@@ -68,6 +90,7 @@ use std::fmt;
 
 use expose_core::buffer::{Rect, Rgba};
 
+use crate::blend::{BlendMode, BlendSpace, unpremultiply};
 use crate::document::Document;
 use crate::error::{EditorError, EditorResult, check_range};
 use crate::layer::{Layer, LayerId, LayerKind, LockKind, Locks, MaskImage};
@@ -107,11 +130,16 @@ pub struct BrushSettings {
     pub pressure_size: bool,
     /// If `true`, the pressure multiplies the flow.
     pub pressure_opacity: bool,
+    /// How the paint color mixes with the pixels below it (see "Blend
+    /// mode" in the [module documentation](self)). Only a paint stroke can
+    /// use a mode other than [`BlendMode::Normal`].
+    /// [`BlendMode::Dissolve`] is not available for a brush.
+    pub blend_mode: BlendMode,
 }
 
 impl Default for BrushSettings {
     /// Diameter 20 px, hardness 1, opacity 1, flow 1, spacing 0.25, no
-    /// pressure control.
+    /// pressure control, blend mode normal.
     fn default() -> Self {
         Self {
             size: 20.0,
@@ -121,13 +149,23 @@ impl Default for BrushSettings {
             spacing: 0.25,
             pressure_size: false,
             pressure_opacity: false,
+            blend_mode: BlendMode::Normal,
         }
     }
 }
 
 impl BrushSettings {
-    /// Returns an error if a value is not finite or is out of its range.
+    /// Returns an error if a value is not finite or is out of its range,
+    /// or if the blend mode is [`BlendMode::Dissolve`]
+    /// ([`EditorError::InvalidBrush`]).
     pub fn validate(&self) -> EditorResult<()> {
+        if self.blend_mode == BlendMode::Dissolve {
+            // The dissolve pattern changes alpha per pixel position. The
+            // coverage rule of a stroke has no place for it.
+            return Err(EditorError::InvalidBrush(
+                "the dissolve blend mode is not available for a brush",
+            ));
+        }
         check_range("brush size", self.size, MIN_BRUSH_SIZE, MAX_BRUSH_SIZE)?;
         check_range("brush hardness", self.hardness, 0.0, 1.0)?;
         check_range("brush opacity", self.opacity, 0.0, 1.0)?;
@@ -195,21 +233,68 @@ impl StrokePoint {
     }
 }
 
+/// A paint blend mode other than normal, with the values that do not
+/// change during the stroke.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PaintBlend {
+    mode: BlendMode,
+    space: BlendSpace,
+    /// The brush color in the blending space.
+    color_encoded: [f32; 3],
+}
+
+impl PaintBlend {
+    /// Returns the source color that the paint rule uses over the
+    /// original pixel `o` (premultiplied): `Cs' = (1 - ab) * Cs + ab * B`
+    /// with `B = decode(mode(encode(Cb), encode(Cs)))`. With `ab = 0` the
+    /// result is `color` exactly.
+    #[inline]
+    fn source(&self, color: [f32; 3], o: Rgba) -> [f32; 3] {
+        let (cb, ab) = unpremultiply(o);
+        if ab <= 0.0 {
+            return color;
+        }
+        let ab = ab.min(1.0);
+        let b = self
+            .space
+            .decode(self.mode.blend(self.space.encode(cb), self.color_encoded));
+        let k = 1.0 - ab;
+        [
+            k * color[0] + ab * b[0],
+            k * color[1] + ab * b[1],
+            k * color[2] + ab * b[2],
+        ]
+    }
+}
+
 /// How the stroke computes a result from the original value and the
 /// coverage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
-    Paint { color: [f32; 3] },
-    PaintKeepAlpha { color: [f32; 3] },
+    /// `blend` is `None` for [`BlendMode::Normal`] (the fast path).
+    Paint {
+        color: [f32; 3],
+        blend: Option<PaintBlend>,
+    },
+    PaintKeepAlpha {
+        color: [f32; 3],
+        blend: Option<PaintBlend>,
+    },
     Erase,
-    Mask { value: f32 },
+    Mask {
+        value: f32,
+    },
 }
 
 impl Mode {
     /// Result for a pixel layer. `c == 0` gives `o` exactly.
     fn pixel(self, o: Rgba, c: f32) -> Rgba {
         match self {
-            Self::Paint { color } => {
+            Self::Paint { color, blend } => {
+                let color = match blend {
+                    None => color,
+                    Some(b) => b.source(color, o),
+                };
                 let k = 1.0 - c;
                 [
                     color[0] * c + o[0] * k,
@@ -218,12 +303,18 @@ impl Mode {
                     c + o[3] * k,
                 ]
             }
-            Self::PaintKeepAlpha { color } => [
-                o[0] + (color[0] * o[3] - o[0]) * c,
-                o[1] + (color[1] * o[3] - o[1]) * c,
-                o[2] + (color[2] * o[3] - o[2]) * c,
-                o[3],
-            ],
+            Self::PaintKeepAlpha { color, blend } => {
+                let color = match blend {
+                    None => color,
+                    Some(b) => b.source(color, o),
+                };
+                [
+                    o[0] + (color[0] * o[3] - o[0]) * c,
+                    o[1] + (color[1] * o[3] - o[1]) * c,
+                    o[2] + (color[2] * o[3] - o[2]) * c,
+                    o[3],
+                ]
+            }
             Self::Erase => {
                 let k = 1.0 - c;
                 [o[0] * k, o[1] * k, o[2] * k, o[3] * k]
@@ -630,6 +721,9 @@ impl Stroke {
     ///   the layer or on a parent group.
     /// - [`EditorError::TransparencyLocked`] for erase with the
     ///   transparency lock.
+    /// - [`EditorError::InvalidBrush`] for a blend mode other than
+    ///   [`BlendMode::Normal`] with an erase or mask target, or for
+    ///   [`BlendMode::Dissolve`].
     pub fn begin(
         doc: &Document,
         layer: LayerId,
@@ -648,12 +742,32 @@ impl Stroke {
             StrokeTarget::Mask { value } => check_range("mask value", value, 0.0, 1.0)?,
             StrokeTarget::Erase => {}
         }
+        if settings.blend_mode != BlendMode::Normal && !matches!(target, StrokeTarget::Paint { .. })
+        {
+            return Err(EditorError::InvalidBrush(
+                "only a paint stroke can use a blend mode other than normal",
+            ));
+        }
         let l = doc.layer(layer).ok_or(EditorError::LayerNotFound(layer))?;
         let locks = doc.effective_locks(layer)?;
         locks.check(layer, LockKind::Pixels)?;
+        let blend_for = |color: [f32; 3]| match settings.blend_mode {
+            BlendMode::Normal => None,
+            mode => Some(PaintBlend {
+                mode,
+                space: doc.blend_space,
+                color_encoded: doc.blend_space.encode(color),
+            }),
+        };
         let mode = match target {
-            StrokeTarget::Paint { color } if locks.transparency => Mode::PaintKeepAlpha { color },
-            StrokeTarget::Paint { color } => Mode::Paint { color },
+            StrokeTarget::Paint { color } if locks.transparency => Mode::PaintKeepAlpha {
+                color,
+                blend: blend_for(color),
+            },
+            StrokeTarget::Paint { color } => Mode::Paint {
+                color,
+                blend: blend_for(color),
+            },
             StrokeTarget::Erase if locks.transparency => {
                 return Err(EditorError::TransparencyLocked(layer));
             }
