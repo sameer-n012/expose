@@ -367,6 +367,7 @@ fn next_layer_name(document: &Document) -> String {
 }
 
 /// Applies one edit and returns its inverse.
+#[allow(clippy::too_many_lines, reason = "one arm per edit")]
 fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineError> {
     let undo = match edit {
         EditDto::SetVisible { layer_id, visible } => {

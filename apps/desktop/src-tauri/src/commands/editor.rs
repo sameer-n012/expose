@@ -17,6 +17,7 @@ use tauri::{AppHandle, Manager, Runtime, State};
 
 use super::preview::DisplaySpaceArg;
 use super::{run_blocking, with_catalog};
+use crate::editor::sample::{SampleSourceDto, SampledColor};
 use crate::editor::save::{read_linked_document, save_snapshot};
 use crate::editor::{
     BrushSettingsDto, DocumentId, DocumentInfo, DocumentOrigin, EditDto, EditorEngine,
@@ -454,6 +455,30 @@ pub async fn editor_selection_outline(
     step: u32,
 ) -> Result<SelectionOutline, CommandError> {
     Ok(engine.selection_outline_async(document_id, step).await?)
+}
+
+/// Returns the average color of a square region around the canvas pixel
+/// (`x`, `y`). `size` is 1, 3, or 5 pixels; the region is clipped to the
+/// canvas. `source` is `composite` or `layer` (`layerId` is then required
+/// and must be a pixel layer). The mean is alpha-weighted. The color is
+/// `#rrggbb` (sRGB), or `null` if the alpha is 0.
+///
+/// Errors: `notFound` (document, layer), `invalidInput` (size, point
+/// outside the canvas, missing layer ID, layer is not a pixel layer),
+/// `internal`.
+#[tauri::command]
+pub async fn editor_sample_color(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    x: u32,
+    y: u32,
+    size: u32,
+    source: SampleSourceDto,
+    layer_id: Option<u64>,
+) -> Result<SampledColor, CommandError> {
+    Ok(engine
+        .sample_color_async(document_id, x, y, size, source, layer_id)
+        .await?)
 }
 
 /// Undoes the last step of a document. With no step to undo, the document

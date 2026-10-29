@@ -41,6 +41,7 @@ use expose_gpu::{GpuContext, GpuContextOptions};
 use super::EditorEngineError;
 use super::dto::{DocumentId, DocumentInfo, EditDto, SelectionOutline, stroke_points};
 use super::outline::{MAX_OUTLINE_POINTS, selection_outline};
+use super::sample::{SampleSourceDto, SampledColor, sample_color};
 use super::save::{DocumentOrigin, SaveSnapshot, SavedFiles};
 use super::session::EditSession;
 use crate::preview::frame::{FRAME_HEADER_BYTES, FrameHeader, FrameTimings, rgba8_body_len};
@@ -127,6 +128,16 @@ enum Job {
         document: DocumentId,
         step: u32,
         reply: Reply<SelectionOutline>,
+    },
+    /// Samples the average color of a small region.
+    Sample {
+        document: DocumentId,
+        x: u32,
+        y: u32,
+        size: u32,
+        source: SampleSourceDto,
+        layer: Option<u64>,
+        reply: Reply<SampledColor>,
     },
     Close(DocumentId),
 }
@@ -406,6 +417,36 @@ impl EditorEngine {
         receive(receiver).await
     }
 
+    /// Samples the average color of a region on the engine thread and
+    /// waits for it (see [`sample_color`]).
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`],
+    /// [`EditorEngineError::LayerNotFound`], and
+    /// [`EditorEngineError::InvalidSample`].
+    pub async fn sample_color_async(
+        &self,
+        document: DocumentId,
+        x: u32,
+        y: u32,
+        size: u32,
+        source: SampleSourceDto,
+        layer: Option<u64>,
+    ) -> Result<SampledColor, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::Sample {
+            document,
+            x,
+            y,
+            size,
+            source,
+            layer,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
     /// Undoes the last step of a document and waits for the new info.
     ///
     /// # Errors
@@ -598,6 +639,7 @@ fn fail_job(job: Job, error: &EditorEngineError) {
         Job::StrokeBegin { reply, .. } => reply(Err(error())),
         Job::StrokePoints { reply, .. } => reply(Err(error())),
         Job::Outline { reply, .. } => reply(Err(error())),
+        Job::Sample { reply, .. } => reply(Err(error())),
         Job::FinishSave { reply, .. } => {
             if let Some(reply) = reply {
                 reply(Err(error()));
@@ -988,6 +1030,21 @@ impl Renderer {
                 let result = guarded(self, |r| {
                     let session = r.session(document)?;
                     selection_outline(session.document(), step, MAX_OUTLINE_POINTS)
+                });
+                reply(result);
+            }
+            Job::Sample {
+                document,
+                x,
+                y,
+                size,
+                source,
+                layer,
+                reply,
+            } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    sample_color(session.document(), x, y, size, source, layer)
                 });
                 reply(result);
             }
