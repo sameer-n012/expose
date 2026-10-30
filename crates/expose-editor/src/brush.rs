@@ -291,6 +291,7 @@ impl Mode {
     /// Makes a paint mode for the straight paint `color`. `keep_alpha` is
     /// `true` if the layer has the transparency lock. The caller must
     /// refuse [`BlendMode::Dissolve`] before.
+    #[inline]
     pub(crate) fn paint(
         color: [f32; 3],
         blend_mode: BlendMode,
@@ -313,6 +314,7 @@ impl Mode {
     }
 
     /// Result for a pixel layer. `c == 0` gives `o` exactly.
+    #[inline]
     pub(crate) fn pixel(self, o: Rgba, c: f32) -> Rgba {
         match self {
             Self::Paint { color, blend } => {
@@ -349,11 +351,14 @@ impl Mode {
         }
     }
 
-    /// Result for a mask. `c == 0` gives `o` exactly.
-    fn mask(self, o: f32, c: f32) -> f32 {
+    /// Result for a mask. `c == 0` gives `o` exactly. The gradient
+    /// ([`crate::gradient`]) uses it too.
+    #[inline]
+    pub(crate) fn mask(self, o: f32, c: f32) -> f32 {
         match self {
             Self::Mask { value } => o + (value - o) * c,
-            // `begin` does not make a pixel mode for a mask.
+            // `begin` (and the gradient) do not make a pixel mode for a
+            // mask.
             _ => o,
         }
     }
@@ -366,14 +371,18 @@ pub(crate) trait Texel: Copy {
 }
 
 impl Texel for Rgba {
+    #[inline]
     fn same_bits(&self, other: &Self) -> bool {
-        self.iter()
-            .zip(other)
-            .all(|(a, b)| a.to_bits() == b.to_bits())
+        // Bitwise `&` (not `&&`): one compare without branches.
+        (self[0].to_bits() == other[0].to_bits())
+            & (self[1].to_bits() == other[1].to_bits())
+            & (self[2].to_bits() == other[2].to_bits())
+            & (self[3].to_bits() == other[3].to_bits())
     }
 }
 
 impl Texel for f32 {
+    #[inline]
     fn same_bits(&self, other: &Self) -> bool {
         self.to_bits() == other.to_bits()
     }
