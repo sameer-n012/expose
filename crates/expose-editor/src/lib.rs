@@ -106,7 +106,8 @@ pub use error::{EditorError, EditorResult, SharedGpuError};
 pub use file::{FILE_EXTENSION, FileError, read_document, write_document};
 pub use flood::{FillSettings, FloodSample, FloodSettings, MAX_FLOOD_TOLERANCE, flood_region};
 pub use gpu::{
-    CURVE_TABLE_SIZE, GpuCompositor, MAX_VIEW_ORIGIN, MAX_VIEW_SCALE, MIN_VIEW_SCALE, ViewSpec,
+    CURVE_TABLE_SIZE, GpuCompositor, LayerTransformPreview, MAX_VIEW_ORIGIN, MAX_VIEW_SCALE,
+    MIN_TRANSFORM_DETERMINANT, MIN_VIEW_SCALE, ViewSpec,
 };
 pub use gradient::{
     GRADIENT_TABLE_STEPS, GradientShape, GradientSpec, GradientStop, GradientTarget,
