@@ -35,6 +35,7 @@ import {
   type DocumentInfo,
   type EditDto,
   type EditorApi,
+  type LayerBounds,
   type LayerInfo,
   type LocksDto,
   type MaskFillId,
@@ -68,7 +69,8 @@ import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer,
 import { untitledName } from '../editor/newDocument';
 import { decodeMaskThumbnail, type MaskThumbnail } from '../editor/maskThumbnail';
 import { clampZoom, normalizeRotation, panBy, rotateVector, steppedZoom, zoomAbout, type Point, type Size, type View } from '../editor/view';
-import { EditorTab } from './editorTab.svelte';
+import { identityState, isIdentityState, stateMatrix, type Interpolation, type TransformState } from '../editor/transform';
+import { EditorTab, type TransformSession } from './editorTab.svelte';
 import type { LibraryStore } from './library.svelte';
 import type { ModuleStore } from './modules.svelte';
 import { describeError, type ToastStore } from './toasts.svelte';
@@ -208,6 +210,10 @@ export class EditorStore {
       return;
     }
     old?.endGesture();
+    // A tab switch ends a free transform without an edit (ADR 0029).
+    if (old !== null && !old.transformBusy) {
+      old.transform = null;
+    }
     this.#activeTab = tab;
     tab.fitTo(this.viewport);
   }
@@ -502,6 +508,8 @@ export class EditorStore {
 
   /** Sets the tool of the canvas. */
   setTool(tool: EditorTool): void {
+    // A tool change ends a free transform without an edit (ADR 0029).
+    this.cancelTransform();
     this.tool = tool;
     if (isLassoTool(tool)) {
       this.lastLasso = tool;
@@ -1217,6 +1225,10 @@ export class EditorStore {
     if (id !== tab.maskTarget) {
       tab.maskTarget = null;
     }
+    // Another layer ends a free transform without an edit (ADR 0029).
+    if (id !== tab.selectedId) {
+      this.cancelTransform();
+    }
     // A click on a layer row chooses the pixels as the paint target.
     tab.paintMaskId = null;
     tab.selectedId = id;
@@ -1293,6 +1305,125 @@ export class EditorStore {
     this.#activeTab?.endGesture();
   }
 
+  // ---- Free transform (ADR 0029) ----
+
+  /** The free transform of the active tab, or null. */
+  get transform(): TransformSession | null {
+    return this.#activeTab?.transform ?? null;
+  }
+
+  /** True while the transform sends its commit. */
+  get transformBusy(): boolean {
+    return this.#activeTab?.transformBusy ?? false;
+  }
+
+  /** The preview for the frame request: the layer and the matrix, or null without a transform. */
+  get transformPreview(): { layerId: number; matrix: ReturnType<typeof stateMatrix> } | null {
+    const session = this.transform;
+    return session === null ? null : { layerId: session.layerId, matrix: stateMatrix(session.state) };
+  }
+
+  /**
+   * Starts a free transform of the selected pixel layer. Shows a toast and
+   * stays out of the mode if no pixel layer is selected or the layer is empty.
+   */
+  async startTransform(): Promise<void> {
+    const tab = this.#activeTab;
+    const info = tab?.info ?? null;
+    if (tab === null || info === null || tab.status !== 'ready' || tab.transform !== null) {
+      return;
+    }
+    const layer = this.selected;
+    if (layer === null || layer.kind !== 'pixel') {
+      this.#toasts.info('Select a pixel layer to transform.');
+      return;
+    }
+    let bounds: LayerBounds | null;
+    try {
+      bounds = await this.#api.layerBounds(info.documentId, layer.id);
+    } catch (error: unknown) {
+      this.#toasts.error('Read the layer bounds failed.', error);
+      return;
+    }
+    // The user can switch the tab or the layer while the call runs.
+    if (tab.closed || this.#activeTab !== tab || tab.selectedId !== layer.id || tab.transform !== null) {
+      return;
+    }
+    if (bounds === null) {
+      this.#toasts.info('The layer is empty.');
+      return;
+    }
+    tab.transform = { layerId: layer.id, state: identityState(bounds), interpolation: 'bicubic' };
+  }
+
+  /** Replaces the transform state (a drag, a field, a key). Ignored while the commit runs. */
+  updateTransform(state: TransformState): void {
+    const tab = this.#activeTab;
+    if (tab !== null && tab.transform !== null && !tab.transformBusy) {
+      tab.transform = { ...tab.transform, state };
+    }
+  }
+
+  setTransformInterpolation(interpolation: Interpolation): void {
+    const tab = this.#activeTab;
+    if (tab !== null && tab.transform !== null && !tab.transformBusy) {
+      tab.transform = { ...tab.transform, interpolation };
+    }
+  }
+
+  /** Ends the transform of the active tab without an edit. Ignored while the commit runs. */
+  cancelTransform(): void {
+    const tab = this.#activeTab;
+    if (tab !== null && !tab.transformBusy) {
+      tab.transform = null;
+    }
+  }
+
+  /**
+   * Sends the transform as one edit and leaves the mode. A transform that
+   * does nothing (identity matrix) only leaves the mode. If the edit fails,
+   * a toast shows and the mode stays. Resolves to true if the mode ended.
+   */
+  async commitTransform(): Promise<boolean> {
+    const tab = this.#activeTab;
+    const session = tab?.transform ?? null;
+    if (tab === null || session === null || tab.transformBusy) {
+      return false;
+    }
+    if (isIdentityState(session.state)) {
+      tab.transform = null;
+      return true;
+    }
+    const edit: EditDto = { type: 'transformLayer', layerId: session.layerId, matrix: stateMatrix(session.state), interpolation: session.interpolation };
+    tab.transformBusy = true;
+    tab.endGesture();
+    let done = false;
+    this.#enqueue(tab, async (info) => {
+      const next = await this.#api.edit(info.documentId, edit, null);
+      if (tab.closed) {
+        return;
+      }
+      // Leave the mode before the new info: the frame must not show the preview on top of the result.
+      tab.transform = null;
+      tab.apply(next);
+      done = true;
+    });
+    await tab.chain;
+    tab.transformBusy = false;
+    return done;
+  }
+
+  /** True if the tab has a transform: the history command then ends it and does nothing else. */
+  #endsTransform(tab: EditorTab): boolean {
+    if (tab.transform === null && !tab.transformBusy) {
+      return false;
+    }
+    if (!tab.transformBusy) {
+      tab.transform = null;
+    }
+    return true;
+  }
+
   undo(): void {
     this.#history('undo');
   }
@@ -1304,7 +1435,7 @@ export class EditorStore {
   /** Undoes or redoes until `step` steps are applied (history panel). No call if `step` is the current cursor. */
   historyJump(step: number): void {
     const tab = this.#activeTab;
-    if (tab === null) {
+    if (tab === null || this.#endsTransform(tab)) {
       return;
     }
     tab.endGesture();
@@ -1319,7 +1450,7 @@ export class EditorStore {
 
   #history(kind: 'undo' | 'redo'): void {
     const tab = this.#activeTab;
-    if (tab === null) {
+    if (tab === null || this.#endsTransform(tab)) {
       return;
     }
     tab.endGesture();

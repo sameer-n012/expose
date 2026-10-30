@@ -10,7 +10,15 @@ import type { PhotoId } from '../catalog';
 import type { DocumentInfo, EditDto } from '../editor/api';
 import { allLayerIds, findLayer } from '../editor/layers';
 import type { MaskThumbnail } from '../editor/maskThumbnail';
+import type { Interpolation, TransformState } from '../editor/transform';
 import { FIT_MARGIN, clampView, fitView, hasArea, type Size, type View } from '../editor/view';
+
+/** A free transform in progress. */
+export interface TransformSession {
+  readonly layerId: number;
+  readonly state: TransformState;
+  readonly interpolation: Interpolation;
+}
 
 /** What a tab shows: the document is opening, is open, or did not open. */
 export type EditorTabStatus = 'loading' | 'ready' | 'error';
@@ -44,6 +52,14 @@ export class EditorTab {
   view = $state.raw<View | null>(null);
   /** True while the view follows "fit to window". */
   fit = $state(true);
+  /**
+   * The free transform that runs, or null. It is tied to the document, so it
+   * lives in the tab. A change of the layer selection, of the tool, or of the
+   * tab ends it without an edit (ADR 0029).
+   */
+  transform = $state.raw<TransformSession | null>(null);
+  /** True while the commit of the transform runs. The transform ignores input then. */
+  transformBusy = $state(false);
   /** The number of edits that wait or run. */
   pending = $state(0);
   /** True while a save runs. */
@@ -123,6 +139,10 @@ export class EditorTab {
     }
     if ([...this.expanded].some((id) => !ids.has(id))) {
       this.expanded = new Set([...this.expanded].filter((id) => ids.has(id)));
+    }
+    // The transformed layer is gone or not selected any more: the transform ends.
+    if (this.transform !== null && !this.transformBusy && this.transform.layerId !== this.selectedId) {
+      this.transform = null;
     }
   }
 
