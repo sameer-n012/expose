@@ -33,6 +33,9 @@
     under the pointer (current sample size) into the foreground color.
   - Magic wand and paint bucket: a click inside the canvas sends one edit
     (Shift adds, Alt subtracts, Shift+Alt intersects for the wand).
+  - Gradient: a drag from start to end shows a line with two handles; Shift
+    snaps the angle to 45° steps; Escape cancels; release sends one edit. A
+    drag as short as a click sends nothing.
   - Eyedropper: a click samples the color under the pointer into the
     foreground color; Alt+click sets the background color. The options are
     the sample size and the source (all layers or the selected layer).
@@ -58,6 +61,7 @@
     polylinePath,
     repeatsLastPoint,
   } from '../../lib/editor/selection';
+  import { snapAngle } from '../../lib/editor/gradient';
   import { beginRotateDrag, cancelRotateDrag, dragRotation, rotationLabel, type RotateDrag } from '../../lib/editor/rotate';
   import {
     canvasToScreen,
@@ -75,6 +79,7 @@
   import type { EditorStore } from '../../lib/stores/editor.svelte';
   import DocumentTabs from './DocumentTabs.svelte';
   import FeatherDialog from './FeatherDialog.svelte';
+  import GradientEditorDialog from './GradientEditorDialog.svelte';
   import NewDocumentDialog from './NewDocumentDialog.svelte';
   import SelectionOverlay from './SelectionOverlay.svelte';
   import SelectionToolbar from './SelectionToolbar.svelte';
@@ -310,6 +315,35 @@
   let lasso = $state.raw<Lasso | null>(null);
   let freehand = $state.raw<Freehand | null>(null);
 
+  /** A gradient drag. `start` and `end` are canvas pixels; `startScreen` is in content space. */
+  interface GradientDrag {
+    readonly start: Point;
+    readonly end: Point;
+    readonly startScreen: Point;
+    readonly pointerId: number;
+  }
+  let gradientDrag = $state.raw<GradientDrag | null>(null);
+
+  /** The end of a gradient drag at a pointer event. Shift snaps the angle to 45° steps. */
+  function gradientEnd(event: PointerEvent, node: HTMLElement, view: View, start: Point): Point {
+    const end = screenToCanvas(view, local(event, node));
+    return event.shiftKey ? snapAngle(start, end) : end;
+  }
+
+  function endGradientDrag(event: PointerEvent, node: HTMLElement): void {
+    const current = gradientDrag;
+    gradientDrag = null;
+    node.releasePointerCapture?.(event.pointerId);
+    const view = editor.view;
+    if (current === null || view === null || event.type === 'pointercancel') {
+      return;
+    }
+    if (isClick(current.startScreen, local(event, node))) {
+      return;
+    }
+    editor.gradientFrom(current.start, gradientEnd(event, node, view, current.start));
+  }
+
   // A tool change or another document (also a tab switch) ends a gesture that runs.
   $effect(() => {
     void editor.tool;
@@ -318,6 +352,7 @@
       marquee = null;
       lasso = null;
       freehand = null;
+      gradientDrag = null;
       cancelStroke();
       // Stop a rotate drag and keep the angle: after a tab switch the store
       // works on the new tab, so a restore would change the wrong view.
@@ -577,6 +612,15 @@
       floodClick(event, event.currentTarget, view, tool);
       return;
     }
+    if (tool === 'gradient') {
+      if (gradientDrag === null) {
+        const startScreen = local(event, event.currentTarget);
+        const start = screenToCanvas(view, startScreen);
+        gradientDrag = { start, end: start, startScreen, pointerId: event.pointerId };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+      }
+      return;
+    }
     if (tool === 'eyedropper' || (tool === 'brush' && event.altKey)) {
       // Alt+click with the brush samples to the foreground (all layers); it paints nothing.
       sampleAtPointer(event, event.currentTarget, view, tool === 'eyedropper' && event.altKey);
@@ -624,6 +668,11 @@
     } else if (panning) {
       editor.pan(event.clientX - last.x, event.clientY - last.y);
       last = { x: event.clientX, y: event.clientY };
+    } else if (gradientDrag !== null) {
+      const view = editor.view;
+      if (view !== null && event.pointerId === gradientDrag.pointerId) {
+        gradientDrag = { ...gradientDrag, end: gradientEnd(event, event.currentTarget, view, gradientDrag.start) };
+      }
     } else if (freehand !== null) {
       const view = editor.view;
       if (view !== null && event.pointerId === freehand.pointerId) {
@@ -646,6 +695,10 @@
     } else if (panning) {
       panning = false;
       event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } else if (gradientDrag !== null) {
+      if (event.pointerId === gradientDrag.pointerId) {
+        endGradientDrag(event, event.currentTarget);
+      }
     } else if (freehand !== null) {
       if (event.pointerId === freehand.pointerId) {
         finishFreehand(event, event.currentTarget);
@@ -679,6 +732,11 @@
       cancelStroke();
       return;
     }
+    if (event.type === 'keydown' && event.key === 'Escape' && gradientDrag !== null) {
+      event.preventDefault();
+      gradientDrag = null;
+      return;
+    }
     if (event.type === 'keydown' && (marquee !== null || lasso !== null || freehand !== null) && !isEditableTarget(event.target)) {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -708,6 +766,17 @@
       spaceDown = true;
     }
   }
+
+  /** The line of the gradient drag with its two end handles, in viewport pixels. Null: no drag. */
+  const gradientLine = $derived.by(() => {
+    const view = editor.view;
+    if (gradientDrag === null || view === null) {
+      return null;
+    }
+    const a = canvasToScreen(view, gradientDrag.start);
+    const b = canvasToScreen(view, gradientDrag.end);
+    return { path: `M ${a.x} ${a.y} L ${b.x} ${b.y}`, ends: [a, b] };
+  });
 
   /** The dashed preview of the gesture that runs, as an SVG path in viewport pixels. */
   const previewPath = $derived.by(() => {
@@ -752,7 +821,7 @@
       class="viewport"
       class:grab={(spaceDown || editor.tool === 'hand' || editor.tool === 'rotate') && !panning && rotating === null}
       class:grabbing={panning || rotating !== null}
-      class:crosshair={(isSelectionTool(editor.tool) || editor.tool === 'eyedropper' || editor.tool === 'magicWand' || editor.tool === 'paintBucket') && !spaceDown && !panning}
+      class:crosshair={(isSelectionTool(editor.tool) || editor.tool === 'eyedropper' || editor.tool === 'magicWand' || editor.tool === 'paintBucket' || editor.tool === 'gradient') && !spaceDown && !panning}
       class:no-cursor={cursorShape !== null}
       onpointerleave={() => (cursor = null)}
       hidden={editor.status !== 'ready'}
@@ -794,6 +863,16 @@
             <path class="dashes" d={previewPath} />
           </svg>
         {/if}
+        {#if gradientLine !== null}
+          <svg class="preview" aria-hidden="true" data-testid="gradient-overlay">
+            <path class="under" d={gradientLine.path} />
+            <path class="dashes solid" d={gradientLine.path} />
+            {#each gradientLine.ends as p, i (i)}
+              <circle class="under" cx={p.x} cy={p.y} r="4" />
+              <circle class="dashes solid" cx={p.x} cy={p.y} r="3" />
+            {/each}
+          </svg>
+        {/if}
         {#if cursorShape !== null}
           <svg class="preview" aria-hidden="true" data-testid="brush-cursor">
             <circle class="under" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
@@ -830,6 +909,10 @@
 
 {#if editor.featherDialogOpen}
   <FeatherDialog {editor} />
+{/if}
+
+{#if editor.gradientDialogOpen}
+  <GradientEditorDialog {editor} />
 {/if}
 
 <style>

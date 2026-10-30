@@ -207,6 +207,23 @@ export type EditDto =
       antiAlias: boolean;
       sampleAllLayers: boolean;
     }
+  /**
+   * Draws a gradient from `start` to `end` (canvas pixels, not rounded). `color` is
+   * gamma-encoded sRGB 0..1. 2..=32 stops, positions 0..1 ascending. `opacity` is 0..1.
+   * On the mask target `blendMode` is `normal`.
+   */
+  | {
+      type: 'gradient';
+      layerId: number;
+      target: 'pixels' | 'mask';
+      start: [number, number];
+      end: [number, number];
+      shape: 'linear' | 'radial' | 'angle' | 'reflected' | 'diamond';
+      stops: { position: number; color: [number, number, number]; opacity: number }[];
+      opacity: number;
+      blendMode: BlendModeId;
+      reverse: boolean;
+    }
   /** Deselect, invert, and feather are errors when there is no selection. */
   | { type: 'deselect' }
   /** Restores the selection that the last deselect removed. An error if `canReselect` is false. */

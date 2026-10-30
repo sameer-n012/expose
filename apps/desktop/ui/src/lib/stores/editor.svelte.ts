@@ -62,7 +62,8 @@ import {
   type PaintTool,
 } from '../editor/brush';
 import { defaultBucket, defaultWand, fillEdit, magicWandEdit, type FloodSettings, type PaintBucketSettings } from '../editor/flood';
-import { clampFeather, cycleLasso, cycleMarquee, isLassoTool, type EditorTool, type LassoTool } from '../editor/selection';
+import { clampFeather, cycleFill, cycleLasso, cycleMarquee, isFillTool, isLassoTool, type EditorTool, type FillTool, type LassoTool } from '../editor/selection';
+import { defaultGradient, gradientEdit, presetStops, type GradientSettings } from '../editor/gradient';
 import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
 import { decodeMaskThumbnail, type MaskThumbnail } from '../editor/maskThumbnail';
@@ -146,6 +147,10 @@ export class EditorStore {
   wand = $state<FloodSettings>(defaultWand());
   /** The settings of the paint bucket. Shared by all tabs. */
   bucket = $state<PaintBucketSettings>(defaultBucket());
+  /** The settings of the gradient tool. Shared by all tabs. */
+  gradient = $state<GradientSettings>(defaultGradient());
+  /** True while the gradient editor dialog is open. */
+  gradientDialogOpen = $state(false);
 
   readonly #library: EditorStoreOptions['library'];
   readonly #modules: EditorStoreOptions['modules'];
@@ -501,6 +506,19 @@ export class EditorStore {
     if (isLassoTool(tool)) {
       this.lastLasso = tool;
     }
+    if (isFillTool(tool)) {
+      this.lastFill = tool;
+    }
+  }
+
+  /** The fill tool that `G` selects when no fill tool is active. */
+  private lastFill: FillTool = 'paintBucket';
+
+  /** `G`: the last used fill tool; while one is active, the other one. */
+  cycleFill(): void {
+    if (this.info !== null) {
+      this.setTool(cycleFill(this.tool, this.lastFill));
+    }
   }
 
   /** The lasso tool that `L` selects when no lasso tool is active. */
@@ -792,6 +810,47 @@ export class EditorStore {
       return;
     }
     this.edit(fillEdit(layer.id, x, y, color, this.bucket));
+  }
+
+  /**
+   * Gradient drag from `start` to `end` (canvas pixels, not rounded). The
+   * target is the current paint target. The pixel target needs a selected
+   * pixel layer; else a toast shows and nothing is sent. The foreground and
+   * background presets read the colors now.
+   */
+  gradientFrom(start: { x: number; y: number }, end: { x: number; y: number }): void {
+    if (this.info === null) {
+      return;
+    }
+    const layer = this.selected;
+    if (layer === null) {
+      this.#toasts.info('Select a layer for the gradient.');
+      return;
+    }
+    const target = this.paintTarget;
+    if (target === 'pixels' && layer.kind !== 'pixel') {
+      this.#toasts.info('The gradient draws on pixel layers or masks. Select a pixel layer or a mask.');
+      return;
+    }
+    const foreground = hexToRgb(this.foreground);
+    const background = hexToRgb(this.background);
+    if (foreground === null || background === null) {
+      this.#toasts.error('The foreground or background color is not valid.');
+      return;
+    }
+    const stops = presetStops(this.gradient, foreground, background);
+    this.edit(gradientEdit(layer.id, target, start, end, stops, this.gradient));
+  }
+
+  /** Opens the gradient editor dialog. */
+  openGradientDialog(): void {
+    if (this.status === 'ready') {
+      this.gradientDialogOpen = true;
+    }
+  }
+
+  closeGradientDialog(): void {
+    this.gradientDialogOpen = false;
   }
 
   selectAll(): void {
