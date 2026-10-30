@@ -70,6 +70,9 @@ pub enum EditorEngineError {
     /// The input of a color sample is not valid.
     #[error("invalid color sample: {0}")]
     InvalidSample(&'static str),
+    /// The input of a magic wand or paint bucket edit is not valid.
+    #[error("invalid flood edit: {0}")]
+    InvalidFlood(&'static str),
     /// The `max_size` of a mask thumbnail is not in `1..=256`.
     #[error("the mask thumbnail size must be 1 to 256")]
     InvalidThumbnailSize,
@@ -160,6 +163,7 @@ impl From<EditorEngineError> for CommandError {
             EditorEngineError::InvalidViewSize { .. }
             | EditorEngineError::InvalidStep
             | EditorEngineError::InvalidSample(_)
+            | EditorEngineError::InvalidFlood(_)
             | EditorEngineError::InvalidThumbnailSize
             | EditorEngineError::MaskExists(_)
             | EditorEngineError::StrokeNotActive(_)

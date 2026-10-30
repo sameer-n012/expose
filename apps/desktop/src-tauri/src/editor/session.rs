@@ -4,12 +4,13 @@
 
 use expose_core::buffer::WorkingImage;
 use expose_editor::{
-    Adjustment, BrushSettings, Document, DocumentSpec, Edit, EditorError, History, LayerContent,
-    LayerId, Mask, MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
+    Adjustment, BrushSettings, Document, DocumentSpec, Edit, EditorError, FillSettings,
+    FloodSample, FloodSettings, History, LayerContent, LayerId, Mask, MaskFill, MaskImage,
+    PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget, flood_region,
 };
 
 use super::EditorEngineError;
-use super::dto::{DocumentId, DocumentInfo, EditDto, HistoryInfo, MaskFillId};
+use super::dto::{DocumentId, DocumentInfo, EditDto, HistoryInfo, MaskFillId, srgb_to_working};
 use super::save::{DocumentOrigin, SavedFiles};
 
 /// The maximum number of undo steps of a document. A delete step keeps the
@@ -50,6 +51,21 @@ pub struct EditSession {
     stroke: Option<ActiveStroke>,
     /// The ID of the next stroke. IDs start at 1 and stay far below 2^53.
     next_stroke_id: u64,
+    /// The last flood sample (magic wand, paint bucket), with its key.
+    flood_cache: Option<(FloodKey, FloodSample)>,
+    /// The number of flood samples built so far (tests check the cache).
+    #[cfg(test)]
+    flood_samples_built: u32,
+}
+
+/// What a cached flood sample was made from. A selection change keeps the
+/// revision, so repeated wand clicks hit the cache; any pixel or layer
+/// change gives a new revision and drops the sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FloodKey {
+    /// The layer number for a layer sample, `None` for the composite.
+    source: Option<u64>,
+    revision: u64,
 }
 
 /// A stroke in progress, with its ID and the name of its history step.
@@ -101,6 +117,9 @@ impl EditSession {
             saved_revision,
             stroke: None,
             next_stroke_id: 1,
+            flood_cache: None,
+            #[cfg(test)]
+            flood_samples_built: 0,
         })
     }
 
@@ -286,12 +305,142 @@ impl EditSession {
     pub fn edit(&mut self, edit: EditDto, gesture: Option<u64>) -> Result<(), EditorEngineError> {
         self.commit_stroke()?;
         let name = edit.step_name();
-        let undo = apply(&mut self.document, edit)?;
-        match gesture {
-            Some(key) => self.history.push_merge(name, vec![undo], key),
-            None => self.history.push(name, vec![undo]),
+        let undo = match edit {
+            edit @ (EditDto::MagicWand { .. } | EditDto::Fill { .. }) => self.apply_flood(&edit)?,
+            edit => Some(apply(&mut self.document, edit)?),
+        };
+        // A fill that changes nothing gives no undo step and no history step.
+        if let Some(undo) = undo {
+            match gesture {
+                Some(key) => self.history.push_merge(name, vec![undo], key),
+                None => self.history.push(name, vec![undo]),
+            }
         }
         Ok(())
+    }
+
+    /// Applies a magic wand or paint bucket edit. Returns the inverse, or
+    /// `None` if the fill changed nothing.
+    fn apply_flood(&mut self, edit: &EditDto) -> Result<Option<Edit>, EditorEngineError> {
+        match *edit {
+            EditDto::MagicWand {
+                x,
+                y,
+                mode,
+                tolerance,
+                contiguous,
+                anti_alias,
+                sample_all_layers,
+                layer_id,
+            } => {
+                let source = if sample_all_layers {
+                    None
+                } else {
+                    Some(layer_id.ok_or(EditorEngineError::InvalidFlood(
+                        "a layer sample needs a layer ID",
+                    ))?)
+                };
+                let settings = FloodSettings {
+                    tolerance,
+                    contiguous,
+                    anti_alias,
+                };
+                let region = self.flood_region(source, x, y, settings)?;
+                Ok(Some(self.document.select_region(&region, mode.into())?))
+            }
+            EditDto::Fill {
+                layer_id,
+                x,
+                y,
+                color,
+                opacity,
+                blend_mode,
+                tolerance,
+                contiguous,
+                anti_alias,
+                sample_all_layers,
+            } => {
+                if color
+                    .iter()
+                    .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+                {
+                    return Err(EditorEngineError::InvalidFlood(
+                        "a fill color value must be in 0 to 1",
+                    ));
+                }
+                let fill = FillSettings {
+                    color: srgb_to_working(color).map_err(|_| {
+                        EditorEngineError::Internal("color space conversion failed")
+                    })?,
+                    opacity,
+                    blend_mode: blend_mode.into(),
+                };
+                let target = resolve(&self.document, layer_id)?;
+                let settings = FloodSettings {
+                    tolerance,
+                    contiguous,
+                    anti_alias,
+                };
+                let source = if sample_all_layers {
+                    None
+                } else {
+                    Some(layer_id)
+                };
+                let region = self.flood_region(source, x, y, settings)?;
+                Ok(self
+                    .document
+                    .fill_region(target, &region, &fill)?
+                    .map(|(undo, _rect)| undo))
+            }
+            _ => Err(EditorEngineError::Internal("not a flood edit")),
+        }
+    }
+
+    /// Finds the region at the seed point. Uses the cached sample when the
+    /// source and the document revision are the same.
+    fn flood_region(
+        &mut self,
+        source: Option<u64>,
+        x: f64,
+        y: f64,
+        settings: FloodSettings,
+    ) -> Result<MaskImage, EditorEngineError> {
+        let (width, height) = (self.document.width(), self.document.height());
+        if !x.is_finite() || !y.is_finite() {
+            return Err(EditorEngineError::InvalidFlood("the point is not finite"));
+        }
+        let (fx, fy) = (x.floor(), y.floor());
+        if fx < 0.0 || fy < 0.0 || fx >= f64::from(width) || fy >= f64::from(height) {
+            return Err(EditorEngineError::InvalidFlood(
+                "the point is outside the canvas",
+            ));
+        }
+        // In range 0..width and 0..height, so the casts are exact.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (px, py) = (fx as u32, fy as u32);
+        let key = FloodKey {
+            source,
+            revision: self.document.revision(),
+        };
+        let cached = matches!(&self.flood_cache, Some((k, _)) if *k == key);
+        if !cached {
+            let sample = match source {
+                None => FloodSample::composite(&self.document)?,
+                Some(raw) => {
+                    let id = resolve(&self.document, raw)?;
+                    FloodSample::layer(&self.document, id)?
+                }
+            };
+            #[cfg(test)]
+            {
+                self.flood_samples_built += 1;
+            }
+            self.flood_cache = Some((key, sample));
+        }
+        let Some((_, sample)) = &self.flood_cache else {
+            return Err(EditorEngineError::Internal("the flood cache is empty"));
+        };
+        Ok(flood_region(sample, px, py, &settings)?)
     }
 
     /// Undoes the last step. Does nothing if there is no step to undo.
@@ -501,6 +650,10 @@ fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineErr
         | EditDto::InvertSelection
         | EditDto::FeatherSelection { .. }
         | EditDto::MaskFromSelection { .. }) => apply_selection(document, edit)?,
+        // `EditSession::edit` handles these (they use the sample cache).
+        EditDto::MagicWand { .. } | EditDto::Fill { .. } => {
+            return Err(EditorEngineError::Internal("not a plain edit"));
+        }
     };
     Ok(undo)
 }
@@ -535,7 +688,7 @@ mod tests {
     use expose_editor::{BlendMode, EditorError, GroupIsolation, LayerKind};
 
     use super::*;
-    use crate::editor::dto::{AdjustmentDto, BlendModeId, LayerKindId, LocksDto};
+    use crate::editor::dto::{AdjustmentDto, BlendModeId, LayerKindId, LocksDto, SelectionModeId};
 
     fn session() -> EditSession {
         let image = WorkingImage::new_filled(4, 3, [0.5, 0.25, 0.125, 1.0]).unwrap();
@@ -1608,5 +1761,225 @@ mod tests {
         let v0 = s.document().layers()[0].pixel_version();
         s.stroke_points(id, &dabs()).unwrap();
         assert_ne!(s.document().layers()[0].pixel_version(), v0);
+    }
+
+    // ---- magic wand and paint bucket ----
+
+    const RED: [f32; 4] = [0.8, 0.0, 0.0, 1.0];
+    const BLUE: [f32; 4] = [0.0, 0.0, 0.8, 1.0];
+
+    /// A 4x3 document: the two left columns red, the two right columns blue.
+    fn two_color_session() -> EditSession {
+        let mut image = WorkingImage::new_filled(4, 3, RED).unwrap();
+        for y in 0..3 {
+            for x in 2..4 {
+                if let Some(p) = image.pixel_mut(x, y) {
+                    *p = BLUE;
+                }
+            }
+        }
+        EditSession::new(build_document(image).unwrap()).unwrap()
+    }
+
+    fn wand(x: f64, y: f64, mode: SelectionModeId, layer_id: Option<u64>) -> EditDto {
+        EditDto::MagicWand {
+            x,
+            y,
+            mode,
+            tolerance: 10.0,
+            contiguous: true,
+            anti_alias: false,
+            sample_all_layers: layer_id.is_none(),
+            layer_id,
+        }
+    }
+
+    fn bucket(layer_id: u64, x: f64, y: f64, sample_all_layers: bool) -> EditDto {
+        EditDto::Fill {
+            layer_id,
+            x,
+            y,
+            color: [0.0, 1.0, 0.0],
+            opacity: 1.0,
+            blend_mode: BlendModeId::Normal,
+            tolerance: 10.0,
+            contiguous: true,
+            anti_alias: false,
+            sample_all_layers,
+        }
+    }
+
+    /// `1` if the pixel is selected, else `0` (the test regions are hard).
+    fn selected(s: &EditSession, x: usize, y: usize) -> u8 {
+        u8::from(
+            s.document()
+                .selection()
+                .is_some_and(|m| m.data()[y * 4 + x] > 0.5),
+        )
+    }
+
+    fn layer_pixel(s: &EditSession, x: u32, y: u32) -> [f32; 4] {
+        s.document().layers()[0]
+            .as_pixel()
+            .and_then(|p| p.image().pixel(x, y))
+            .unwrap()
+    }
+
+    #[test]
+    fn wand_selects_the_similar_area_and_add_combines() {
+        let mut s = two_color_session();
+        s.edit(wand(0.9, 1.2, SelectionModeId::Replace, None), None)
+            .unwrap();
+        assert_eq!(selected(&s, 0, 0), 1);
+        assert_eq!(selected(&s, 1, 2), 1);
+        assert_eq!(selected(&s, 2, 0), 0);
+        s.edit(wand(3.0, 0.0, SelectionModeId::Add, None), None)
+            .unwrap();
+        assert_eq!(selected(&s, 0, 0), 1);
+        assert_eq!(selected(&s, 3, 2), 1);
+        let h = s.info(1).history;
+        assert_eq!(h.steps.len(), 2);
+        assert_eq!(h.steps[0], "Magic Wand");
+        s.undo().unwrap();
+        assert_eq!(selected(&s, 3, 2), 0);
+        assert_eq!(selected(&s, 0, 0), 1);
+    }
+
+    #[test]
+    fn wand_reuses_the_cached_sample() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        s.edit(wand(0.0, 0.0, SelectionModeId::Replace, None), None)
+            .unwrap();
+        s.edit(wand(3.0, 0.0, SelectionModeId::Add, None), None)
+            .unwrap();
+        assert_eq!(s.flood_samples_built, 1);
+        // Another source is a new sample.
+        s.edit(wand(0.0, 0.0, SelectionModeId::Replace, Some(bg)), None)
+            .unwrap();
+        assert_eq!(s.flood_samples_built, 2);
+        // A pixel change is a new revision, so the next click samples again.
+        s.edit(bucket(bg, 0.0, 0.0, false), None).unwrap();
+        s.edit(wand(0.0, 0.0, SelectionModeId::Replace, Some(bg)), None)
+            .unwrap();
+        // The fill used the cached layer sample; the next click samples again.
+        assert_eq!(s.flood_samples_built, 3);
+    }
+
+    #[test]
+    fn wand_rejects_bad_input_without_a_step() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        s.edit(
+            EditDto::AddAdjustment {
+                adjustment: bc(0.2),
+                above_layer_id: None,
+            },
+            None,
+        )
+        .unwrap();
+        let adjustment = s.document().layers()[1].id().get();
+        let steps = s.info(1).history.steps.len();
+        let mut bad = vec![
+            wand(0.0, 0.0, SelectionModeId::Replace, Some(adjustment)),
+            wand(-0.5, 0.0, SelectionModeId::Replace, None),
+            wand(0.0, 3.0, SelectionModeId::Replace, None),
+            wand(0.0, f64::NAN, SelectionModeId::Replace, None),
+        ];
+        // A layer sample without a layer ID.
+        bad.push(EditDto::MagicWand {
+            x: 0.0,
+            y: 0.0,
+            mode: SelectionModeId::Replace,
+            tolerance: 10.0,
+            contiguous: true,
+            anti_alias: false,
+            sample_all_layers: false,
+            layer_id: None,
+        });
+        bad.push(bucket(adjustment, 0.0, 0.0, false));
+        // A color value out of range.
+        let mut bad_color = bucket(bg, 0.0, 0.0, true);
+        if let EditDto::Fill { color, .. } = &mut bad_color {
+            *color = [2.0, 0.0, 0.0];
+        }
+        bad.push(bad_color);
+        for edit in bad {
+            let error = s.edit(edit, None).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    EditorEngineError::InvalidFlood(_)
+                        | EditorEngineError::Editor(EditorError::NotAPixelLayer(_))
+                ),
+                "unexpected error {error:?}"
+            );
+        }
+        assert_eq!(s.info(1).history.steps.len(), steps);
+        let unknown = s
+            .edit(wand(0.0, 0.0, SelectionModeId::Replace, Some(9999)), None)
+            .unwrap_err();
+        assert!(matches!(unknown, EditorEngineError::LayerNotFound(9999)));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, reason = "untouched pixels keep exact values")]
+    fn fill_paints_the_region_and_one_undo_restores() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        s.edit(bucket(bg, 0.0, 0.0, false), None).unwrap();
+        let green = layer_pixel(&s, 0, 0);
+        assert!(
+            green[1] > 0.5 && green[2] < 0.2 && green[3] == 1.0,
+            "{green:?}"
+        );
+        assert_eq!(layer_pixel(&s, 1, 2), green);
+        assert_eq!(layer_pixel(&s, 2, 0), BLUE);
+        let h = s.info(1).history;
+        assert_eq!(h.steps.len(), 1);
+        assert_eq!(h.steps[0], "Paint Bucket");
+        s.undo().unwrap();
+        assert_eq!(layer_pixel(&s, 0, 0), RED);
+        assert_eq!(layer_pixel(&s, 3, 2), BLUE);
+    }
+
+    #[test]
+    fn fill_that_changes_nothing_adds_no_step() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        s.edit(bucket(bg, 0.0, 0.0, false), None).unwrap();
+        let steps = s.info(1).history.steps.len();
+        // The same fill on the green area changes no pixel.
+        s.edit(bucket(bg, 0.0, 0.0, true), None).unwrap();
+        assert_eq!(s.info(1).history.steps.len(), steps);
+    }
+
+    /// Cost of the CPU composite for a flood sample. Run with
+    /// `cargo test -p expose-desktop --release -- --ignored --nocapture flood_composite_cost`.
+    #[test]
+    #[ignore = "timing measurement"]
+    fn flood_composite_cost() {
+        let image = WorkingImage::new_filled(4096, 4096, [0.5, 0.25, 0.125, 1.0]).unwrap();
+        let mut s = EditSession::new(build_document(image).unwrap()).unwrap();
+        for _ in 0..4 {
+            s.edit(
+                EditDto::AddPixelLayer {
+                    above_layer_id: None,
+                },
+                None,
+            )
+            .unwrap();
+        }
+        let start = std::time::Instant::now();
+        s.edit(wand(10.0, 10.0, SelectionModeId::Replace, None), None)
+            .unwrap();
+        println!(
+            "first wand click (composite + region): {:?}",
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        s.edit(wand(20.0, 20.0, SelectionModeId::Add, None), None)
+            .unwrap();
+        println!("second wand click (cached): {:?}", start.elapsed());
     }
 }
