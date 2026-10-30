@@ -114,6 +114,42 @@
 //! The result is the same as a full composite: the same kernels run on
 //! the same buffers in the same order.
 //!
+//! # Transform preview
+//!
+//! [`GpuCompositor::render_view_transformed`] shows a pixel layer (and its
+//! mask) through an affine map, while the user drags the handles of a
+//! transform. The document does not change.
+//!
+//! - The blend kernel has a transform mode (`flags.w = 1`). For each
+//!   output pixel, it maps the pixel center through the inverse matrix and
+//!   samples the layer texture with bilinear interpolation (transparent
+//!   outside the layer). The mask uses the same map (its fill value outside
+//!   the mask). The blend math after the sample is the same as in the
+//!   normal step. The normal path of the kernel does not change. On a
+//!   texel center (for example an integer translation), the sample is the
+//!   texel value without arithmetic, so the result is bit-equal to a
+//!   composite with the layer at the translated offset.
+//! - The kernel reads the full layer image. If the layer texture cache
+//!   holds the full image (the layer is inside the canvas), the kernel
+//!   reads the cached texture. Else the compositor uploads the full layer
+//!   (or mask) to a separate texture for the preview, once for each
+//!   content version. The preview does not change the layer texture cache.
+//! - The preview composite starts from the "below" snapshot of the layers
+//!   below the top-level layer that holds the transformed layer. The
+//!   first frame makes the snapshot (if it does not exist), and each frame
+//!   composites only that top-level layer and the layers above it. If the
+//!   layer is in a group, the frame composites the full top-level group:
+//!   the step of the transformed layer in the group uses the transform
+//!   mode. This is correct for all group kinds, but slower when the group
+//!   has many children.
+//! - The preview composite and its pyramid are separate from the view
+//!   composite of [`GpuCompositor::render_view`], with the key: document
+//!   revision, canvas size, layer, and matrix. A pan or a zoom with the
+//!   same matrix thus runs only the view kernel. The view composite stays,
+//!   so a [`GpuCompositor::render_view`] after the preview (for example
+//!   after a cancel) gives the old result without a composite.
+//!   [`GpuCompositor::render_view`] frees the preview textures.
+//!
 //! # Partial updates
 //!
 //! Each layer has a change log for its pixel values and one for its mask
@@ -196,6 +232,11 @@
 //! - with [`GpuCompositor::render_mask_view`]: the gray image (`8 N`) and
 //!   its pyramid (about `8 N / 3`), for one mask.
 //!   [`GpuCompositor::clear_mask_view_cache`] frees only these.
+//! - with [`GpuCompositor::render_view_transformed`]: the preview
+//!   composite (`16 N`) and its pyramid (about `8 N / 3`), and for a layer
+//!   that is partly outside the canvas, a texture of the full layer (8
+//!   bytes for each layer pixel) and of the full mask. The next
+//!   [`GpuCompositor::render_view`] frees them.
 //!
 //! Example: 4096 x 4096 (`16 N` = 256 MiB) with 6 canvas-size layers, 2
 //! smaller layers, one mask, the view composite, a snapshot, and a 2560 x
@@ -248,7 +289,7 @@ use crate::changes::Changes;
 use crate::document::Document;
 use crate::error::{EditorError, EditorResult};
 use crate::layer::{
-    GroupIsolation, Layer, LayerId, LayerKind, LayerProps, Mask, MaskFill, MaskImage,
+    GroupIsolation, Layer, LayerId, LayerKind, LayerProps, Mask, MaskFill, MaskImage, PixelLayer,
 };
 
 /// The number of samples in the curve table of a curves adjustment. The
@@ -546,6 +587,151 @@ fn view_params(
         ],
     };
     Ok(params)
+}
+
+/// The smallest permitted absolute value of the determinant of
+/// [`LayerTransformPreview::matrix`]. A smaller value makes the layer
+/// almost a line, and the inverse map is not accurate.
+pub const MIN_TRANSFORM_DETERMINANT: f64 = 1.0e-6;
+
+/// A preview of an affine transform of one pixel layer. See
+/// [`GpuCompositor::render_view_transformed`].
+///
+/// The matrix `[a, b, c, d, e, f]` maps a canvas point `(x, y)` of the
+/// layer before the transform to the canvas point `(x', y')` after it:
+/// `x' = a * x + c * y + e`, `y' = b * x + d * y + f`. The units are canvas
+/// pixels, and the center of pixel `(i, j)` is at `(i + 0.5, j + 0.5)`.
+/// The identity is `[1, 0, 0, 1, 0, 0]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerTransformPreview {
+    /// The pixel layer to transform. It can be in a group.
+    pub layer: LayerId,
+    /// The forward map. All values must be finite, and the absolute value
+    /// of the determinant `a * d - b * c` must be at least
+    /// [`MIN_TRANSFORM_DETERMINANT`].
+    pub matrix: [f64; 6],
+}
+
+/// The blend kernel mode of the transform preview (`params.flags.w`). It
+/// agrees with `TRANSFORM_MODE` in `shaders/blend_layer.wgsl`.
+const TRANSFORM_MODE: u32 = 1;
+
+/// Checks a transform matrix and returns its inverse, in the same layout
+/// (`[a, b, c, d, e, f]`).
+fn inverse_transform(m: &[f64; 6]) -> EditorResult<[f64; 6]> {
+    if !m.iter().all(|v| v.is_finite()) {
+        return Err(EditorError::InvalidView(
+            "transform matrix values must be finite",
+        ));
+    }
+    let [a, b, c, d, e, f] = *m;
+    let det = a * d - b * c;
+    if !det.is_finite() || det.abs() < MIN_TRANSFORM_DETERMINANT {
+        return Err(EditorError::InvalidView(
+            "transform matrix determinant must be at least MIN_TRANSFORM_DETERMINANT in absolute value",
+        ));
+    }
+    let inverse = [
+        d / det,
+        -b / det,
+        -c / det,
+        a / det,
+        (c * f - d * e) / det,
+        (b * e - a * f) / det,
+    ];
+    if !inverse.iter().all(|v| v.is_finite()) {
+        return Err(EditorError::InvalidView(
+            "transform matrix has no finite inverse",
+        ));
+    }
+    Ok(inverse)
+}
+
+/// Returns the kernel rows (`adj[0]`, `adj[1]`) of the transform mode: the
+/// map from an output pixel of `region` (pixel index) to the texel-index
+/// position in a layer image at `offset` (texel `i` has its center at
+/// `i`). `inverse` is the inverse transform (see [`inverse_transform`]).
+///
+/// The constant terms are computed in `f64`. For an integer translation,
+/// all terms are integers, so the kernel gets texel centers exactly.
+fn transform_rows(
+    inverse: &[f64; 6],
+    region: Rect,
+    offset: (i32, i32),
+) -> EditorResult<[[f32; 4]; 2]> {
+    let [ia, ib, ic, id, ie, iff] = *inverse;
+    // The canvas center of output pixel (0, 0).
+    let px = f64::from(region.x) + 0.5;
+    let py = f64::from(region.y) + 0.5;
+    let ex = ia * px + ic * py + ie - f64::from(offset.0) - 0.5;
+    let ey = ib * px + id * py + iff - f64::from(offset.1) - 0.5;
+    // The kernel uses f32. A value outside the f32 range becomes infinite;
+    // the check below refuses it.
+    #[allow(clippy::cast_possible_truncation)]
+    let rows = [
+        [ia as f32, ic as f32, ex as f32, 0.0],
+        [ib as f32, id as f32, ey as f32, 0.0],
+    ];
+    if !rows.iter().flatten().all(|v| v.is_finite()) {
+        return Err(EditorError::InvalidView(
+            "transform matrix values are too large for the kernel",
+        ));
+    }
+    Ok(rows)
+}
+
+/// Returns the index of the top-level layer that is `id` or holds `id`.
+fn top_level_index(document: &Document, id: LayerId) -> Option<usize> {
+    document.layers().iter().position(|top| {
+        let mut found = false;
+        top.visit(&mut |l| found |= l.id() == id);
+        found
+    })
+}
+
+/// The key of the transform preview composite: all data that changes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TransformViewKey {
+    /// [`Document::revision`] (stamps are unique in the process).
+    revision: u64,
+    /// The canvas size.
+    size: (u32, u32),
+    layer: LayerId,
+    /// The bits of [`LayerTransformPreview::matrix`].
+    matrix: [u64; 6],
+}
+
+/// The preview composite of [`GpuCompositor::render_view_transformed`]
+/// and its pyramid.
+#[derive(Debug)]
+struct TransformViewCache {
+    key: TransformViewKey,
+    /// `revision` is the document revision.
+    view: ViewCache,
+}
+
+/// Textures of the full image of the previewed layer and of its mask, for
+/// a layer (or mask) that the layer texture cache holds only in part. A
+/// slot is `None` if the cache holds the full image.
+#[derive(Debug)]
+struct TransformTextures {
+    layer: LayerId,
+    pixels: Option<CachedPart>,
+    mask: Option<CachedPart>,
+}
+
+/// The transform step of one composite call (see [`Run::transformed_step`]).
+#[derive(Debug, Clone, Copy)]
+struct TransformStep<'t> {
+    layer: LayerId,
+    /// The inverse transform.
+    inverse: [f64; 6],
+    /// The full layer image, or `None`: the cached texture of the layer
+    /// holds the full image.
+    pixels: Option<&'t GpuImage>,
+    /// The full mask, or `None`: the cached mask texture holds it (or the
+    /// layer has no enabled mask).
+    mask: Option<&'t GpuImage>,
 }
 
 /// One cached texture: a part of the pixels of a layer, or of its mask.
@@ -921,12 +1107,22 @@ pub struct GpuCompositor {
     mask_view: Option<MaskViewCache>,
     /// The number of mask view builds since the compositor was made.
     mask_view_builds: u64,
+    /// The preview composite of [`GpuCompositor::render_view_transformed`].
+    transform_view: Option<TransformViewCache>,
+    /// The full-image textures of the previewed layer (see
+    /// [`TransformTextures`]).
+    transform_textures: Option<TransformTextures>,
+    /// The number of preview composites since the compositor was made.
+    transform_builds: u64,
 }
 
 impl GpuCompositor {
     /// Makes a compositor for `ctx`.
     pub async fn new(ctx: &GpuContext) -> EditorResult<Self> {
         Ok(Self {
+            transform_view: None,
+            transform_textures: None,
+            transform_builds: 0,
             placeholder: GpuImage::new(ctx, 1, 1, FORMAT).await?,
             cache: LayerCache::default(),
             pool: Vec::new(),
@@ -955,6 +1151,8 @@ impl GpuCompositor {
         self.view_output = None;
         self.below = None;
         self.mask_view = None;
+        self.transform_view = None;
+        self.transform_textures = None;
     }
 
     /// Frees only the mask view image and its pyramid (for example, when
@@ -1013,6 +1211,14 @@ impl GpuCompositor {
         self.view_patch_builds
     }
 
+    /// Returns the number of preview composites that
+    /// [`Self::render_view_transformed`] made since the compositor was
+    /// made. Use it to check the cache (for example, a pan with the same
+    /// matrix must not composite).
+    pub const fn transform_preview_composites(&self) -> u64 {
+        self.transform_builds
+    }
+
     /// Returns the approximate GPU memory that the compositor keeps
     /// between calls, in bytes (all textures, the placeholder included).
     pub fn cache_memory_bytes(&self) -> u64 {
@@ -1030,10 +1236,17 @@ impl GpuCompositor {
                 .map(bytes)
         });
         let spares = self.cache.spares.iter().map(bytes);
+        let transform_parts = self.transform_textures.iter().flat_map(|t| {
+            t.pixels
+                .iter()
+                .chain(t.mask.iter())
+                .map(|part| bytes(&part.image))
+        });
         let view = self
             .view
             .iter()
             .chain(self.mask_view.iter().map(|m| &m.view))
+            .chain(self.transform_view.iter().map(|t| &t.view))
             .flat_map(|v| std::iter::once(&v.composite).chain(v.mips.iter()))
             .map(bytes);
         let below = self
@@ -1045,6 +1258,7 @@ impl GpuCompositor {
             + below.sum::<u64>()
             + parts.sum::<u64>()
             + spares.sum::<u64>()
+            + transform_parts.sum::<u64>()
             + self.pool.iter().map(bytes).sum::<u64>()
             + self.patch_pool.iter().map(bytes).sum::<u64>()
             + view.sum::<u64>()
@@ -1152,10 +1366,253 @@ impl GpuCompositor {
         view: &ViewSpec,
     ) -> EditorResult<&GpuImage> {
         check_view(view, ctx.limits().max_texture_dimension_2d)?;
+        // The transform preview (if any) has ended: free its textures.
+        self.transform_view = None;
+        self.transform_textures = None;
         let cache = self.take_view(ctx, document).await?;
         let result = draw_view(ctx, &cache, view, &mut self.view_output).await;
         self.view = Some(cache);
         result
+    }
+
+    /// Renders a view as [`Self::render_view`], but draws the pixel layer
+    /// `preview.layer` (and its mask) through the affine map
+    /// `preview.matrix`, with bilinear sampling. This is the live preview
+    /// of a layer transform. See "Transform preview" in the module
+    /// documentation.
+    ///
+    /// - For each canvas pixel center `p`, the layer value is the bilinear
+    ///   sample of the layer at `inverse(matrix)(p)` (premultiplied,
+    ///   transparent outside the layer). An enabled mask uses the same map
+    ///   (the mask fill outside the mask). Opacity, fill, blend mode, and
+    ///   the groups apply as in [`Self::render_view`].
+    /// - The function does not change the document, the layer texture
+    ///   cache, or the view composite of [`Self::render_view`].
+    /// - The compositor keeps the preview composite. It composites again
+    ///   only if the document revision, the layer, or the matrix changed.
+    ///   Each composite starts from the "below" snapshot of the layers
+    ///   below the transformed top-level layer.
+    /// - The identity matrix gives the result of [`Self::render_view`].
+    ///
+    /// The image belongs to the compositor. It is the same image as the
+    /// output of [`Self::render_view`].
+    ///
+    /// # Errors
+    ///
+    /// - [`EditorError::InvalidView`] as in [`Self::render_view`], and if
+    ///   a matrix value is not finite, the absolute value of its
+    ///   determinant is less than [`MIN_TRANSFORM_DETERMINANT`], or the
+    ///   map is too large for the `f32` kernel parameters.
+    /// - [`EditorError::LayerNotFound`] if no layer has the ID
+    ///   `preview.layer`.
+    /// - [`EditorError::NotAPixelLayer`] if the layer is not a pixel layer.
+    /// - The errors of [`Self::render_view`]. A layer (or mask) that is
+    ///   partly outside the canvas and larger than the device texture
+    ///   limit gives [`EditorError::Gpu`].
+    pub async fn render_view_transformed(
+        &mut self,
+        ctx: &GpuContext,
+        document: &Document,
+        view: &ViewSpec,
+        preview: &LayerTransformPreview,
+    ) -> EditorResult<&GpuImage> {
+        check_view(view, ctx.limits().max_texture_dimension_2d)?;
+        let inverse = inverse_transform(&preview.matrix)?;
+        let id = preview.layer;
+        let layer = document.layer(id).ok_or(EditorError::LayerNotFound(id))?;
+        let pixel = layer.as_pixel().ok_or(EditorError::NotAPixelLayer(id))?;
+        let bounds = document.bounds();
+        check_region(document, bounds)?;
+        // The composite regions are the full canvas: check the kernel
+        // parameters before the GPU work.
+        transform_rows(&inverse, bounds, pixel.offset())?;
+        let index = top_level_index(document, id).ok_or(EditorError::LayerNotFound(id))?;
+        let key = TransformViewKey {
+            revision: document.revision(),
+            size: (bounds.width, bounds.height),
+            layer: id,
+            matrix: preview.matrix.map(f64::to_bits),
+        };
+        let cache = self
+            .take_transform_view(ctx, document, key, index, inverse)
+            .await?;
+        let result = draw_view(ctx, &cache.view, view, &mut self.view_output).await;
+        self.transform_view = Some(cache);
+        result
+    }
+
+    /// Takes the preview composite out of `self.transform_view`, and
+    /// composites again if its key is not `key`.
+    async fn take_transform_view(
+        &mut self,
+        ctx: &GpuContext,
+        document: &Document,
+        key: TransformViewKey,
+        index: usize,
+        inverse: [f64; 6],
+    ) -> EditorResult<TransformViewCache> {
+        let mut mips = Vec::new();
+        if let Some(cache) = self.transform_view.take() {
+            if cache.key == key {
+                return Ok(cache);
+            }
+            if cache.key.size == key.size {
+                // The new composite replaces the old one: the old buffer
+                // goes to the pool, and the pyramid textures stay.
+                self.pool.push(cache.view.composite);
+                mips = cache.view.mips;
+            }
+        }
+        self.transform_builds += 1;
+        self.ensure_transform_textures(ctx, document, key.layer)
+            .await?;
+        let composite = self
+            .composite_transformed(ctx, document, index, key.layer, inverse)
+            .await?;
+        let view = build_pyramid(ctx, key.revision, composite, mips).await?;
+        Ok(TransformViewCache { key, view })
+    }
+
+    /// Makes sure that the transform step can read the full image of layer
+    /// `id` and of its enabled mask: in the layer texture cache (brought
+    /// up to date as a view composite does), or else in
+    /// `self.transform_textures` (uploaded once for each content version).
+    async fn ensure_transform_textures(
+        &mut self,
+        ctx: &GpuContext,
+        document: &Document,
+        id: LayerId,
+    ) -> EditorResult<()> {
+        let layer = document.layer(id).ok_or(EditorError::LayerNotFound(id))?;
+        let pixel = layer.as_pixel().ok_or(EditorError::NotAPixelLayer(id))?;
+        let bounds = document.bounds();
+        let area = Area {
+            region: bounds,
+            canvas: bounds,
+            max_dim: ctx.limits().max_texture_dimension_2d,
+        };
+        let image = pixel.image();
+        let full_pixels = image.bounds();
+        let mask = layer.mask().filter(|m| m.enabled);
+        let full_mask = mask.map(|m| Rect::new(0, 0, m.image.width(), m.image.height()));
+        self.cache.prune(document);
+        let (pixels_cached, mask_cached) = {
+            let tex = self.cache.textures(ctx, layer, area).await?;
+            (
+                tex.source.is_some_and(|s| s.rect == full_pixels),
+                full_mask.is_none_or(|full| tex.mask.is_some_and(|m| m.rect == full)),
+            )
+        };
+        let mut own = match self.transform_textures.take() {
+            Some(t) if t.layer == id => t,
+            _ => TransformTextures {
+                layer: id,
+                pixels: None,
+                mask: None,
+            },
+        };
+        let version = layer.pixel_version();
+        own.pixels = match own.pixels.take() {
+            _ if pixels_cached => None,
+            Some(part) if part.version == version && part.rect == full_pixels => Some(part),
+            // An old texture is dropped here, before the new one is made.
+            _ => Some(CachedPart {
+                version,
+                rect: full_pixels,
+                image: upload_pixels(ctx, image, full_pixels).await?,
+            }),
+        };
+        let version = layer.mask_version();
+        own.mask = match (mask, full_mask, own.mask.take()) {
+            (Some(m), Some(full), old) if !mask_cached => match old {
+                Some(part) if part.version == version && part.rect == full => Some(part),
+                _ => Some(CachedPart {
+                    version,
+                    rect: full,
+                    image: upload_mask(ctx, &m.image, full).await?,
+                }),
+            },
+            _ => None,
+        };
+        self.transform_textures = Some(own);
+        Ok(())
+    }
+
+    /// Composites the full canvas with the transform step for layer `id`
+    /// (in the top-level layer at `index`). The composite starts from the
+    /// "below" snapshot of the bottom `index` top-level layers, and makes
+    /// that snapshot if it does not exist. The keys of the view composite
+    /// (`BelowCache::last`) do not change.
+    async fn composite_transformed(
+        &mut self,
+        ctx: &GpuContext,
+        document: &Document,
+        index: usize,
+        id: LayerId,
+        inverse: [f64; 6],
+    ) -> EditorResult<GpuImage> {
+        let bounds = document.bounds();
+        let layers = document.layers();
+        let below_layers = layers.get(..index).ok_or(EditorError::LayerNotFound(id))?;
+        let keys: Vec<LayerKey> = below_layers.iter().map(layer_key).collect();
+        let size = (bounds.width, bounds.height);
+        let space = document.blend_space();
+        // If the call fails, the snapshot stays dropped (no stale state).
+        let (last, mut snapshot) = match self.below.take() {
+            Some(b) if b.size == size && b.space == space => (b.last, b.snapshot),
+            _ => (Vec::new(), None),
+        };
+        // A snapshot of more layers than `index` cannot be a start. It
+        // stays for `render_view` if this call does not make a new one.
+        let start = snapshot
+            .as_ref()
+            .filter(|s| s.keys.len() <= index && keys.starts_with(&s.keys))
+            .map_or(0, |s| s.keys.len());
+
+        let textures = self.transform_textures.as_ref();
+        let step = TransformStep {
+            layer: id,
+            inverse,
+            pixels: textures.and_then(|t| t.pixels.as_ref()).map(|p| &p.image),
+            mask: textures.and_then(|t| t.mask.as_ref()).map(|p| &p.image),
+        };
+        let mut run = Run::new(
+            ctx,
+            &mut self.cache,
+            &mut self.pool,
+            &self.placeholder,
+            document,
+            bounds,
+        )?;
+        run.transform = Some(step);
+        let mut cur = match snapshot.as_ref().filter(|_| start > 0) {
+            Some(s) => Buf::Borrowed(&s.image),
+            None => Buf::Owned(run.bufs.take_clear(run.placeholder).await?),
+        };
+        if index > start {
+            let below = run.composite_list(&layers[start..index], cur).await?;
+            cur = match below {
+                Buf::Owned(image) => {
+                    if let Some(old) = snapshot.take() {
+                        run.bufs.recycle(Buf::Owned(old.image));
+                    }
+                    let saved = snapshot.insert(Snapshot { keys, image });
+                    Buf::Borrowed(&saved.image)
+                }
+                // No step ran (the layers are hidden): the buffer is the
+                // old snapshot. It stays correct with its own keys.
+                borrowed @ Buf::Borrowed(_) => borrowed,
+            };
+        }
+        let result = run.composite_list(&layers[index..], cur).await?;
+        let image = run.bufs.into_image(result).await?;
+        self.below = Some(BelowCache {
+            size,
+            space,
+            last,
+            snapshot,
+        });
+        Ok(image)
     }
 
     /// Renders the mask of `layer` as an opaque gray image in the same view
@@ -2161,6 +2618,8 @@ struct Run<'c> {
     /// The device texture limit.
     max_dim: u32,
     space: BlendSpace,
+    /// The transform preview step, or `None` (all other composites).
+    transform: Option<TransformStep<'c>>,
 }
 
 impl<'c> Run<'c> {
@@ -2195,6 +2654,7 @@ impl<'c> Run<'c> {
             canvas: document.bounds(),
             max_dim: ctx.limits().max_texture_dimension_2d,
             space: document.blend_space(),
+            transform: None,
         })
     }
 
@@ -2243,6 +2703,11 @@ impl<'c> Run<'c> {
             let mut params = self.layer_params(layer, base);
             match layer.kind() {
                 LayerKind::Pixel(p) => {
+                    if let Some(step) = self.transform.filter(|s| s.layer == layer.id()) {
+                        self.transformed_step(layer, p, step, params, &mut cur)
+                            .await?;
+                        continue;
+                    }
                     let tex = self.cache.textures(ctx, layer, area).await?;
                     // No source: the layer is outside the region.
                     let Some(source) = tex.source else {
@@ -2313,6 +2778,79 @@ impl<'c> Run<'c> {
             }
         }
         Ok(cur)
+    }
+
+    /// Blends the pixel layer `layer` (its content `pixel`) onto `cur`
+    /// through the inverse map of `step`, with the transform mode of the
+    /// blend kernel. `params` are the layer parameters without the mask.
+    ///
+    /// The kernel reads the full layer image and the full mask: the
+    /// textures in `step`, or else the cached textures, which then hold
+    /// the full images (`GpuCompositor::ensure_transform_textures` makes
+    /// sure of this before the composite).
+    async fn transformed_step(
+        &mut self,
+        layer: &Layer,
+        pixel: &PixelLayer,
+        step: TransformStep<'c>,
+        mut params: Params,
+        cur: &mut Buf<'_>,
+    ) -> EditorResult<()> {
+        /// The error for a missing full-image texture. It cannot occur
+        /// (see above); the check only prevents a wrong preview.
+        const MISSING: EditorError =
+            EditorError::InvalidView("transform preview texture is not available");
+        let ctx = self.bufs.ctx;
+        let area = self.area();
+        let placeholder = self.placeholder;
+        let region = self.region;
+        let tex = self.cache.textures(ctx, layer, area).await?;
+        let image = pixel.image();
+        let source = match step.pixels {
+            Some(own) => own,
+            None => match tex.source {
+                Some(part) if part.rect == image.bounds() => &part.image,
+                _ => return Err(MISSING),
+            },
+        };
+        let offset = pixel.offset();
+        let rows = transform_rows(&step.inverse, region, offset)?;
+        params.flags[3] = TRANSFORM_MODE;
+        params.source = [0, 0, to_i32(image.width())?, to_i32(image.height())?];
+        params.adj[0] = rows[0];
+        params.adj[1] = rows[1];
+        let mask = match layer.mask().filter(|m| m.enabled) {
+            None => {
+                // A disabled mask has the value 1 everywhere.
+                params.flags[2] = 0;
+                placeholder
+            }
+            Some(m) => {
+                let (mw, mh) = (m.image.width(), m.image.height());
+                params.flags[2] = 1;
+                params.coef[1] = m.fill.value();
+                params.mask = [0, 0, to_i32(mw)?, to_i32(mh)?];
+                // Mask position = layer position + layer offset - mask
+                // offset. The difference of two i32 values is exact in
+                // f32 up to 2^24, which covers all real offsets.
+                #[allow(clippy::cast_precision_loss)]
+                let delta = [
+                    (i64::from(offset.0) - i64::from(m.offset.0)) as f32,
+                    (i64::from(offset.1) - i64::from(m.offset.1)) as f32,
+                ];
+                params.adj[2] = [delta[0], delta[1], 0.0, 0.0];
+                match step.mask {
+                    Some(own) => own,
+                    None => match tex.mask {
+                        Some(part) if part.rect == Rect::new(0, 0, mw, mh) => &part.image,
+                        _ => return Err(MISSING),
+                    },
+                }
+            }
+        };
+        self.bufs
+            .step(cur, &BLEND_KERNEL, &params, mask, source)
+            .await
     }
 
     /// Sets the adjustment parameters. The curve table of a curves
@@ -2402,6 +2940,9 @@ mod tests {
 
     /// Tests of the partial updates (`src/gpu/tests/partial.rs`).
     mod partial;
+
+    /// Tests of the transform preview (`src/gpu/tests/transform.rs`).
+    mod transform;
 
     fn context() -> Option<GpuContext> {
         match pollster::block_on(GpuContext::new(GpuContextOptions::default())) {
