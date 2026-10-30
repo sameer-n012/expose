@@ -169,6 +169,12 @@ pub enum EditorError {
     #[error("invalid fill setting: {0}")]
     InvalidFill(&'static str),
 
+    /// A gradient setting is not valid (for example, fewer than two stops,
+    /// stops that are not in order, a line that is too short, or a blend
+    /// mode other than normal on a mask, see [`crate::gradient`]).
+    #[error("invalid gradient: {0}")]
+    InvalidGradient(&'static str),
+
     /// A document file cannot be read or written (see [`crate::file`]).
     #[error("document file: {0}")]
     File(#[from] FileError),

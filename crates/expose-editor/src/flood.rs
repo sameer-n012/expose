@@ -659,6 +659,30 @@ impl Document {
             self.blend_space,
             locks.transparency,
         );
+        let region = region.data();
+        let opacity = fill.opacity;
+        self.fill_pixels_with(layer, |px, old| {
+            // `px.selection` is 1 without a selection, so the product has
+            // the same bits as `region * opacity`.
+            let c = region[px.index].clamp(0.0, 1.0) * opacity * px.selection;
+            if c <= 0.0 { old } else { mode.pixel(old, c) }
+        })
+    }
+
+    /// Changes the pixels of a pixel layer inside the canvas with `f`
+    /// (see [`fill_buffer`]). The caller must do the lock checks before.
+    ///
+    /// Returns the undo edit (changed tiles only) and the changed canvas
+    /// rectangle, or `None` if no value changed. If a value changed, the
+    /// layer gets a new pixel version and the document a new revision.
+    ///
+    /// Errors: [`EditorError::LayerNotFound`],
+    /// [`EditorError::NotAPixelLayer`].
+    pub(crate) fn fill_pixels_with(
+        &mut self,
+        layer: LayerId,
+        f: impl Fn(FillPixel, Rgba) -> Rgba,
+    ) -> EditorResult<Option<(Edit, Rect)>> {
         let canvas = (self.width(), self.height());
         let (l, selection) = self.layer_mut_and_selection(layer)?;
         let LayerKind::Pixel(p) = l.kind_mut() else {
@@ -666,70 +690,158 @@ impl Document {
         };
         let offset = p.offset();
         let img = p.image_mut();
-        let (lw, lh) = (img.width(), img.height());
-        let Some(o) = Overlap::new(offset, (lw, lh), canvas) else {
+        let size = (img.width(), img.height());
+        let selection = selection.map(MaskImage::data);
+        let Some(change) = fill_buffer(img.pixels_mut(), size, offset, canvas, selection, f) else {
             return Ok(None);
         };
-        let ctx = FillContext {
-            mode,
-            opacity: fill.opacity,
-            region: region.data(),
-            selection: selection.map(MaskImage::data),
-            canvas_w: canvas.0 as usize,
-            layer_w: lw as usize,
-            overlap: o,
-        };
-        let (tiles, changed) = ctx.apply(img.pixels_mut());
-        let Some(b) = changed else {
-            return Ok(None);
-        };
-        let to_rect = |x0: usize, y0: usize, x1: usize, y1: usize| -> Option<Rect> {
-            Some(Rect::new(
-                u32::try_from(x0).ok()?,
-                u32::try_from(y0).ok()?,
-                u32::try_from(x1 - x0).ok()?,
-                u32::try_from(y1 - y0).ok()?,
-            ))
-        };
-        // The bounds are layer buffer indices, so they fit in u32. If they
-        // do not, the change log is cleared (the area is then not known).
-        match to_rect(b.x0, b.y0, b.x1, b.y1) {
+        match change.buffer_rect {
             Some(r) => l.touch_pixels_in(r),
             None => l.touch_pixels(),
         }
         self.touch();
-        // The changed area is inside the overlap (`b.x0 >= o.lx`,
-        // `b.y0 >= o.ly`), so the canvas rectangle is inside the canvas.
-        // If the conversion fails, report the full canvas.
-        let rect = to_rect(
-            b.x0 - o.lx + o.cx,
-            b.y0 - o.ly + o.cy,
-            b.x1 - o.lx + o.cx,
-            b.y1 - o.ly + o.cy,
-        )
-        .unwrap_or_else(|| Rect::new(0, 0, canvas.0, canvas.1));
-        Ok(Some((Edit::pixel_tiles(layer, tiles), rect)))
+        Ok(Some((
+            Edit::pixel_tiles(layer, change.tiles),
+            change.canvas_rect,
+        )))
+    }
+
+    /// Changes the mask values of a layer inside the canvas with `f` (see
+    /// [`fill_buffer`]). The caller must do the lock checks before.
+    ///
+    /// Returns the undo edit (changed tiles only) and the changed canvas
+    /// rectangle, or `None` if no value changed. If a value changed, the
+    /// layer gets a new mask version and the document a new revision.
+    ///
+    /// Errors: [`EditorError::LayerNotFound`], [`EditorError::NoMask`].
+    pub(crate) fn fill_mask_with(
+        &mut self,
+        layer: LayerId,
+        f: impl Fn(FillPixel, f32) -> f32,
+    ) -> EditorResult<Option<(Edit, Rect)>> {
+        let canvas = (self.width(), self.height());
+        let (l, selection) = self.layer_mut_and_selection(layer)?;
+        let m = l.mask_mut().ok_or(EditorError::NoMask(layer))?;
+        let offset = m.offset;
+        let size = (m.image.width(), m.image.height());
+        let selection = selection.map(MaskImage::data);
+        let Some(change) = fill_buffer(m.image.data_mut(), size, offset, canvas, selection, f)
+        else {
+            return Ok(None);
+        };
+        match change.buffer_rect {
+            Some(r) => l.touch_mask_in(r),
+            None => l.touch_mask(),
+        }
+        self.touch();
+        Ok(Some((
+            Edit::mask_tiles(layer, change.tiles),
+            change.canvas_rect,
+        )))
     }
 }
 
-/// The fixed inputs of a fill.
-struct FillContext<'a> {
-    mode: Mode,
-    opacity: f32,
-    /// The region values (canvas size).
-    region: &'a [f32],
+/// One canvas pixel that [`fill_buffer`] gives to its callback.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FillPixel {
+    /// Index in a canvas-size buffer (`y * canvas width + x`).
+    pub index: usize,
+    /// Canvas column.
+    pub x: usize,
+    /// Canvas row.
+    pub y: usize,
+    /// The selection value, clamped to `0..=1` (1 if there is no
+    /// selection). It is always more than 0: [`fill_buffer`] skips pixels
+    /// with the selection value 0.
+    pub selection: f32,
+}
+
+/// The result of [`fill_buffer`].
+pub(crate) struct FillChange<T> {
+    /// The original values of the changed tiles (buffer coordinates).
+    pub tiles: Vec<(Rect, Vec<T>)>,
+    /// The bounds of the changed values in buffer coordinates, or `None`
+    /// if they do not fit in a [`Rect`] (then the area is not known).
+    pub buffer_rect: Option<Rect>,
+    /// The bounds of the changed values in canvas coordinates.
+    pub canvas_rect: Rect,
+}
+
+/// Changes the part of a layer buffer (pixels or mask values) that is
+/// inside the canvas, tile by tile ([`STROKE_TILE_SIZE`] pixels).
+///
+/// For each buffer value inside the canvas with a selection value more
+/// than 0, the new value is `f(pixel, old)`. A result with the same bits
+/// as `old` is no change. Values outside the canvas do not change: the
+/// buffer does not grow.
+///
+/// `buf` has the size `size` and its top-left value is at the canvas
+/// position `offset`. `selection` has the canvas size.
+///
+/// Returns `None` if no value changed.
+pub(crate) fn fill_buffer<T: Texel>(
+    buf: &mut [T],
+    size: (u32, u32),
+    offset: (i32, i32),
+    canvas: (u32, u32),
+    selection: Option<&[f32]>,
+    f: impl Fn(FillPixel, T) -> T,
+) -> Option<FillChange<T>> {
+    let o = Overlap::new(offset, size, canvas)?;
+    let ctx = BufferFill {
+        selection,
+        canvas_w: canvas.0 as usize,
+        buf_w: size.0 as usize,
+        overlap: o,
+    };
+    let (tiles, changed) = ctx.apply(buf, &f);
+    let b = changed?;
+    let to_rect = |x0: usize, y0: usize, x1: usize, y1: usize| -> Option<Rect> {
+        Some(Rect::new(
+            u32::try_from(x0).ok()?,
+            u32::try_from(y0).ok()?,
+            u32::try_from(x1 - x0).ok()?,
+            u32::try_from(y1 - y0).ok()?,
+        ))
+    };
+    // The bounds are buffer indices, so they fit in u32. If they do not,
+    // the caller clears the change log (the area is then not known).
+    let buffer_rect = to_rect(b.x0, b.y0, b.x1, b.y1);
+    // The changed area is inside the overlap (`b.x0 >= o.lx`,
+    // `b.y0 >= o.ly`), so the canvas rectangle is inside the canvas.
+    // If the conversion fails, report the full canvas.
+    let canvas_rect = to_rect(
+        b.x0 - o.lx + o.cx,
+        b.y0 - o.ly + o.cy,
+        b.x1 - o.lx + o.cx,
+        b.y1 - o.ly + o.cy,
+    )
+    .unwrap_or_else(|| Rect::new(0, 0, canvas.0, canvas.1));
+    Some(FillChange {
+        tiles,
+        buffer_rect,
+        canvas_rect,
+    })
+}
+
+/// The fixed inputs of [`fill_buffer`].
+struct BufferFill<'a> {
     /// The selection values (canvas size), or `None` (all selected).
     selection: Option<&'a [f32]>,
     canvas_w: usize,
-    layer_w: usize,
+    buf_w: usize,
     overlap: Overlap,
 }
 
-impl FillContext<'_> {
-    /// Paints the overlap area of `buf` tile by tile. Returns the original
-    /// values of the changed tiles (layer coordinates) and the bounds of
-    /// the changed pixels (layer coordinates).
-    fn apply(&self, buf: &mut [Rgba]) -> (Vec<(Rect, Vec<Rgba>)>, Option<Bounds>) {
+impl BufferFill<'_> {
+    /// Changes the overlap area of `buf` tile by tile. Returns the original
+    /// values of the changed tiles (buffer coordinates) and the bounds of
+    /// the changed values (buffer coordinates).
+    fn apply<T: Texel>(
+        &self,
+        buf: &mut [T],
+        f: &impl Fn(FillPixel, T) -> T,
+    ) -> (Vec<(Rect, Vec<T>)>, Option<Bounds>) {
         let o = self.overlap;
         let tile = STROKE_TILE_SIZE as usize;
         let (x0, x1) = (o.lx, o.lx + o.width);
@@ -740,9 +852,18 @@ impl FillContext<'_> {
             let (ty0, ty1) = ((ty * tile).max(y0), ((ty + 1) * tile).min(y1));
             for tx in x0 / tile..=(x1 - 1) / tile {
                 let (tx0, tx1) = ((tx * tile).max(x0), ((tx + 1) * tile).min(x1));
-                if let Some(orig) = self.apply_tile(buf, (tx0, tx1), (ty0, ty1), &mut changed) {
-                    // The tile is inside the layer buffer, so the values
-                    // fit in u32 (the buffer size is below `MAX_PIXELS`).
+                let (xs, ys) = ((tx0, tx1), (ty0, ty1));
+                // One loop for each selection case, so that the inner loop
+                // has no selection branch.
+                let orig = match self.selection {
+                    Some(sel) => {
+                        self.apply_tile(buf, xs, ys, |i| sel[i].clamp(0.0, 1.0), f, &mut changed)
+                    }
+                    None => self.apply_tile(buf, xs, ys, |_| 1.0, f, &mut changed),
+                };
+                if let Some(orig) = orig {
+                    // The tile is inside the buffer, so the values fit in
+                    // u32 (the buffer size is below `MAX_PIXELS`).
                     #[allow(clippy::cast_possible_truncation)]
                     let rect = Rect::new(
                         tx0 as u32,
@@ -757,40 +878,48 @@ impl FillContext<'_> {
         (tiles, changed)
     }
 
-    /// Paints one tile (`xs`, `ys` in layer coordinates). Returns the
+    /// Changes one tile (`xs`, `ys` in buffer coordinates). `selection`
+    /// gives the clamped selection value for a canvas index. Returns the
     /// original values of the tile if a value changed.
-    fn apply_tile(
+    fn apply_tile<T: Texel>(
         &self,
-        buf: &mut [Rgba],
+        buf: &mut [T],
         xs: (usize, usize),
         ys: (usize, usize),
+        selection: impl Fn(usize) -> f32,
+        f: &impl Fn(FillPixel, T) -> T,
         changed: &mut Option<Bounds>,
-    ) -> Option<Vec<Rgba>> {
+    ) -> Option<Vec<T>> {
         let o = self.overlap;
-        let mut orig: Option<Vec<Rgba>> = None;
+        let mut orig: Option<Vec<T>> = None;
         for y in ys.0..ys.1 {
-            let crow = (y - o.ly + o.cy) * self.canvas_w;
-            let brow = y * self.layer_w;
+            let cy = y - o.ly + o.cy;
+            let crow = cy * self.canvas_w;
+            let brow = y * self.buf_w;
             let mut first = None;
             let mut last = 0;
             for x in xs.0..xs.1 {
-                let ci = crow + x - o.lx + o.cx;
-                let mut c = self.region[ci].clamp(0.0, 1.0) * self.opacity;
-                if let Some(sel) = self.selection {
-                    c *= sel[ci].clamp(0.0, 1.0);
-                }
-                if c <= 0.0 {
+                let cx = x - o.lx + o.cx;
+                let index = crow + cx;
+                let s = selection(index);
+                if s <= 0.0 {
                     continue;
                 }
                 let old = buf[brow + x];
-                let new = self.mode.pixel(old, c);
+                let px = FillPixel {
+                    index,
+                    x: cx,
+                    y: cy,
+                    selection: s,
+                };
+                let new = f(px, old);
                 if new.same_bits(&old) {
                     continue;
                 }
                 // Copy the tile before its first change: the copy then
                 // holds the original values.
                 if orig.is_none() {
-                    orig = Some(copy_rect(buf, self.layer_w, xs, ys));
+                    orig = Some(copy_rect(buf, self.buf_w, xs, ys));
                 }
                 buf[brow + x] = new;
                 first.get_or_insert(x);
@@ -805,7 +934,7 @@ impl FillContext<'_> {
 }
 
 /// Copies the area `xs` x `ys` of a buffer with the row length `w`.
-fn copy_rect(buf: &[Rgba], w: usize, xs: (usize, usize), ys: (usize, usize)) -> Vec<Rgba> {
+fn copy_rect<T: Copy>(buf: &[T], w: usize, xs: (usize, usize), ys: (usize, usize)) -> Vec<T> {
     let mut out = Vec::with_capacity((xs.1 - xs.0) * (ys.1 - ys.0));
     for y in ys.0..ys.1 {
         out.extend_from_slice(&buf[y * w + xs.0..y * w + xs.1]);
