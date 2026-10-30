@@ -18,7 +18,7 @@
 //! its pixels), because undo must restore it. Selection edits store the
 //! old selection in a compact form (see [`crate::selection`]).
 
-use expose_core::buffer::{Rect, Rgba};
+use expose_core::buffer::{Rect, Rgba, WorkingImage};
 
 use crate::adjust::Adjustment;
 use crate::blend::{BlendMode, BlendSpace};
@@ -100,6 +100,15 @@ enum EditKind {
         id: LayerId,
         tiles: Vec<(Rect, Vec<f32>)>,
     },
+    /// The whole image and offset of a pixel layer, and its whole mask if
+    /// `mask` is `Some` (`None` keeps the mask as it is). A free transform
+    /// makes this edit (see [`crate::transform`]).
+    PixelLayer {
+        id: LayerId,
+        image: Box<WorkingImage>,
+        offset: (i32, i32),
+        mask: Option<Box<Mask>>,
+    },
     BlendSpace(BlendSpace),
     /// The document selection to set (`None` = no selection), in compact
     /// form. See [`crate::selection`].
@@ -128,6 +137,24 @@ impl Edit {
         Self::new(EditKind::MaskTiles { id, tiles })
     }
 
+    /// Makes an edit that sets the whole image and offset of a pixel layer,
+    /// and its whole mask if `mask` is `Some`. With `None`, the mask does
+    /// not change. Apply it with [`Document::apply_edit`] to get the
+    /// inverse. The caller must check the size of `image`.
+    pub(crate) fn pixel_layer(
+        id: LayerId,
+        image: WorkingImage,
+        offset: (i32, i32),
+        mask: Option<Mask>,
+    ) -> Self {
+        Self::new(EditKind::PixelLayer {
+            id,
+            image: Box::new(image),
+            offset,
+            mask: mask.map(Box::new),
+        })
+    }
+
     /// Returns the approximate heap memory of the edit in bytes. The
     /// history uses it for its memory report.
     pub fn memory_bytes(&self) -> usize {
@@ -152,6 +179,9 @@ impl Edit {
                 .iter()
                 .map(|(_, d)| size_of::<(Rect, Vec<f32>)>() + size_of_val(d.as_slice()))
                 .sum(),
+            EditKind::PixelLayer { image, mask, .. } => {
+                image.as_bytes().len() + mask.as_ref().map_or(0, |m| size_of_val(m.image.data()))
+            }
             EditKind::Selection(s) => s.as_ref().map_or(0, |s| s.memory_bytes()),
             EditKind::Remove { .. }
             | EditKind::Move { .. }
@@ -247,7 +277,9 @@ impl Document {
     /// keep the versions of the layer: a layer that comes back by undo has
     /// the same values as before, so its old versions are still correct.
     /// A move (translate) keeps the versions, because the values do not
-    /// change (only the offsets).
+    /// change (only the offsets). A pixel layer replacement (free
+    /// transform) gives the layer a new pixel version, and a new mask
+    /// version if it replaces the mask, and clears their change logs.
     ///
     /// Pixel and mask patches and tiles also record their rectangles in the
     /// change log of the layer (see [`crate::changes`]). A mask replacement
@@ -333,6 +365,12 @@ impl Document {
             }
             EditKind::PixelTiles { id, tiles } => self.raw_pixel_tiles(id, tiles)?,
             EditKind::MaskTiles { id, tiles } => self.raw_mask_tiles(id, tiles)?,
+            EditKind::PixelLayer {
+                id,
+                image,
+                offset,
+                mask,
+            } => self.raw_pixel_layer(id, *image, offset, mask.map(|m| *m))?,
             EditKind::BlendSpace(space) => {
                 let old = std::mem::replace(&mut self.blend_space, space);
                 EditKind::BlendSpace(old)
@@ -390,6 +428,44 @@ impl Document {
         }
         layer.touch_mask_in(changed.unwrap_or_default());
         Ok(EditKind::MaskTiles { id, tiles })
+    }
+
+    /// Replaces the image, the offset, and (if `Some`) the mask of a pixel
+    /// layer. Checks first, so that an error changes nothing. The layer
+    /// gets a new pixel version (and a new mask version if the mask
+    /// changes), with a full change (no change rectangle).
+    fn raw_pixel_layer(
+        &mut self,
+        id: LayerId,
+        image: WorkingImage,
+        offset: (i32, i32),
+        mask: Option<Mask>,
+    ) -> EditorResult<EditKind> {
+        let layer = self.layer_mut(id)?;
+        if mask.is_some() && layer.mask().is_none() {
+            return Err(EditorError::NoMask(id));
+        }
+        let LayerKind::Pixel(p) = layer.kind_mut() else {
+            return Err(EditorError::NotAPixelLayer(id));
+        };
+        let old_image = std::mem::replace(p.image_mut(), image);
+        let old_offset = p.offset();
+        p.set_offset(offset);
+        layer.touch_pixels();
+        let old_mask = match mask {
+            Some(m) => {
+                let old = layer.replace_mask(Some(m));
+                layer.touch_mask();
+                old.map(Box::new)
+            }
+            None => None,
+        };
+        Ok(EditKind::PixelLayer {
+            id,
+            image: Box::new(old_image),
+            offset: old_offset,
+            mask: old_mask,
+        })
     }
 
     fn raw_insert(&mut self, at: Placement, layer: Layer) -> EditorResult<EditKind> {
