@@ -15,6 +15,7 @@ import { MAX_TARGET_LONG_EDGE, MIN_TARGET_LONG_EDGE } from './develop/size';
 import { RANGES, SHARPEN_RANGES } from './develop/settings';
 import { MAX_SIZE, MAX_SPACING, MIN_SIZE, MIN_SPACING } from './editor/brush';
 import { MAX_FLOOD_TOLERANCE } from './editor/flood';
+import { MAX_GRADIENT_STOPS } from './editor/gradient';
 import { GAMMA_MAX, GAMMA_MIN } from './editor/levels';
 import { MAX_DIMENSION, MAX_NAME_LENGTH, MAX_PIXELS, MAX_RESOLUTION_PPI } from './editor/newDocument';
 import { MAX_FEATHER } from './editor/selection';
@@ -63,6 +64,7 @@ describe('brush and selection limits', () => {
     expect(MAX_SPACING).toBe(rustConst(BRUSH, 'MAX_BRUSH_SPACING'));
     expect(MAX_FEATHER).toBe(rustConst(SELECTION, 'MAX_FEATHER_RADIUS'));
     expect(MAX_FLOOD_TOLERANCE).toBe(rustConst('crates/expose-editor/src/flood.rs', 'MAX_FLOOD_TOLERANCE'));
+    expect(MAX_GRADIENT_STOPS).toBe(rustConst('crates/expose-editor/src/gradient.rs', 'MAX_GRADIENT_STOPS'));
   });
 });
 

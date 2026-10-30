@@ -5,12 +5,15 @@
 use expose_core::buffer::WorkingImage;
 use expose_editor::{
     Adjustment, BrushSettings, Document, DocumentSpec, Edit, EditorError, FillSettings,
-    FloodSample, FloodSettings, History, LayerContent, LayerId, Mask, MaskFill, MaskImage,
-    PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget, flood_region,
+    FloodSample, FloodSettings, GradientSpec, GradientStop, GradientTarget, History, LayerContent,
+    LayerId, Mask, MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
+    flood_region,
 };
 
 use super::EditorEngineError;
-use super::dto::{DocumentId, DocumentInfo, EditDto, HistoryInfo, MaskFillId, srgb_to_working};
+use super::dto::{
+    DocumentId, DocumentInfo, EditDto, GradientTargetId, HistoryInfo, MaskFillId, srgb_to_working,
+};
 use super::save::{DocumentOrigin, SavedFiles};
 
 /// The maximum number of undo steps of a document. A delete step keeps the
@@ -307,6 +310,7 @@ impl EditSession {
         let name = edit.step_name();
         let undo = match edit {
             edit @ (EditDto::MagicWand { .. } | EditDto::Fill { .. }) => self.apply_flood(&edit)?,
+            edit @ EditDto::Gradient { .. } => self.apply_gradient(edit)?,
             edit => Some(apply(&mut self.document, edit)?),
         };
         // A fill that changes nothing gives no undo step and no history step.
@@ -394,6 +398,66 @@ impl EditSession {
             }
             _ => Err(EditorEngineError::Internal("not a flood edit")),
         }
+    }
+
+    /// Applies a gradient edit. Returns the inverse, or `None` if the
+    /// gradient changed nothing. The flood sample cache is keyed by the
+    /// document revision, which a change of values advances.
+    fn apply_gradient(&mut self, edit: EditDto) -> Result<Option<Edit>, EditorEngineError> {
+        let EditDto::Gradient {
+            layer_id,
+            target,
+            start,
+            end,
+            shape,
+            stops,
+            opacity,
+            blend_mode,
+            reverse,
+        } = edit
+        else {
+            return Err(EditorEngineError::Internal("not a gradient edit"));
+        };
+        if stops.iter().any(|s| {
+            s.color
+                .iter()
+                .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+        }) {
+            return Err(EditorEngineError::InvalidGradientInput(
+                "a stop color value must be in 0 to 1",
+            ));
+        }
+        let layer = resolve(&self.document, layer_id)?;
+        let mut gradient_stops = Vec::with_capacity(stops.len());
+        let mut values = Vec::with_capacity(stops.len());
+        for s in &stops {
+            gradient_stops.push(GradientStop {
+                position: s.position,
+                color: srgb_to_working(s.color)
+                    .map_err(|_| EditorEngineError::Internal("color space conversion failed"))?,
+                opacity: s.opacity,
+            });
+            // The gray value rule of the UI, on the encoded color.
+            let [r, g, b] = s.color;
+            values.push((0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 1.0));
+        }
+        let spec = GradientSpec {
+            start: (start[0], start[1]),
+            end: (end[0], end[1]),
+            shape: shape.into(),
+            stops: gradient_stops,
+            opacity,
+            blend_mode: blend_mode.into(),
+            reverse,
+        };
+        let target = match target {
+            GradientTargetId::Pixels => GradientTarget::Pixels,
+            GradientTargetId::Mask => GradientTarget::Mask { values },
+        };
+        Ok(self
+            .document
+            .fill_gradient(layer, &spec, &target)?
+            .map(|(undo, _rect)| undo))
     }
 
     /// Finds the region at the seed point. Uses the cached sample when the
@@ -651,7 +715,7 @@ fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineErr
         | EditDto::FeatherSelection { .. }
         | EditDto::MaskFromSelection { .. }) => apply_selection(document, edit)?,
         // `EditSession::edit` handles these (they use the sample cache).
-        EditDto::MagicWand { .. } | EditDto::Fill { .. } => {
+        EditDto::MagicWand { .. } | EditDto::Fill { .. } | EditDto::Gradient { .. } => {
             return Err(EditorEngineError::Internal("not a plain edit"));
         }
     };
@@ -688,7 +752,10 @@ mod tests {
     use expose_editor::{BlendMode, EditorError, GroupIsolation, LayerKind};
 
     use super::*;
-    use crate::editor::dto::{AdjustmentDto, BlendModeId, LayerKindId, LocksDto, SelectionModeId};
+    use crate::editor::dto::{
+        AdjustmentDto, BlendModeId, GradientShapeId, GradientStopDto, GradientTargetId,
+        LayerKindId, LocksDto, SelectionModeId,
+    };
 
     fn session() -> EditSession {
         let image = WorkingImage::new_filled(4, 3, [0.5, 0.25, 0.125, 1.0]).unwrap();
@@ -1951,6 +2018,119 @@ mod tests {
         let steps = s.info(1).history.steps.len();
         // The same fill on the green area changes no pixel.
         s.edit(bucket(bg, 0.0, 0.0, true), None).unwrap();
+        assert_eq!(s.info(1).history.steps.len(), steps);
+    }
+
+    fn gradient(layer_id: u64, target: GradientTargetId, opacity: f32) -> EditDto {
+        let stop = |position: f32, v: f32| GradientStopDto {
+            position,
+            color: [v, v, v],
+            opacity: 1.0,
+        };
+        EditDto::Gradient {
+            layer_id,
+            target,
+            start: [0.0, 0.0],
+            end: [4.0, 0.0],
+            shape: GradientShapeId::Linear,
+            stops: vec![stop(0.0, 0.0), stop(1.0, 1.0)],
+            opacity,
+            blend_mode: BlendModeId::Normal,
+            reverse: false,
+        }
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, reason = "undo restores exact values")]
+    fn gradient_paints_pixels_and_one_undo_restores() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        s.edit(gradient(bg, GradientTargetId::Pixels, 1.0), None)
+            .unwrap();
+        let (left, right) = (layer_pixel(&s, 0, 1), layer_pixel(&s, 3, 1));
+        assert!(left[0] < 0.3 && left[2] < 0.3, "{left:?}");
+        assert!(right[0] > 0.5 && right[2] > 0.5, "{right:?}");
+        let h = s.info(1).history;
+        assert_eq!(h.steps, vec!["Gradient".to_owned()]);
+        s.undo().unwrap();
+        assert_eq!(layer_pixel(&s, 0, 1), RED);
+        assert_eq!(layer_pixel(&s, 3, 1), BLUE);
+    }
+
+    #[test]
+    fn gradient_writes_mask_values_by_luminance() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        s.edit(
+            EditDto::AddMask {
+                layer_id: bg,
+                fill: MaskFillId::Reveal,
+            },
+            None,
+        )
+        .unwrap();
+        s.edit(gradient(bg, GradientTargetId::Mask, 1.0), None)
+            .unwrap();
+        let mask = s.document().layers()[0].mask().unwrap();
+        assert!(mask.image.data()[0] < 0.3, "{}", mask.image.data()[0]);
+        assert!(mask.image.data()[3] > 0.7, "{}", mask.image.data()[3]);
+        assert_eq!(s.info(1).history.steps.len(), 2);
+        s.undo().unwrap();
+        let mask = s.document().layers()[0].mask().unwrap();
+        assert!(mask.image.data().iter().all(|v| (*v - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn gradient_that_changes_nothing_adds_no_step() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        s.edit(gradient(bg, GradientTargetId::Pixels, 0.0), None)
+            .unwrap();
+        assert!(s.info(1).history.steps.is_empty());
+    }
+
+    #[test]
+    fn gradient_rejects_bad_input_without_a_step() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        s.edit(
+            EditDto::AddAdjustment {
+                adjustment: bc(0.2),
+                above_layer_id: None,
+            },
+            None,
+        )
+        .unwrap();
+        let adjustment = s.document().layers()[1].id().get();
+        let steps = s.info(1).history.steps.len();
+        let mut bad_color = gradient(bg, GradientTargetId::Pixels, 1.0);
+        if let EditDto::Gradient { stops, .. } = &mut bad_color {
+            stops[0].color = [2.0, 0.0, 0.0];
+        }
+        let mut one_stop = gradient(bg, GradientTargetId::Pixels, 1.0);
+        if let EditDto::Gradient { stops, .. } = &mut one_stop {
+            stops.truncate(1);
+        }
+        for edit in [
+            gradient(adjustment, GradientTargetId::Pixels, 1.0),
+            gradient(bg, GradientTargetId::Mask, 1.0),
+            bad_color,
+            one_stop,
+        ] {
+            let error = s.edit(edit, None).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    EditorEngineError::InvalidGradientInput(_)
+                        | EditorEngineError::Editor(
+                            EditorError::NotAPixelLayer(_)
+                                | EditorError::NoMask(_)
+                                | EditorError::InvalidGradient(_)
+                        )
+                ),
+                "unexpected error {error:?}"
+            );
+        }
         assert_eq!(s.info(1).history.steps.len(), steps);
     }
 
