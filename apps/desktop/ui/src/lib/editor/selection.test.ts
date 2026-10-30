@@ -12,6 +12,7 @@ import {
   closesPolygon,
   contourPath,
   contoursPath,
+  cycleFill,
   cycleMarquee,
   dragShape,
   isClick,
@@ -146,6 +147,12 @@ describe('tool helpers', () => {
     expect(cycleMarquee('hand')).toBe('rectSelect');
     expect(cycleMarquee('rectSelect')).toBe('ellipseSelect');
     expect(cycleMarquee('ellipseSelect')).toBe('rectSelect');
+  });
+  it('cycles the fill tools', () => {
+    expect(cycleFill('hand')).toBe('paintBucket');
+    expect(cycleFill('hand', 'gradient')).toBe('gradient');
+    expect(cycleFill('paintBucket')).toBe('gradient');
+    expect(cycleFill('gradient')).toBe('paintBucket');
   });
   it('cycles the lasso tools', () => {
     expect(cycleLasso('hand')).toBe('lasso');

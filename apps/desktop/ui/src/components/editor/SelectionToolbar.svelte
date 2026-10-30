@@ -2,7 +2,7 @@
   The tool strip and the selection options of the Editor canvas.
 
   - Tools: Hand (H), Rotate view (R), Rectangle and Ellipse marquee (M cycles), Polygon lasso (L),
-    Magic wand (W), Paint bucket (G), Brush (B), Eraser (E). The paint tools show their options in `BrushOptions`.
+    Magic wand (W), Paint bucket and Gradient (G), Brush (B), Eraser (E). The paint tools show their options in `BrushOptions`.
     They are disabled, with the reason as the tooltip, when the selected layer
     cannot take paint.
   - Options of the selection tools: feather (0 to 250 px) and anti-alias.
@@ -15,6 +15,7 @@
   import type { EditorStore } from '../../lib/stores/editor.svelte';
   import BrushOptions from './BrushOptions.svelte';
   import EyedropperOptions from './EyedropperOptions.svelte';
+  import GradientOptions from './GradientOptions.svelte';
   import MagicWandOptions from './MagicWandOptions.svelte';
   import PaintBucketOptions from './PaintBucketOptions.svelte';
 
@@ -41,6 +42,7 @@
     { id: 'polygonLasso', label: 'Polygon', title: 'Polygon lasso (L). Click for points. Click the first point, double-click, or press Enter to close.' },
     { id: 'magicWand', label: 'Magic wand', title: 'Magic wand (W). Click to select similar pixels. Shift adds, Alt subtracts, Shift+Alt intersects.' },
     { id: 'paintBucket', label: 'Paint bucket', title: 'Paint bucket (G). Click to fill similar pixels with the foreground color.' },
+    { id: 'gradient', label: 'Gradient', title: 'Gradient (G). Drag from the start to the end. Shift snaps to 45° steps. Escape cancels.' },
     { id: 'eyedropper', label: 'Eyedropper', title: 'Eyedropper (I). Click to pick the foreground color. Alt+click picks the background color.' },
   ];
 
@@ -84,6 +86,10 @@
 
   {#if editor.tool === 'paintBucket'}
     <PaintBucketOptions {editor} />
+  {/if}
+
+  {#if editor.tool === 'gradient'}
+    <GradientOptions {editor} />
   {/if}
 
   {#if selecting}

@@ -86,6 +86,7 @@ export interface EditorCommands {
   openFeatherDialog(): void;
   cycleMarquee(): void;
   cycleLasso(): void;
+  cycleFill(): void;
   setTool(tool: EditorTool): void;
   selectPaintTool(tool: 'brush' | 'eraser'): void;
   stepBrushSize(direction: 1 | -1): void;
@@ -128,7 +129,7 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     { id: EDITOR_ACTION.eyedropperTool, label: 'Editor: eyedropper tool', scope: 'editor', defaultBinding: 'I', run: () => commands.setTool('eyedropper') },
     // In the editor scope, `G` takes precedence over the global Library grid key.
     { id: EDITOR_ACTION.magicWandTool, label: 'Editor: magic wand tool', scope: 'editor', defaultBinding: 'W', run: () => commands.setTool('magicWand') },
-    { id: EDITOR_ACTION.paintBucketTool, label: 'Editor: paint bucket tool', scope: 'editor', defaultBinding: 'G', run: () => commands.setTool('paintBucket') },
+    { id: EDITOR_ACTION.paintBucketTool, label: 'Editor: paint bucket / gradient tool', scope: 'editor', defaultBinding: 'G', run: () => commands.cycleFill() },
     { id: EDITOR_ACTION.brushSizeDown, label: 'Editor: brush smaller', scope: 'editor', defaultBinding: '[', allowRepeat: true, run: () => commands.stepBrushSize(-1) },
     { id: EDITOR_ACTION.brushSizeUp, label: 'Editor: brush larger', scope: 'editor', defaultBinding: ']', allowRepeat: true, run: () => commands.stepBrushSize(1) },
     // Shift+[ and Shift+] give the keys `{` and `}`. The key registry ignores Shift for symbols, so "Shift+[" would be the same chord as "[".

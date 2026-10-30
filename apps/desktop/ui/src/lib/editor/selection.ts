@@ -9,7 +9,27 @@ import type { SelectionModeId, SelectionShapeDto } from './api';
 import { screenToCanvas, type Point, type ViewMapping } from './view';
 
 /** The tools of the Editor canvas. */
-export type EditorTool = 'hand' | 'rotate' | 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso' | 'brush' | 'eraser' | 'eyedropper' | 'magicWand' | 'paintBucket';
+export type EditorTool = 'hand' | 'rotate' | 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso' | 'brush' | 'eraser' | 'eyedropper' | 'magicWand' | 'paintBucket' | 'gradient';
+
+/** The tools that `G` switches between. */
+export type FillTool = 'paintBucket' | 'gradient';
+
+/** True for the paint bucket and the gradient tool. */
+export function isFillTool(tool: EditorTool): tool is FillTool {
+  return tool === 'paintBucket' || tool === 'gradient';
+}
+
+/**
+ * The next tool when `G` is pressed. While a fill tool is active, it
+ * switches to the other one. Otherwise it gives `last`, the fill tool that
+ * was active most recently.
+ */
+export function cycleFill(tool: EditorTool, last: FillTool = 'paintBucket'): FillTool {
+  if (tool === 'paintBucket') {
+    return 'gradient';
+  }
+  return tool === 'gradient' ? 'paintBucket' : last;
+}
 
 /** The two lasso tools: freehand and polygon. */
 export type LassoTool = 'lasso' | 'polygonLasso';
