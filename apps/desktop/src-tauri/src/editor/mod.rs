@@ -149,7 +149,8 @@ fn editor_error_kind(error: &EditorError) -> ErrorKind {
         | EditorError::DuplicateId(_)
         | EditorError::InvalidView(_)
         | EditorError::InvalidBrush(_)
-        | EditorError::InvalidFill(_) => ErrorKind::InvalidInput,
+        | EditorError::InvalidFill(_)
+        | EditorError::InvalidGradient(_) => ErrorKind::InvalidInput,
     }
 }
 
