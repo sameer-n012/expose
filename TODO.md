@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; 2026-10-29)
+- (none — all agent branches are merged; 2026-10-30)
 
 ## Next (suggested order)
 
@@ -32,6 +32,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
    - Follow-ups (S): optional levels input bar with draggable handles; the develop defaults (`DEFAULTS`, `SHARPEN_DEFAULTS`, `CROP_DEFAULTS`) and the levels `MIN_INPUT_SPAN` are not checked against Rust.
 9. [ ] **editor-flood-check** (operator) — check in the real webview: magic wand (`W`): tolerance, contiguous, sample all layers, anti-alias; Shift / Alt / Shift+Alt modes; the outline after each click; a second click is fast (cached sample); toast for "selected layer" sampling on an adjustment layer. Paint bucket (`G`): foreground color, opacity, mode, tolerance, contiguous, sample all layers; a selection limits the fill; the transparency lock keeps alpha; one undo step; toast with the mask as paint target. New module keys `Mod+Alt+1/2/3` (Library grid, Develop, Editor) work in all modules; `G` in the Editor is the bucket. After the check, mark in `FEATURES.md`: "Magic wand (tolerance, contiguous, sample all layers)" and "Paint bucket" (ADR 0027).
    - Follow-ups: GPU composite readback for the "sample all layers" sample (first click 1.37 s at 4096² with the CPU composite; needs the edit on the engine thread with the GPU; O); faster keys (compute keys only for visited pixels, or on the GPU; layer sample 75–145 ms at 4096²); bucket fill on a layer mask; wand sample size (3×3 / 5×5); bucket Alt+click samples the foreground color.
+10. [ ] **editor-gradient-check** (operator) — check in the real webview: gradient tool (`G` switches between the bucket and the gradient); drag line with handles, Shift snaps to 45°, Escape cancels, a short drag does nothing; the five shapes (linear, radial, angle, reflected, diamond) and Reverse; presets (foreground to background, foreground to transparent, black to white); the gradient editor (add a stop by a click on the bar, drag, remove by a drag down or Delete, at least 2 stops, color / opacity / position inputs, OK / Cancel); opacity and mode; a selection limits the gradient; the transparency lock; the mask as paint target (gray values, Mode disabled); one undo step; banding in an 8-bit export. After the check, mark "Gradient tool (linear, radial, angle, reflected, diamond; gradient editor)" in `FEATURES.md` (ADR 0028).
+   - Follow-ups: fills with a non-Normal blend mode take ~1.1 s at 4096² (`PaintBlend::source` calls the transfer function six times per pixel; a lookup table would help the brush, bucket, and gradient; O); measure the bucket fill again (ADR 0027 had 40–50 ms, the shared fill core measured 135–170 ms on a loaded machine); the preview swatch interpolates in gamma sRGB also for a document in linear blend space; dither (if the check finds banding); save gradient presets between sessions.
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
@@ -64,6 +66,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-gradient** (PRs #95–#97, ADR 0028) — crate `expose_editor::gradient` (`GradientSpec`, `GradientTarget`, `Document::fill_gradient`, `EditorError::InvalidGradient`; one fill core with the bucket in `flood.rs`); UI tool `gradient` (`G` cycles bucket ↔ gradient), drag overlay, `GradientOptions.svelte`, `GradientEditorDialog.svelte`, `lib/editor/gradient.ts`; shell `EditDto::Gradient` (mask value = luminance of the stop color), `EditorEngineError::InvalidGradientInput`. Waits for the operator check (item 10 in "Next").
 
 - [x] **editor-magic-wand + editor-paint-bucket** (PRs #91–#93, ADR 0027) — crate `expose_editor::flood` (`FloodSample`, `flood_region`, `Document::select_region`, `Document::fill_region`, `EditorError::InvalidFill`; brush and fill share `Mode::paint`); UI tools `W` / `G` (`lib/editor/flood.ts`, `MagicWandOptions.svelte`, `PaintBucketOptions.svelte`), global module keys `Mod+Alt+1/2/3`; shell `EditDto::MagicWand` / `Fill`, flood sample cache per session (source + revision), `EditorEngineError::InvalidFlood`. Waits for the operator check (item 9 in "Next").
 
