@@ -814,6 +814,51 @@ pub enum EditDto {
     /// Sets the mask of a layer from the selection. It is an error if
     /// there is no selection.
     MaskFromSelection { layer_id: u64 },
+    /// Selects the pixels that are similar to the pixel at (`x`, `y`)
+    /// (magic wand). The point is in canvas pixels.
+    MagicWand {
+        /// The horizontal seed position (floored).
+        x: f64,
+        /// The vertical seed position (floored).
+        y: f64,
+        /// How the region combines with the selection.
+        mode: SelectionModeId,
+        /// The color distance limit, `0` to `MAX_FLOOD_TOLERANCE`.
+        tolerance: f32,
+        /// `true` to select only pixels that connect to the seed.
+        contiguous: bool,
+        /// `true` to soften the edge of the region.
+        anti_alias: bool,
+        /// `true` to sample the composite of all layers.
+        sample_all_layers: bool,
+        /// The layer to sample when `sample_all_layers` is `false`.
+        layer_id: Option<u64>,
+    },
+    /// Fills the pixels that are similar to the pixel at (`x`, `y`) with a
+    /// color (paint bucket). `color` is gamma-encoded sRGB (0 to 1).
+    Fill {
+        /// The pixel layer to fill. It is also the sample layer when
+        /// `sample_all_layers` is `false`.
+        layer_id: u64,
+        /// The horizontal seed position (floored).
+        x: f64,
+        /// The vertical seed position (floored).
+        y: f64,
+        /// The encoded red, green, and blue values.
+        color: [f32; 3],
+        /// The maximum coverage of the fill, 0 to 1.
+        opacity: f32,
+        /// How the fill mixes with the pixels below.
+        blend_mode: BlendModeId,
+        /// The color distance limit, `0` to `MAX_FLOOD_TOLERANCE`.
+        tolerance: f32,
+        /// `true` to fill only pixels that connect to the seed.
+        contiguous: bool,
+        /// `true` to soften the edge of the region.
+        anti_alias: bool,
+        /// `true` to sample the composite of all layers.
+        sample_all_layers: bool,
+    },
 }
 
 /// The start state of a new layer mask.
@@ -853,6 +898,8 @@ impl EditDto {
             Self::InvertSelection => "Invert Selection",
             Self::FeatherSelection { .. } => "Feather Selection",
             Self::MaskFromSelection { .. } => "Mask from Selection",
+            Self::MagicWand { .. } => "Magic Wand",
+            Self::Fill { .. } => "Paint Bucket",
         }
     }
 }
@@ -910,7 +957,7 @@ impl StrokeTargetDto {
 }
 
 /// Converts a gamma-encoded sRGB color to linear Rec. 2020.
-fn srgb_to_working(color: [f32; 3]) -> Result<[f32; 3], CommandError> {
+pub(super) fn srgb_to_working(color: [f32; 3]) -> Result<[f32; 3], CommandError> {
     let transfer = ColorSpaceId::Srgb.transfer();
     let matrix = ColorSpaceId::Srgb
         .to_working()
@@ -1268,6 +1315,62 @@ mod tests {
         assert_eq!(layer_id, 4);
         assert!(locks.pixels && !locks.all);
         assert!(Locks::from(locks).pixels);
+    }
+
+    #[test]
+    fn flood_edits_parse_and_have_step_names() {
+        let wand: EditDto = serde_json::from_value(json!({
+            "type": "magicWand", "x": 3.5, "y": 4.0, "mode": "add", "tolerance": 32,
+            "contiguous": true, "antiAlias": false, "sampleAllLayers": false, "layerId": 7
+        }))
+        .unwrap();
+        assert_eq!(
+            wand,
+            EditDto::MagicWand {
+                x: 3.5,
+                y: 4.0,
+                mode: SelectionModeId::Add,
+                tolerance: 32.0,
+                contiguous: true,
+                anti_alias: false,
+                sample_all_layers: false,
+                layer_id: Some(7),
+            }
+        );
+        assert_eq!(wand.step_name(), "Magic Wand");
+        // `layerId` may be missing or null.
+        let all: EditDto = serde_json::from_value(json!({
+            "type": "magicWand", "x": 0, "y": 0, "mode": "replace", "tolerance": 0,
+            "contiguous": false, "antiAlias": true, "sampleAllLayers": true, "layerId": null
+        }))
+        .unwrap();
+        assert!(matches!(all, EditDto::MagicWand { layer_id: None, .. }));
+        let fill: EditDto = serde_json::from_value(json!({
+            "type": "fill", "layerId": 2, "x": 1, "y": 2, "color": [1, 0.5, 0],
+            "opacity": 0.5, "blendMode": "multiply", "tolerance": 10, "contiguous": true,
+            "antiAlias": true, "sampleAllLayers": false
+        }))
+        .unwrap();
+        assert_eq!(
+            fill,
+            EditDto::Fill {
+                layer_id: 2,
+                x: 1.0,
+                y: 2.0,
+                color: [1.0, 0.5, 0.0],
+                opacity: 0.5,
+                blend_mode: BlendModeId::Multiply,
+                tolerance: 10.0,
+                contiguous: true,
+                anti_alias: true,
+                sample_all_layers: false,
+            }
+        );
+        assert_eq!(fill.step_name(), "Paint Bucket");
+        let back = serde_json::to_value(&fill).unwrap();
+        assert_eq!(back["type"], "fill");
+        assert_eq!(back["sampleAllLayers"], false);
+        assert_eq!(back["blendMode"], "multiply");
     }
 
     #[test]
