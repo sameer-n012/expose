@@ -153,7 +153,8 @@ fn editor_error_kind(error: &EditorError) -> ErrorKind {
         | EditorError::InvalidView(_)
         | EditorError::InvalidBrush(_)
         | EditorError::InvalidFill(_)
-        | EditorError::InvalidGradient(_) => ErrorKind::InvalidInput,
+        | EditorError::InvalidGradient(_)
+        | EditorError::InvalidTransform(_) => ErrorKind::InvalidInput,
     }
 }
 

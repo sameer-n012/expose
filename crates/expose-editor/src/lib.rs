@@ -27,6 +27,8 @@
 //!   [`Document::fill_region`]).
 //! - [`gradient`]: gradient fills (linear, radial, angle, reflected,
 //!   diamond) on pixel layers and masks ([`Document::fill_gradient`]).
+//! - [`transform`]: free transform of a pixel layer and its mask with an
+//!   affine matrix ([`Affine`], [`Document::transform_layer`]) on the CPU.
 //! - [`history`]: undo and redo. [`History::push_merge`] makes one undo
 //!   step from a gesture (for example, a slider drag).
 //! - [`mod@file`]: the native layered document file (`.exdoc`):
@@ -87,6 +89,7 @@ pub mod history;
 pub mod layer;
 pub mod ops;
 pub mod selection;
+pub mod transform;
 pub mod version;
 
 pub use adjust::{
@@ -121,6 +124,7 @@ pub use ops::Edit;
 pub use selection::{
     MAX_FEATHER_RADIUS, MAX_POLYGON_POINTS, MAX_SELECTION_COORD, SelectionMode, SelectionShape,
 };
+pub use transform::{Affine, CanvasRect, Interpolation, MAX_FILTER_RADIUS};
 
 /// The name of this crate.
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");

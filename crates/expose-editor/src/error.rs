@@ -175,6 +175,12 @@ pub enum EditorError {
     #[error("invalid gradient: {0}")]
     InvalidGradient(&'static str),
 
+    /// A free transform is not valid (for example, a matrix with a value
+    /// that is not finite, a singular matrix, or a layer with no visible
+    /// pixels, see [`crate::transform`]).
+    #[error("invalid transform: {0}")]
+    InvalidTransform(&'static str),
+
     /// A document file cannot be read or written (see [`crate::file`]).
     #[error("document file: {0}")]
     File(#[from] FileError),
