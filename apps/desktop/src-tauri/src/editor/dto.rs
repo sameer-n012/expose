@@ -9,9 +9,9 @@ use expose_core::color::ColorSpaceId;
 use expose_core::develop::CurvePoint;
 use expose_editor::{
     Adjustment, Background, BitDepth, BlendMode, BlendSpace, BrightnessContrast, BrushSettings,
-    ColorMode, Curves, Document, DocumentSpec, GroupIsolation, HueSaturation, Layer, LayerKind,
-    Levels, LevelsChannel, Locks, MAX_DIMENSION, MAX_PIXELS, SelectionMode, SelectionShape,
-    StrokePoint, StrokeTarget,
+    ColorMode, Curves, Document, DocumentSpec, GradientShape, GroupIsolation, HueSaturation, Layer,
+    LayerKind, Levels, LevelsChannel, Locks, MAX_DIMENSION, MAX_PIXELS, SelectionMode,
+    SelectionShape, StrokePoint, StrokeTarget,
 };
 use serde::{Deserialize, Serialize};
 
@@ -859,6 +859,74 @@ pub enum EditDto {
         /// `true` to sample the composite of all layers.
         sample_all_layers: bool,
     },
+    /// Fills a pixel layer or a layer mask with a gradient. Stop colors are
+    /// gamma-encoded sRGB (0 to 1). The selection limits the fill.
+    Gradient {
+        /// The layer to fill.
+        layer_id: u64,
+        /// What the gradient changes.
+        target: GradientTargetId,
+        /// The start point in canvas pixels.
+        start: [f64; 2],
+        /// The end point in canvas pixels.
+        end: [f64; 2],
+        /// The shape of the gradient.
+        shape: GradientShapeId,
+        /// The color stops.
+        stops: Vec<GradientStopDto>,
+        /// The maximum coverage of the fill, 0 to 1.
+        opacity: f32,
+        /// How the fill mixes with the pixels below (pixel target only).
+        blend_mode: BlendModeId,
+        /// `true` to run the stops from the end to the start.
+        reverse: bool,
+    },
+}
+
+/// What a gradient edit changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GradientTargetId {
+    /// The pixels of a pixel layer.
+    Pixels,
+    /// The mask of a layer (the gray value of each stop color).
+    Mask,
+}
+
+/// The shape of a gradient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(missing_docs, reason = "the variants have the names of the shapes")]
+pub enum GradientShapeId {
+    Linear,
+    Radial,
+    Angle,
+    Reflected,
+    Diamond,
+}
+
+impl From<GradientShapeId> for GradientShape {
+    fn from(id: GradientShapeId) -> Self {
+        match id {
+            GradientShapeId::Linear => Self::Linear,
+            GradientShapeId::Radial => Self::Radial,
+            GradientShapeId::Angle => Self::Angle,
+            GradientShapeId::Reflected => Self::Reflected,
+            GradientShapeId::Diamond => Self::Diamond,
+        }
+    }
+}
+
+/// One color stop of a gradient edit.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GradientStopDto {
+    /// The position on the gradient line, 0 to 1.
+    pub position: f32,
+    /// The encoded red, green, and blue values (0 to 1).
+    pub color: [f32; 3],
+    /// The opacity of the stop, 0 to 1.
+    pub opacity: f32,
 }
 
 /// The start state of a new layer mask.
@@ -900,6 +968,7 @@ impl EditDto {
             Self::MaskFromSelection { .. } => "Mask from Selection",
             Self::MagicWand { .. } => "Magic Wand",
             Self::Fill { .. } => "Paint Bucket",
+            Self::Gradient { .. } => "Gradient",
         }
     }
 }
@@ -1371,6 +1440,66 @@ mod tests {
         assert_eq!(back["type"], "fill");
         assert_eq!(back["sampleAllLayers"], false);
         assert_eq!(back["blendMode"], "multiply");
+    }
+
+    #[test]
+    fn gradient_edit_parses_and_round_trips() {
+        let shapes = [
+            ("linear", GradientShapeId::Linear),
+            ("radial", GradientShapeId::Radial),
+            ("angle", GradientShapeId::Angle),
+            ("reflected", GradientShapeId::Reflected),
+            ("diamond", GradientShapeId::Diamond),
+        ];
+        for (name, id) in shapes {
+            for (target_name, target) in [
+                ("pixels", GradientTargetId::Pixels),
+                ("mask", GradientTargetId::Mask),
+            ] {
+                let edit: EditDto = serde_json::from_value(json!({
+                    "type": "gradient", "layerId": 4, "target": target_name,
+                    "start": [1, 2], "end": [30.5, 2], "shape": name,
+                    "stops": [
+                        {"position": 0, "color": [0, 0, 0], "opacity": 1},
+                        {"position": 1, "color": [1, 0.5, 0], "opacity": 0.25}
+                    ],
+                    "opacity": 0.5, "blendMode": "multiply", "reverse": true
+                }))
+                .unwrap();
+                assert_eq!(
+                    edit,
+                    EditDto::Gradient {
+                        layer_id: 4,
+                        target,
+                        start: [1.0, 2.0],
+                        end: [30.5, 2.0],
+                        shape: id,
+                        stops: vec![
+                            GradientStopDto {
+                                position: 0.0,
+                                color: [0.0, 0.0, 0.0],
+                                opacity: 1.0
+                            },
+                            GradientStopDto {
+                                position: 1.0,
+                                color: [1.0, 0.5, 0.0],
+                                opacity: 0.25
+                            },
+                        ],
+                        opacity: 0.5,
+                        blend_mode: BlendModeId::Multiply,
+                        reverse: true,
+                    }
+                );
+                assert_eq!(edit.step_name(), "Gradient");
+                let back = serde_json::to_value(&edit).unwrap();
+                assert_eq!(back["type"], "gradient");
+                assert_eq!(back["shape"], name);
+                assert_eq!(back["target"], target_name);
+                assert_eq!(back["layerId"], 4);
+                assert_eq!(back["blendMode"], "multiply");
+            }
+        }
     }
 
     #[test]
