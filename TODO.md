@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; 2026-10-30)
+- (none — all agent branches are merged; 2026-11-05)
 
 ## Next (suggested order)
 
@@ -34,6 +34,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
    - Follow-ups: GPU composite readback for the "sample all layers" sample (first click 1.37 s at 4096² with the CPU composite; needs the edit on the engine thread with the GPU; O); faster keys (compute keys only for visited pixels, or on the GPU; layer sample 75–145 ms at 4096²); bucket fill on a layer mask; wand sample size (3×3 / 5×5); bucket Alt+click samples the foreground color.
 10. [ ] **editor-gradient-check** (operator) — check in the real webview: gradient tool (`G` switches between the bucket and the gradient); drag line with handles, Shift snaps to 45°, Escape cancels, a short drag does nothing; the five shapes (linear, radial, angle, reflected, diamond) and Reverse; presets (foreground to background, foreground to transparent, black to white); the gradient editor (add a stop by a click on the bar, drag, remove by a drag down or Delete, at least 2 stops, color / opacity / position inputs, OK / Cancel); opacity and mode; a selection limits the gradient; the transparency lock; the mask as paint target (gray values, Mode disabled); one undo step; banding in an 8-bit export. After the check, mark "Gradient tool (linear, radial, angle, reflected, diamond; gradient editor)" in `FEATURES.md` (ADR 0028).
    - Follow-ups: fills with a non-Normal blend mode take ~1.1 s at 4096² (`PaintBlend::source` calls the transfer function six times per pixel; a lookup table would help the brush, bucket, and gradient; O); measure the bucket fill again (ADR 0027 had 40–50 ms, the shared fill core measured 135–170 ms on a loaded machine); the preview swatch interpolates in gamma sRGB also for a document in linear blend space; dither (if the check finds banding); save gradient presets between sessions.
+11. [ ] **editor-transform-check** (operator) — check in the real webview: `Mod+T` and the toolbar button on a pixel layer; toast on an empty layer and on another layer kind; box, 8 handles, and reference point; move, scale (Shift aspect, Alt center), rotate (Shift 15°), reference point drag and the 3×3 grid; arrow keys; X, Y, W, H, angle inputs; interpolation; Enter, Commit, Escape, Cancel; undo during the mode only cancels; a tool, layer, or tab change cancels; one undo step after a commit; the mask moves with the layer; pixels moved off the canvas come back with a later move; a whole-pixel move does not blur; all of this also in a rotated view; preview speed at a large size and for a layer in a group; the time and the UI state during a commit at 4096² (about 1.2 s). After the check, mark "Free transform (move, scale, rotate) with reference point" in `FEATURES.md` (ADR 0029).
+   - Follow-ups: transform of the selected pixels (floating selection); a clear toast for a locked layer (now the generic edit error; S); run the commit off the render thread if the check shows a stall (O); faster preview for a layer in a group; a preview for a layer larger than the GPU texture limit (now an error); shear can alias a little in the downscale filter; the engine GPU tests return early on a machine with no GPU (check that they run in `scripts/check.sh`; S).
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
@@ -66,6 +68,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-free-transform** (PRs #99–#102, ADR 0029) — crate `expose_editor::transform` (`Affine`, `Interpolation`, `CanvasRect`, `Document::layer_content_bounds`, `Document::transform_layer`, `EditKind::PixelLayer`, `EditorError::InvalidTransform`); GPU `GpuCompositor::render_view_transformed` + `LayerTransformPreview` (transform mode in `blend_layer.wgsl`; 29 ms per frame at 4096², 10 layers); UI `Mod+T` mode (`lib/editor/transform.ts`, `TransformOptions.svelte`, overlay in `EditorView.svelte`); shell `editor_layer_bounds`, `editor_render` `transformPreview`, `EditDto::TransformLayer`, `EditorEngineError::InvalidRender`. Waits for the operator check (item 11 in "Next").
 
 - [x] **editor-gradient** (PRs #95–#97, ADR 0028) — crate `expose_editor::gradient` (`GradientSpec`, `GradientTarget`, `Document::fill_gradient`, `EditorError::InvalidGradient`; one fill core with the bucket in `flood.rs`); UI tool `gradient` (`G` cycles bucket ↔ gradient), drag overlay, `GradientOptions.svelte`, `GradientEditorDialog.svelte`, `lib/editor/gradient.ts`; shell `EditDto::Gradient` (mask value = luminance of the stop color), `EditorEngineError::InvalidGradientInput`. Waits for the operator check (item 10 in "Next").
 
