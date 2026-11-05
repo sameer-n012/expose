@@ -5,6 +5,8 @@
     Magic wand (W), Paint bucket and Gradient (G), Brush (B), Eraser (E). The paint tools show their options in `BrushOptions`.
     They are disabled, with the reason as the tooltip, when the selected layer
     cannot take paint.
+  - Transform button (Mod+T): starts the free transform. `TransformOptions`
+    then replaces the tool options until the transform ends.
   - Options of the selection tools: feather (0 to 250 px) and anti-alias.
   - Select commands: Select All, Deselect, Invert, Feather…. The last three
     need a selection.
@@ -18,6 +20,7 @@
   import GradientOptions from './GradientOptions.svelte';
   import MagicWandOptions from './MagicWandOptions.svelte';
   import PaintBucketOptions from './PaintBucketOptions.svelte';
+  import TransformOptions from './TransformOptions.svelte';
 
   interface Props {
     editor: EditorStore;
@@ -72,6 +75,20 @@
     {/each}
   </div>
 
+  <div class="group" role="group" aria-label="Transform">
+    <button
+      type="button"
+      aria-pressed={editor.transform !== null}
+      title="Free transform (Mod+T). Move, scale, and rotate the selected pixel layer. Enter applies. Escape cancels."
+      onclick={() => void editor.startTransform()}
+    >
+      Transform
+    </button>
+  </div>
+
+  {#if editor.transform !== null}
+    <TransformOptions {editor} />
+  {:else}
   {#if paintTool !== null}
     <BrushOptions {editor} tool={paintTool} />
   {/if}
@@ -114,6 +131,7 @@
         Anti-alias
       </label>
     </div>
+  {/if}
   {/if}
 
   <div class="group" role="group" aria-label="Select">

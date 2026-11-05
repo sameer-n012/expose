@@ -36,6 +36,14 @@
   - Gradient: a drag from start to end shows a line with two handles; Shift
     snaps the angle to 45° steps; Escape cancels; release sends one edit. A
     drag as short as a click sends nothing.
+  - Free transform (ADR 0029, `Mod+T`): while it runs, the transform takes all
+    left-button events. Inside the box: move. On a handle: scale about the
+    reference point (Shift keeps the aspect ratio, Alt scales about the box
+    center). Near a corner outside the box: rotate about the reference point
+    (Shift snaps to 15°). On the reference marker: move the marker (the
+    pixels stay). Arrow keys move 1 px (Shift: 10 px). Enter commits, Escape
+    cancels. A tool change, another layer, or another tab cancels. Frame
+    requests carry `transformPreview` while it runs.
   - Eyedropper: a click samples the color under the pointer into the
     foreground color; Alt+click sets the background color. The options are
     the sample size and the source (all layers or the selected layer).
@@ -62,6 +70,25 @@
     repeatsLastPoint,
   } from '../../lib/editor/selection';
   import { snapAngle } from '../../lib/editor/gradient';
+  import {
+    applyMatrix,
+    boxCorners,
+    boxOutline,
+    cursorFor,
+    HANDLES,
+    handlePoint,
+    hitTest,
+    invertMatrix,
+    moveReference,
+    nudgeStep,
+    referenceImage,
+    rotateByPointer,
+    scaleByHandle,
+    stateMatrix,
+    translate,
+    type HandleId,
+    type TransformState,
+  } from '../../lib/editor/transform';
   import { beginRotateDrag, cancelRotateDrag, dragRotation, rotationLabel, type RotateDrag } from '../../lib/editor/rotate';
   import {
     canvasToScreen,
@@ -75,7 +102,7 @@
     type View,
   } from '../../lib/editor/view';
   import { isEditableTarget } from '../../lib/shortcuts/editable';
-  import { editorApi, type SelectionModeId } from '../../lib/editor/api';
+  import type { SelectionModeId } from '../../lib/editor/api';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
   import DocumentTabs from './DocumentTabs.svelte';
   import FeatherDialog from './FeatherDialog.svelte';
@@ -152,7 +179,8 @@
   }
 
   const client = new EditorFrameClient({
-    render: (documentId, area) => editorApi.render(documentId, area),
+    // The store's API, so a test can replace the render call.
+    render: (documentId, area) => editor.api.render(documentId, area),
     // The store drops the old document before it closes it in the shell.
     isCurrent: (documentId) => editor.info?.documentId === documentId,
     // A frame that shows a mask can fail after the layer lost its mask: not an error then.
@@ -194,7 +222,10 @@
     void info.revision;
     const showMaskLayerId = editor.showMaskLayerId;
     const ratio = typeof window === 'undefined' ? 1 : window.devicePixelRatio;
-    client.request({ ...renderArea(view, viewport, ratio), showMaskLayerId });
+    // Reading the preview here makes every change of the transform ask for a new frame.
+    const transformPreview = editor.transformPreview;
+    const area = renderArea(view, viewport, ratio);
+    client.request(transformPreview === null ? { ...area, showMaskLayerId } : { ...area, showMaskLayerId, transformPreview });
   }
 
   // Every document or view change asks for a new frame.
@@ -343,6 +374,144 @@
     }
     editor.gradientFrom(current.start, gradientEnd(event, node, view, current.start));
   }
+
+  // ---- Free transform (ADR 0029) ----
+
+  /** A drag of the free transform. `grab` is the canvas point at the pointer-down. */
+  type TransformDrag =
+    | { readonly kind: 'move' | 'rotate'; readonly start: TransformState; readonly grab: Point; readonly pointerId: number }
+    | { readonly kind: 'scale'; readonly handle: HandleId; readonly start: TransformState; readonly grab: Point; readonly pointerId: number }
+    | { readonly kind: 'ref'; readonly start: TransformState; readonly grab: Point; readonly pointerId: number };
+  let transformDrag = $state.raw<TransformDrag | null>(null);
+
+  /** The transform ended (commit, cancel, tab, tool): forget the drag. */
+  $effect(() => {
+    if (editor.transform === null) {
+      untrack(() => (transformDrag = null));
+    }
+  });
+
+  /**
+   * Pointer-down while the transform runs. Returns true if the transform took
+   * the event (all left-button events, also those outside the box).
+   */
+  function transformDown(event: PointerEvent & { currentTarget: HTMLDivElement }): boolean {
+    const session = editor.transform;
+    const view = editor.view;
+    if (session === null || view === null || event.button !== 0 || spaceDown) {
+      return false;
+    }
+    event.preventDefault();
+    if (editor.transformBusy || transformDrag !== null) {
+      return true;
+    }
+    const grab = screenToCanvas(view, local(event, event.currentTarget));
+    const hit = hitTest(session.state, grab, view.zoom);
+    if (hit === null) {
+      return true;
+    }
+    const base = { start: session.state, grab, pointerId: event.pointerId };
+    transformDrag = hit.kind === 'handle' ? { kind: 'scale', handle: hit.handle, ...base } : { kind: hit.kind, ...base };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    return true;
+  }
+
+  function transformMove(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
+    const drag = transformDrag;
+    const view = editor.view;
+    if (drag === null || view === null || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    const p = screenToCanvas(view, local(event, event.currentTarget));
+    switch (drag.kind) {
+      case 'move':
+        editor.updateTransform(translate(drag.start, p.x - drag.grab.x, p.y - drag.grab.y));
+        break;
+      case 'scale':
+        editor.updateTransform(scaleByHandle(drag.start, drag.handle, drag.grab, p, { keepAspect: event.shiftKey, aboutCenter: event.altKey }));
+        break;
+      case 'rotate':
+        editor.updateTransform(rotateByPointer(drag.start, drag.grab, p, event.shiftKey));
+        break;
+      case 'ref': {
+        // The marker follows the pointer. The matrix does not change.
+        const inverse = invertMatrix(stateMatrix(drag.start));
+        if (inverse !== null) {
+          const marker = referenceImage(drag.start);
+          editor.updateTransform(moveReference(drag.start, applyMatrix(inverse, { x: p.x + marker.x - drag.grab.x, y: p.y + marker.y - drag.grab.y })));
+        }
+        break;
+      }
+    }
+  }
+
+  function transformUp(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
+    const drag = transformDrag;
+    if (drag === null || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    // A cancelled pointer goes back to the state at the start of the drag.
+    if (event.type === 'pointercancel') {
+      editor.updateTransform(drag.start);
+    }
+    transformDrag = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  }
+
+  /** Keys of the transform mode: Enter, Escape, arrows. Returns true if the key was used. */
+  function transformKey(event: KeyboardEvent): boolean {
+    const session = editor.transform;
+    if (session === null || event.type !== 'keydown' || isEditableTarget(event.target) || event.metaKey || event.ctrlKey) {
+      return false;
+    }
+    if (event.key === 'Enter') {
+      void editor.commitTransform();
+    } else if (event.key === 'Escape') {
+      editor.cancelTransform();
+    } else {
+      const step = nudgeStep(event.shiftKey);
+      const arrows: Record<string, [number, number]> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+      const move = arrows[event.key];
+      if (move === undefined) {
+        return false;
+      }
+      editor.updateTransform(translate(session.state, move[0], move[1]));
+    }
+    event.preventDefault();
+    return true;
+  }
+
+  /** The cursor of the transform zone under the pointer, or null. */
+  const transformCursor = $derived.by(() => {
+    const session = editor.transform;
+    const view = editor.view;
+    if (session === null || view === null) {
+      return null;
+    }
+    if (transformDrag !== null) {
+      const drag = transformDrag;
+      return cursorFor(session.state, drag.kind === 'scale' ? { kind: 'handle', handle: drag.handle } : { kind: drag.kind }, rotation);
+    }
+    if (cursor === null || spaceDown || panning) {
+      return null;
+    }
+    return cursorFor(session.state, hitTest(session.state, screenToCanvas(view, cursor), view.zoom), rotation);
+  });
+
+  /** The box, the handles, and the reference marker in content-space pixels. Null without a transform. */
+  const transformShape = $derived.by(() => {
+    const session = editor.transform;
+    const view = editor.view;
+    if (session === null || view === null) {
+      return null;
+    }
+    const corners = boxCorners(session.state).map((c) => canvasToScreen(view, c));
+    return {
+      outline: boxOutline(corners),
+      handles: HANDLES.map((h) => ({ id: h, ...canvasToScreen(view, handlePoint(session.state, h)) })),
+      reference: canvasToScreen(view, referenceImage(session.state)),
+    };
+  });
 
   // A tool change or another document (also a tab switch) ends a gesture that runs.
   $effect(() => {
@@ -585,6 +754,10 @@
     if (rotating !== null) {
       return;
     }
+    // While the free transform runs, it takes all left-button events (no painting, no other tool).
+    if (transformDown(event)) {
+      return;
+    }
     if (event.button === 1 || (event.button === 0 && (spaceDown || (editor.tool === 'hand' && editor.info !== null)))) {
       event.preventDefault();
       panning = true;
@@ -656,7 +829,9 @@
 
   function onpointermove(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
     cursor = local(event, event.currentTarget);
-    if (rotating !== null) {
+    if (transformDrag !== null) {
+      transformMove(event);
+    } else if (rotating !== null) {
       if (event.pointerId === rotating.pointerId) {
         editor.setRotation(dragRotation(rotating.drag, screenPoint(event, event.currentTarget), editor.viewport, event.shiftKey));
       }
@@ -686,7 +861,9 @@
   }
 
   function onpointerup(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
-    if (rotating !== null) {
+    if (transformDrag !== null) {
+      transformUp(event);
+    } else if (rotating !== null) {
       if (event.pointerId === rotating.pointerId) {
         endRotate(event.type === 'pointercancel');
       }
@@ -722,6 +899,9 @@
   }
 
   function onwindowkey(event: KeyboardEvent): void {
+    if (transformKey(event)) {
+      return;
+    }
     if (event.type === 'keydown' && event.key === 'Escape' && rotating !== null) {
       event.preventDefault();
       endRotate(true);
@@ -823,6 +1003,7 @@
       class:grabbing={panning || rotating !== null}
       class:crosshair={(isSelectionTool(editor.tool) || editor.tool === 'eyedropper' || editor.tool === 'magicWand' || editor.tool === 'paintBucket' || editor.tool === 'gradient') && !spaceDown && !panning}
       class:no-cursor={cursorShape !== null}
+      style:cursor={transformCursor}
       onpointerleave={() => (cursor = null)}
       hidden={editor.status !== 'ready'}
       bind:clientWidth={width}
@@ -873,7 +1054,23 @@
             {/each}
           </svg>
         {/if}
-        {#if cursorShape !== null}
+        {#if transformShape !== null}
+          <svg class="preview" aria-hidden="true" data-testid="transform-overlay">
+            <path class="under" d={transformShape.outline} />
+            <path class="dashes solid" d={transformShape.outline} />
+            {#each transformShape.handles as h (h.id)}
+              <rect class="under" x={h.x - 4} y={h.y - 4} width="8" height="8" />
+              <rect class="handle" x={h.x - 3} y={h.y - 3} width="6" height="6" data-handle={h.id} />
+            {/each}
+            <circle class="under" cx={transformShape.reference.x} cy={transformShape.reference.y} r="6" />
+            <circle class="dashes solid" cx={transformShape.reference.x} cy={transformShape.reference.y} r="5" />
+            <path
+              class="dashes solid"
+              d="M {transformShape.reference.x - 8} {transformShape.reference.y} H {transformShape.reference.x + 8} M {transformShape.reference.x} {transformShape.reference.y - 8} V {transformShape.reference.y + 8}"
+            />
+          </svg>
+        {/if}
+        {#if cursorShape !== null && transformShape === null}
           <svg class="preview" aria-hidden="true" data-testid="brush-cursor">
             <circle class="under" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
             <circle class="dashes solid" cx={cursorShape.x} cy={cursorShape.y} r={cursorShape.radius} />
@@ -992,6 +1189,13 @@
   }
   .preview .under {
     stroke: #fff;
+  }
+  .preview rect.under {
+    fill: #fff;
+    stroke: none;
+  }
+  .preview rect.handle {
+    fill: #000;
   }
   .preview .dashes {
     stroke: #000;

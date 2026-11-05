@@ -65,6 +65,7 @@ async function makeStore(layers: LayerInfo[]) {
     close: vi.fn(async () => undefined),
     selectionOutline: vi.fn(async () => ({ selectionVersion: 0, step: 1, contours: [] })),
     maskThumbnail: vi.fn(async (..._args: unknown[]) => thumbnailBuffer(2, 2)),
+    layerBounds: vi.fn(async (..._args: unknown[]) => null),
     sampleColor: vi.fn(async (..._args: unknown[]): Promise<SampledColor> => ({ color: '#336699', alpha: 1 })),
     strokeBegin: vi.fn(async (..._args: unknown[]) => 5),
     strokePoints: vi.fn(async (..._args: unknown[]) => null),

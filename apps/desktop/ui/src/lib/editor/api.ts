@@ -224,6 +224,11 @@ export type EditDto =
       blendMode: BlendModeId;
       reverse: boolean;
     }
+  /**
+   * Free transform of a pixel layer. `matrix` is `[a, b, c, d, e, f]` in canvas pixels
+   * (`x' = a*x + c*y + e`, `y' = b*x + d*y + f`); it maps the old layer position to the new one.
+   */
+  | { type: 'transformLayer'; layerId: number; matrix: TransformMatrix; interpolation: 'bicubic' | 'bilinear' | 'nearest' }
   /** Deselect, invert, and feather are errors when there is no selection. */
   | { type: 'deselect' }
   /** Restores the selection that the last deselect removed. An error if `canReselect` is false. */
@@ -264,6 +269,19 @@ export interface RenderArea {
   height: number;
   /** Id of a layer with a mask: the frame shows its mask as a gray image. Absent or null: the composite. */
   showMaskLayerId?: number | null;
+  /** Free transform preview: the layer is drawn with the matrix. Absent or null: no preview. */
+  transformPreview?: { layerId: number; matrix: TransformMatrix } | null;
+}
+
+/** A 2D affine matrix `[a, b, c, d, e, f]` (the order of a CSS `matrix()`), in canvas pixels. */
+export type TransformMatrix = [number, number, number, number, number, number];
+
+/** The bounds of the content of a layer, in canvas pixels. x and y can be negative. */
+export interface LayerBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 /** What a stroke changes. */
@@ -320,6 +338,8 @@ export interface EditorApi {
   sampleColor(documentId: number, x: number, y: number, size: 1 | 3 | 5, source: SampleSource, layerId: number | null): Promise<SampledColor>;
   /** A gray thumbnail of the whole mask of a layer (see `decodeMaskThumbnail`). maxSize: 1 to 256. */
   maskThumbnail(documentId: number, layerId: number, maxSize: number): Promise<ArrayBuffer>;
+  /** The bounds of the non-transparent content of a pixel layer, or null if the layer is empty. */
+  layerBounds(documentId: number, layerId: number): Promise<LayerBounds | null>;
   /** Starts a stroke on a layer. Returns the stroke id. One stroke is active in a document. */
   strokeBegin(documentId: number, layerId: number, target: StrokeTargetDto, brush: BrushSettingsDto): Promise<number>;
   /** Adds points: a flat list [x, y, pressure, ...] in canvas pixels. 1 to 3000 points per call. */
@@ -346,6 +366,7 @@ export const editorApi: EditorApi = {
   selectionOutline: (documentId, step) => invoke<SelectionOutline>('editor_selection_outline', { documentId, step }),
   sampleColor: (documentId, x, y, size, source, layerId) => invoke<SampledColor>('editor_sample_color', { documentId, x, y, size, source, layerId }),
   maskThumbnail: (documentId, layerId, maxSize) => invoke<ArrayBuffer>('editor_mask_thumbnail', { documentId, layerId, maxSize }),
+  layerBounds: (documentId, layerId) => invoke<LayerBounds | null>('editor_layer_bounds', { documentId, layerId }),
   strokeBegin: (documentId, layerId, target, brush) => invoke<number>('editor_stroke_begin', { documentId, layerId, target, brush }),
   strokePoints: (documentId, strokeId, points) => invoke<null>('editor_stroke_points', { documentId, strokeId, points }),
   strokeEnd: (documentId, strokeId) => invoke<DocumentInfo>('editor_stroke_end', { documentId, strokeId }),
