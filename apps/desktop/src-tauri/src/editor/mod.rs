@@ -27,6 +27,7 @@
 //! on the GPU with the same size, and the full composite and its pyramid
 //! (ADR 0014). The history keeps the removed layers of delete steps.
 
+pub mod bounds;
 pub mod dto;
 pub mod engine;
 pub mod outline;
@@ -43,6 +44,7 @@ pub use dto::{
     AdjustmentDto, BackgroundId, BlendModeId, BrushSettingsDto, CurvePointDto, DocumentId,
     DocumentInfo, EditDto, LayerInfo, LayerKindId, LevelsChannelDto, LocksDto, NewDocumentSpec,
     SaveResult, SelectionModeId, SelectionOutline, SelectionShapeDto, StrokeTargetDto,
+    TransformPreviewDto,
 };
 pub use engine::{EditorEngine, MAX_VIEW_SIDE, RenderRequest, SaveGuard};
 pub use outline::{MAX_OUTLINE_POINTS, selection_outline};
@@ -79,6 +81,10 @@ pub enum EditorEngineError {
     /// The `max_size` of a mask thumbnail is not in `1..=256`.
     #[error("the mask thumbnail size must be 1 to 256")]
     InvalidThumbnailSize,
+    /// The render request is not valid (for example, it asks for a mask
+    /// view and a transform preview together).
+    #[error("invalid render request: {0}")]
+    InvalidRender(&'static str),
     /// The layer has a mask already. The edit does not replace it.
     #[error("the layer {0} has a mask already")]
     MaskExists(u64),
@@ -171,6 +177,7 @@ impl From<EditorEngineError> for CommandError {
             | EditorEngineError::InvalidFlood(_)
             | EditorEngineError::InvalidGradientInput(_)
             | EditorEngineError::InvalidThumbnailSize
+            | EditorEngineError::InvalidRender(_)
             | EditorEngineError::MaskExists(_)
             | EditorEngineError::StrokeNotActive(_)
             | EditorEngineError::InvalidStrokePoints(_)

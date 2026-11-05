@@ -4,7 +4,7 @@
 
 use expose_core::buffer::WorkingImage;
 use expose_editor::{
-    Adjustment, BrushSettings, Document, DocumentSpec, Edit, EditorError, FillSettings,
+    Adjustment, Affine, BrushSettings, Document, DocumentSpec, Edit, EditorError, FillSettings,
     FloodSample, FloodSettings, GradientSpec, GradientStop, GradientTarget, History, LayerContent,
     LayerId, Mask, MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
     flood_region,
@@ -714,6 +714,14 @@ fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineErr
         | EditDto::InvertSelection
         | EditDto::FeatherSelection { .. }
         | EditDto::MaskFromSelection { .. }) => apply_selection(document, edit)?,
+        EditDto::TransformLayer {
+            layer_id,
+            matrix,
+            interpolation,
+        } => {
+            let id = resolve(document, layer_id)?;
+            document.transform_layer(id, &Affine::from_array(matrix), interpolation.into())?
+        }
         // `EditSession::edit` handles these (they use the sample cache).
         EditDto::MagicWand { .. } | EditDto::Fill { .. } | EditDto::Gradient { .. } => {
             return Err(EditorEngineError::Internal("not a plain edit"));
@@ -2161,5 +2169,75 @@ mod tests {
         s.edit(wand(20.0, 20.0, SelectionModeId::Add, None), None)
             .unwrap();
         println!("second wand click (cached): {:?}", start.elapsed());
+    }
+
+    // ---- free transform ----
+
+    fn transform(layer_id: u64, matrix: [f64; 6]) -> EditDto {
+        EditDto::TransformLayer {
+            layer_id,
+            matrix,
+            interpolation: crate::editor::dto::InterpolationId::Nearest,
+        }
+    }
+
+    fn bounds_of(s: &EditSession, layer: u64) -> Option<(i64, i64, u32, u32)> {
+        let id = s.document().layer_by_number(layer).unwrap();
+        s.document()
+            .layer_content_bounds(id)
+            .unwrap()
+            .map(|r| (r.x, r.y, r.width, r.height))
+    }
+
+    #[test]
+    fn transform_moves_the_layer_in_one_undoable_step() {
+        let mut s = session();
+        let layer = background(&s);
+        assert_eq!(bounds_of(&s, layer), Some((0, 0, 4, 3)));
+        s.edit(transform(layer, [1.0, 0.0, 0.0, 1.0, 2.0, 1.0]), None)
+            .unwrap();
+        assert_eq!(bounds_of(&s, layer), Some((2, 1, 4, 3)));
+        let info = s.info(1);
+        assert_eq!(info.history.steps, vec!["Free Transform".to_string()]);
+        s.undo().unwrap();
+        assert_eq!(bounds_of(&s, layer), Some((0, 0, 4, 3)));
+        s.redo().unwrap();
+        assert_eq!(bounds_of(&s, layer), Some((2, 1, 4, 3)));
+    }
+
+    #[test]
+    fn bad_transforms_are_invalid_and_leave_no_step() {
+        let mut s = session();
+        let layer = background(&s);
+        let singular = s
+            .edit(transform(layer, [1.0, 2.0, 2.0, 4.0, 0.0, 0.0]), None)
+            .unwrap_err();
+        assert!(matches!(
+            singular,
+            EditorEngineError::Editor(EditorError::InvalidTransform(_))
+        ));
+        assert!(!s.info(1).can_undo);
+        s.edit(
+            EditDto::AddAdjustment {
+                adjustment: bc(0.1),
+                above_layer_id: None,
+            },
+            None,
+        )
+        .unwrap();
+        let adjustment = s.document().layers()[1].id().get();
+        let steps = s.info(1).history.steps.len();
+        let error = s
+            .edit(transform(adjustment, [1.0, 0.0, 0.0, 1.0, 1.0, 0.0]), None)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EditorEngineError::Editor(EditorError::NotAPixelLayer(_))
+        ));
+        assert_eq!(s.info(1).history.steps.len(), steps);
+        let unknown = s
+            .edit(transform(999, [1.0, 0.0, 0.0, 1.0, 1.0, 0.0]), None)
+            .unwrap_err();
+        assert!(matches!(unknown, EditorEngineError::LayerNotFound(999)));
     }
 }
