@@ -17,12 +17,13 @@ use tauri::{AppHandle, Manager, Runtime, State};
 
 use super::preview::DisplaySpaceArg;
 use super::{run_blocking, with_catalog};
+use crate::editor::dto::LayerBounds;
 use crate::editor::sample::{SampleSourceDto, SampledColor};
 use crate::editor::save::{read_linked_document, save_snapshot};
 use crate::editor::{
     BrushSettingsDto, DocumentId, DocumentInfo, DocumentOrigin, EditDto, EditorEngine,
     EditorEngineError, NewDocumentSpec, RenderRequest, SaveGuard, SaveResult, SavedFiles,
-    SelectionOutline, StrokeTargetDto, build_document,
+    SelectionOutline, StrokeTargetDto, TransformPreviewDto, build_document,
 };
 use crate::error::{CommandError, ErrorKind};
 use crate::state::CatalogState;
@@ -319,8 +320,14 @@ fn warm_thumbnail<R: Runtime>(app: &AppHandle<R>, photo_id: PhotoId) {
 /// this one starts, this call fails with the kind `superseded` (latest
 /// wins). The UI drops it.
 ///
-/// Errors: `notFound` (document or mask layer), `invalidInput` (view, or a
-/// layer with no mask), `superseded`,
+/// `transformPreview` (`{ layerId, matrix: [a, b, c, d, e, f] }` or
+/// `null`) draws a pixel layer as if the matrix was applied, without a
+/// change to the document. It cannot be set together with
+/// `showMaskLayerId`.
+///
+/// Errors: `notFound` (document, mask layer, or preview layer),
+/// `invalidInput` (view, a layer with no mask, a bad matrix, a preview
+/// layer that is not a pixel layer, or both options set), `superseded`,
 /// `unavailable` (no GPU), `internal`.
 #[tauri::command]
 #[allow(
@@ -336,6 +343,7 @@ pub async fn editor_render(
     width: u32,
     height: u32,
     show_mask_layer_id: Option<u64>,
+    transform_preview: Option<TransformPreviewDto>,
 ) -> Result<Response, CommandError> {
     let body = engine
         .render_async(RenderRequest {
@@ -348,6 +356,7 @@ pub async fn editor_render(
                 height,
             },
             show_mask: show_mask_layer_id,
+            transform_preview,
         })
         .await?;
     Ok(Response::new(body))
@@ -501,6 +510,22 @@ pub async fn editor_mask_thumbnail(
         .mask_thumbnail_async(document_id, layer_id, max_size)
         .await?;
     Ok(Response::new(thumbnail.encode()))
+}
+
+/// Returns the canvas rectangle of the pixels with alpha above 0 of a pixel
+/// layer (`{ x, y, width, height }`, `x` and `y` can be negative), or
+/// `null` if the layer is fully transparent. The rectangle is not clipped
+/// to the canvas. A stroke in progress is not committed.
+///
+/// Errors: `notFound` (document, layer), `invalidInput` (the layer is not
+/// a pixel layer), `internal`.
+#[tauri::command]
+pub async fn editor_layer_bounds(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    layer_id: u64,
+) -> Result<Option<LayerBounds>, CommandError> {
+    Ok(engine.layer_bounds_async(document_id, layer_id).await?)
 }
 
 /// Undoes the last step of a document. With no step to undo, the document

@@ -39,7 +39,11 @@ use expose_editor::{BrushSettings, Document, GpuCompositor, StrokePoint, StrokeT
 use expose_gpu::{GpuContext, GpuContextOptions};
 
 use super::EditorEngineError;
-use super::dto::{DocumentId, DocumentInfo, EditDto, SelectionOutline, stroke_points};
+use super::bounds::layer_bounds;
+use super::dto::{
+    DocumentId, DocumentInfo, EditDto, LayerBounds, SelectionOutline, TransformPreviewDto,
+    stroke_points,
+};
 use super::outline::{MAX_OUTLINE_POINTS, selection_outline};
 use super::sample::{SampleSourceDto, SampledColor, sample_color};
 use super::save::{DocumentOrigin, SaveSnapshot, SavedFiles};
@@ -66,6 +70,9 @@ pub struct RenderRequest {
     /// The number of a layer with a mask. If it is `Some`, the frame shows
     /// the mask of this layer as a gray image, not the composite.
     pub show_mask: Option<u64>,
+    /// A live free-transform preview of a pixel layer. It cannot be set
+    /// together with `show_mask`.
+    pub transform_preview: Option<TransformPreviewDto>,
 }
 
 enum Job {
@@ -152,6 +159,12 @@ enum Job {
         layer: u64,
         max_size: u32,
         reply: Reply<MaskThumbnail>,
+    },
+    /// Finds the content bounds of a pixel layer.
+    LayerBounds {
+        document: DocumentId,
+        layer: u64,
+        reply: Reply<Option<LayerBounds>>,
     },
     Close(DocumentId),
 }
@@ -486,6 +499,29 @@ impl EditorEngine {
         receive(receiver).await
     }
 
+    /// Finds the content bounds of a pixel layer on the engine thread and
+    /// waits for them (see [`layer_bounds`]). A stroke in progress is not
+    /// committed.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`],
+    /// [`EditorEngineError::LayerNotFound`], and the `NotAPixelLayer`
+    /// editor error.
+    pub async fn layer_bounds_async(
+        &self,
+        document: DocumentId,
+        layer: u64,
+    ) -> Result<Option<LayerBounds>, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::LayerBounds {
+            document,
+            layer,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
     /// Undoes the last step of a document and waits for the new info.
     ///
     /// # Errors
@@ -703,6 +739,7 @@ fn fail_job(job: Job, error: &EditorEngineError) {
         Job::Outline { reply, .. } => reply(Err(error())),
         Job::Sample { reply, .. } => reply(Err(error())),
         Job::MaskThumbnail { reply, .. } => reply(Err(error())),
+        Job::LayerBounds { reply, .. } => reply(Err(error())),
         Job::FinishSave { reply, .. } => {
             if let Some(reply) = reply {
                 reply(Err(error()));
@@ -901,7 +938,13 @@ impl Renderer {
             document: id,
             view,
             show_mask,
+            transform_preview,
         } = job.request;
+        if show_mask.is_some() && transform_preview.is_some() {
+            return Err(EditorEngineError::InvalidRender(
+                "a mask view and a transform preview cannot be shown together",
+            ));
+        }
         if view.width == 0
             || view.height == 0
             || view.width > MAX_VIEW_SIDE
@@ -947,7 +990,15 @@ impl Renderer {
                     compositor.clear_mask_view_cache();
                     *mask_view_cached = false;
                 }
-                compositor.render_view(ctx, document, &view).await?
+                match transform_preview {
+                    Some(preview) => {
+                        let preview = preview.resolve(document)?;
+                        compositor
+                            .render_view_transformed(ctx, document, &view, &preview)
+                            .await?
+                    }
+                    None => compositor.render_view(ctx, document, &view).await?,
+                }
             };
             display.encode(ctx, image).await?;
             display
@@ -1123,8 +1174,27 @@ impl Renderer {
                 });
                 reply(result);
             }
+            Job::LayerBounds {
+                document,
+                layer,
+                reply,
+            } => self.run_layer_bounds(document, layer, reply),
             job @ (Job::Redo { .. } | Job::HistoryJump { .. }) => self.run_redo_job(job),
         }
+    }
+
+    /// Runs a layer bounds query. It does not commit an active stroke.
+    fn run_layer_bounds(
+        &mut self,
+        document: DocumentId,
+        layer: u64,
+        reply: Reply<Option<LayerBounds>>,
+    ) {
+        let result = guarded(self, |r| {
+            let session = r.session(document)?;
+            layer_bounds(session.document(), layer)
+        });
+        reply(result);
     }
 
     /// Runs a redo or a history jump.
@@ -1276,6 +1346,7 @@ mod tests {
             document: info.document_id,
             view: view(-2.0, 1.0, 12, 10),
             show_mask: None,
+            transform_preview: None,
         };
         let body = pollster::block_on(engine.render_async(request)).unwrap();
         assert_eq!(body.len(), rgba8_body_len(12, 10));
@@ -1316,6 +1387,7 @@ mod tests {
             document: id,
             view: view(0.0, 1.0, 8, 6),
             show_mask: None,
+            transform_preview: None,
         };
         let edited = pollster::block_on(engine.edit_async(
             id,
@@ -1354,6 +1426,7 @@ mod tests {
             document: id,
             view: view(0.0, 1.0, 8, 8),
             show_mask: None,
+            transform_preview: None,
         };
         let black = pollster::block_on(engine.render_async(request)).unwrap();
         assert_eq!(pixel(&black, 8, 4, 4), [0, 0, 0, 255]);
@@ -1408,6 +1481,7 @@ mod tests {
             document: id,
             view: view(0.0, 0.5, 2, 2),
             show_mask: None,
+            transform_preview: None,
         };
         let before = pollster::block_on(engine.render_async(request)).unwrap();
         let info = pollster::block_on(engine.edit_async(
@@ -1447,6 +1521,7 @@ mod tests {
             document: id,
             view: view(0.0, 1.0, 4, 4),
             show_mask,
+            transform_preview: None,
         };
         // A layer without a mask, and a layer that does not exist.
         let no_mask = pollster::block_on(engine.render_async(request(Some(layer_id))));
@@ -1473,6 +1548,63 @@ mod tests {
     }
 
     #[test]
+    fn transform_preview_routing() {
+        let Some((engine, info)) = engine_with_document(4, 4, [0.5, 0.25, 0.125, 1.0]) else {
+            return;
+        };
+        let id = info.document_id;
+        let layer_id = info.layers[0].id;
+        let request = |show_mask, transform_preview| RenderRequest {
+            document: id,
+            view: view(0.0, 1.0, 4, 4),
+            show_mask,
+            transform_preview,
+        };
+        let identity = TransformPreviewDto {
+            layer_id,
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        };
+        let plain = pollster::block_on(engine.render_async(request(None, None))).unwrap();
+        let previewed =
+            pollster::block_on(engine.render_async(request(None, Some(identity)))).unwrap();
+        assert_eq!(plain[FRAME_HEADER_BYTES..], previewed[FRAME_HEADER_BYTES..]);
+        // The mask view and the preview together are an error.
+        let both = pollster::block_on(engine.render_async(request(Some(layer_id), Some(identity))));
+        assert!(matches!(both, Err(EditorEngineError::InvalidRender(_))));
+        // An unknown layer.
+        let unknown = TransformPreviewDto {
+            layer_id: layer_id + 99,
+            ..identity
+        };
+        let missing = pollster::block_on(engine.render_async(request(None, Some(unknown))));
+        assert!(matches!(missing, Err(EditorEngineError::LayerNotFound(_))));
+    }
+
+    #[test]
+    fn layer_bounds_job_runs_on_the_engine_thread() {
+        let Some((engine, info)) = engine_with_document(4, 4, [1.0; 4]) else {
+            return;
+        };
+        let bounds =
+            pollster::block_on(engine.layer_bounds_async(info.document_id, info.layers[0].id))
+                .unwrap();
+        assert_eq!(
+            bounds,
+            Some(LayerBounds {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4
+            })
+        );
+        let missing = pollster::block_on(engine.layer_bounds_async(info.document_id, 999));
+        assert!(matches!(
+            missing,
+            Err(EditorEngineError::LayerNotFound(999))
+        ));
+    }
+
+    #[test]
     fn unknown_document_and_bad_views_fail() {
         let Some((engine, info)) = engine_with_document(4, 4, [0.5; 4]) else {
             return;
@@ -1481,6 +1613,7 @@ mod tests {
             document: info.document_id + 100,
             view: view(0.0, 1.0, 4, 4),
             show_mask: None,
+            transform_preview: None,
         }));
         assert!(matches!(
             missing,
@@ -1490,6 +1623,7 @@ mod tests {
             document: info.document_id,
             view: view(0.0, 1.0, 0, 4),
             show_mask: None,
+            transform_preview: None,
         }));
         assert!(matches!(
             zero,
@@ -1499,6 +1633,7 @@ mod tests {
             document: info.document_id,
             view: view(0.0, f64::NAN, 4, 4),
             show_mask: None,
+            transform_preview: None,
         }));
         assert!(matches!(bad_scale, Err(EditorEngineError::Editor(_))));
         let edit = pollster::block_on(engine.edit_async(
@@ -1590,6 +1725,7 @@ mod tests {
                     document,
                     view: view(0.0, 1.0, 1, 1),
                     show_mask: None,
+                    transform_preview: None,
                 },
                 reply,
             )
@@ -1629,6 +1765,7 @@ mod tests {
                 document: 1,
                 view: view(0.0, 1.0, 1, 1),
                 show_mask: None,
+                transform_preview: None,
             },
             Box::new(drop),
         );

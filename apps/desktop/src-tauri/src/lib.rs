@@ -64,6 +64,10 @@ use crate::thumbnails::{THUMB_DIR_NAME, ThumbnailService, default_workers};
 /// # Errors
 ///
 /// Returns an error if Tauri cannot start the application.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the command list has one line per command"
+)]
 pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -161,6 +165,7 @@ pub fn run() -> tauri::Result<()> {
             commands::editor::editor_selection_outline,
             commands::editor::editor_sample_color,
             commands::editor::editor_mask_thumbnail,
+            commands::editor::editor_layer_bounds,
             commands::editor::editor_undo,
             commands::editor::editor_redo,
             commands::editor::editor_history_jump,

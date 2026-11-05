@@ -9,9 +9,9 @@ use expose_core::color::ColorSpaceId;
 use expose_core::develop::CurvePoint;
 use expose_editor::{
     Adjustment, Background, BitDepth, BlendMode, BlendSpace, BrightnessContrast, BrushSettings,
-    ColorMode, Curves, Document, DocumentSpec, GradientShape, GroupIsolation, HueSaturation, Layer,
-    LayerKind, Levels, LevelsChannel, Locks, MAX_DIMENSION, MAX_PIXELS, SelectionMode,
-    SelectionShape, StrokePoint, StrokeTarget,
+    ColorMode, Curves, Document, DocumentSpec, GradientShape, GroupIsolation, HueSaturation,
+    Interpolation, Layer, LayerKind, LayerTransformPreview, Levels, LevelsChannel, Locks,
+    MAX_DIMENSION, MAX_PIXELS, SelectionMode, SelectionShape, StrokePoint, StrokeTarget,
 };
 use serde::{Deserialize, Serialize};
 
@@ -881,6 +881,85 @@ pub enum EditDto {
         /// `true` to run the stops from the end to the start.
         reverse: bool,
     },
+    /// Transforms the pixels of a pixel layer with an affine matrix
+    /// `[a, b, c, d, e, f]` in canvas pixels (see `Affine`). The selection
+    /// does not limit it.
+    TransformLayer {
+        /// The pixel layer.
+        layer_id: u64,
+        /// The matrix, `x' = a x + c y + e`, `y' = b x + d y + f`.
+        matrix: [f64; 6],
+        /// How the pixels are resampled.
+        interpolation: InterpolationId,
+    },
+}
+
+/// How a transform resamples the pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InterpolationId {
+    /// Smooth, best for photos.
+    Bicubic,
+    /// Fast and soft.
+    Bilinear,
+    /// Hard pixel edges.
+    Nearest,
+}
+
+impl From<InterpolationId> for Interpolation {
+    fn from(id: InterpolationId) -> Self {
+        match id {
+            InterpolationId::Bicubic => Self::Bicubic,
+            InterpolationId::Bilinear => Self::Bilinear,
+            InterpolationId::Nearest => Self::Nearest,
+        }
+    }
+}
+
+/// A live transform preview for `editor_render`: the layer is drawn as if
+/// the matrix was applied. It changes no pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformPreviewDto {
+    /// The layer number.
+    pub layer_id: u64,
+    /// The matrix `[a, b, c, d, e, f]`.
+    pub matrix: [f64; 6],
+}
+
+impl TransformPreviewDto {
+    /// The crate preview for the layer that has this number in `document`.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::LayerNotFound`] for an unknown layer.
+    pub fn resolve(
+        &self,
+        document: &Document,
+    ) -> Result<LayerTransformPreview, super::EditorEngineError> {
+        let layer = document
+            .layer_by_number(self.layer_id)
+            .ok_or(super::EditorEngineError::LayerNotFound(self.layer_id))?;
+        Ok(LayerTransformPreview {
+            layer,
+            matrix: self.matrix,
+        })
+    }
+}
+
+/// The content bounds of a layer in canvas pixels. `x` and `y` can be
+/// negative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerBounds {
+    /// The left edge.
+    pub x: i64,
+    /// The top edge.
+    pub y: i64,
+    /// The width.
+    pub width: u32,
+    /// The height.
+    pub height: u32,
 }
 
 /// What a gradient edit changes.
@@ -969,6 +1048,7 @@ impl EditDto {
             Self::MagicWand { .. } => "Magic Wand",
             Self::Fill { .. } => "Paint Bucket",
             Self::Gradient { .. } => "Gradient",
+            Self::TransformLayer { .. } => "Free Transform",
         }
     }
 }
@@ -1811,6 +1891,70 @@ mod tests {
         assert_eq!(
             stroke_points(&max).unwrap().len(),
             MAX_STROKE_POINTS_PER_CALL
+        );
+    }
+
+    #[test]
+    fn transform_layer_parses_with_all_interpolations() {
+        for (name, expected) in [
+            ("bicubic", InterpolationId::Bicubic),
+            ("bilinear", InterpolationId::Bilinear),
+            ("nearest", InterpolationId::Nearest),
+        ] {
+            let edit: EditDto = serde_json::from_value(serde_json::json!({
+                "type": "transformLayer",
+                "layerId": 3,
+                "matrix": [1.0, 0.0, 0.0, 1.0, 5.5, -2.0],
+                "interpolation": name,
+            }))
+            .unwrap();
+            assert_eq!(
+                edit,
+                EditDto::TransformLayer {
+                    layer_id: 3,
+                    matrix: [1.0, 0.0, 0.0, 1.0, 5.5, -2.0],
+                    interpolation: expected,
+                }
+            );
+            assert_eq!(edit.step_name(), "Free Transform");
+            let again: EditDto =
+                serde_json::from_str(&serde_json::to_string(&edit).unwrap()).unwrap();
+            assert_eq!(again, edit);
+        }
+        assert_eq!(
+            Interpolation::from(InterpolationId::Bilinear),
+            Interpolation::Bilinear
+        );
+        let bad = serde_json::from_value::<EditDto>(serde_json::json!({
+            "type": "transformLayer", "layerId": 3,
+            "matrix": [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], "interpolation": "lanczos",
+        }));
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn transform_preview_and_bounds_json() {
+        let preview: TransformPreviewDto = serde_json::from_value(serde_json::json!({
+            "layerId": 7, "matrix": [2.0, 0.0, 0.0, 2.0, 1.0, 1.0],
+        }))
+        .unwrap();
+        assert_eq!(preview.layer_id, 7);
+        let json = serde_json::to_value(preview).unwrap();
+        assert_eq!(json["layerId"], 7);
+        assert_eq!(
+            json["matrix"],
+            serde_json::json!([2.0, 0.0, 0.0, 2.0, 1.0, 1.0])
+        );
+        let bounds = serde_json::to_value(LayerBounds {
+            x: -3,
+            y: 4,
+            width: 5,
+            height: 6,
+        })
+        .unwrap();
+        assert_eq!(
+            bounds,
+            serde_json::json!({ "x": -3, "y": 4, "width": 5, "height": 6 })
         );
     }
 }
