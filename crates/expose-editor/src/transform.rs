@@ -200,7 +200,7 @@ impl Affine {
 
     /// Returns the translation in whole pixels if the transform is a pure
     /// translation by whole pixels (within [`TRANSLATE_TOLERANCE`]).
-    fn whole_translation(self) -> Option<(f64, f64)> {
+    pub(crate) fn whole_translation(self) -> Option<(f64, f64)> {
         let near = |v: f64, target: f64| (v - target).abs() <= TRANSLATE_TOLERANCE;
         let linear =
             near(self.a, 1.0) && near(self.b, 0.0) && near(self.c, 0.0) && near(self.d, 1.0);
@@ -271,16 +271,16 @@ pub struct CanvasRect {
 
 /// The destination area of a transform: canvas position and size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Target {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
+pub(crate) struct Target {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 /// Returns the rectangle of the pixels with alpha > 0, in image
 /// coordinates, or `None` if all pixels are transparent.
-fn content_rect(image: &WorkingImage) -> Option<Rect> {
+pub(crate) fn content_rect(image: &WorkingImage) -> Option<Rect> {
     let mut x0 = usize::MAX;
     let mut x1 = 0;
     let mut y0 = None;
@@ -318,6 +318,14 @@ fn snap(v: f64) -> f64 {
 /// `(x, y, width, height)` (canvas coordinates) after `m`: the bounding box
 /// of the four mapped corners, rounded out to whole pixels.
 fn transformed_bounds(m: &Affine, x: f64, y: f64, width: f64, height: f64) -> EditorResult<Target> {
+    target_from_bounds(rounded_bounds(m, x, y, width, height))
+}
+
+/// Returns `[x0, y0, x1, y1]`: the bounding box of the four corners of the
+/// source rectangle `(x, y, width, height)` after `m`, rounded out to whole
+/// numbers (see [`SNAP_TOLERANCE`]). The values can be out of range or not
+/// finite; [`target_from_bounds`] checks them.
+pub(crate) fn rounded_bounds(m: &Affine, x: f64, y: f64, width: f64, height: f64) -> [f64; 4] {
     let corners = [
         m.apply(x, y),
         m.apply(x + width, y),
@@ -332,6 +340,18 @@ fn transformed_bounds(m: &Affine, x: f64, y: f64, width: f64, height: f64) -> Ed
     }
     let (x0, y0) = (snap(min.0).floor(), snap(min.1).floor());
     let (x1, y1) = (snap(max.0).ceil(), snap(max.1).ceil());
+    [x0, y0, x1, y1]
+}
+
+/// Converts whole-number bounds `[x0, y0, x1, y1]` (see
+/// [`rounded_bounds`]) to a destination area. An empty span becomes one
+/// pixel.
+///
+/// Errors: [`EditorError::InvalidTransform`] for a value that is not
+/// finite, [`EditorError::TooLarge`] for a size larger than the limits,
+/// and [`EditorError::OffsetOverflow`] for a position outside `i32`.
+pub(crate) fn target_from_bounds(bounds: [f64; 4]) -> EditorResult<Target> {
+    let [x0, y0, x1, y1] = bounds;
     if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
         return Err(EditorError::InvalidTransform(
             "transformed bounds are not finite",
@@ -380,7 +400,7 @@ struct Source<'a, const N: usize> {
 
 /// The filter settings of one transform.
 #[derive(Debug, Clone, Copy)]
-struct Filter {
+pub(crate) struct Filter {
     interp: Interpolation,
     /// Filter scale on the source x axis (`0 < sx <= 1`).
     sx: f64,
@@ -393,7 +413,8 @@ struct Filter {
 }
 
 impl Filter {
-    fn new(m: &Affine, interp: Interpolation) -> Self {
+    /// Makes the filter of the transform `m` (source → destination).
+    pub(crate) fn new(m: &Affine, interp: Interpolation) -> Self {
         let r = interp.radius();
         if r == 0.0 {
             return Self {
@@ -604,6 +625,56 @@ fn clean_mask(v: &mut f32) {
     };
 }
 
+/// Resamples a pixel layer image at canvas position `offset` into the
+/// destination area `target`. `inv` maps destination canvas points to
+/// source canvas points. The area outside the source is transparent.
+pub(crate) fn resample_image(
+    image: &WorkingImage,
+    offset: (i32, i32),
+    inv: &Affine,
+    target: Target,
+    filter: Filter,
+) -> EditorResult<WorkingImage> {
+    let src = Source {
+        data: image.pixels(),
+        width: image.width(),
+        height: image.height(),
+        offset,
+        outside: [0.0; 4],
+    };
+    let mut pixels = resample(&src, inv, target, filter);
+    pixels.iter_mut().for_each(clean_pixel);
+    Ok(WorkingImage::from_pixels(
+        target.width,
+        target.height,
+        pixels,
+    )?)
+}
+
+/// Resamples a mask into the destination area `target` (see
+/// [`resample_image`]). The area outside the mask buffer has the fill
+/// value of the mask.
+pub(crate) fn resample_mask(
+    mask: &Mask,
+    inv: &Affine,
+    target: Target,
+    filter: Filter,
+) -> EditorResult<MaskImage> {
+    // A mask image has one value per pixel, so the chunk remainder is
+    // empty.
+    let (texels, _) = mask.image.data().as_chunks::<1>();
+    let src = Source {
+        data: texels,
+        width: mask.image.width(),
+        height: mask.image.height(),
+        offset: mask.offset,
+        outside: [mask.fill.value()],
+    };
+    let mut values = resample(&src, inv, target, filter).into_flattened();
+    values.iter_mut().for_each(clean_mask);
+    MaskImage::from_data(target.width, target.height, values)
+}
+
 impl Document {
     /// Returns the canvas rectangle of the pixels with alpha > 0 of a pixel
     /// layer, or `None` if all pixels are transparent.
@@ -699,39 +770,15 @@ impl Document {
             None => None,
         };
 
-        let image = p.image();
-        let src = Source {
-            data: image.pixels(),
-            width: image.width(),
-            height: image.height(),
-            offset: (ox, oy),
-            outside: [0.0; 4],
-        };
-        let mut pixels = resample(&src, &inv, target, filter);
-        pixels.iter_mut().for_each(clean_pixel);
-        let new_image = WorkingImage::from_pixels(target.width, target.height, pixels)?;
+        let new_image = resample_image(p.image(), (ox, oy), &inv, target, filter)?;
 
         let new_mask = match (l.mask(), mask_target) {
-            (Some(mask), Some(t)) => {
-                // A mask image has one value per pixel, so the chunk
-                // remainder is empty.
-                let (texels, _) = mask.image.data().as_chunks::<1>();
-                let src = Source {
-                    data: texels,
-                    width: mask.image.width(),
-                    height: mask.image.height(),
-                    offset: mask.offset,
-                    outside: [mask.fill.value()],
-                };
-                let mut values = resample(&src, &inv, t, filter).into_flattened();
-                values.iter_mut().for_each(clean_mask);
-                Some(Mask {
-                    image: MaskImage::from_data(t.width, t.height, values)?,
-                    offset: (t.x, t.y),
-                    enabled: mask.enabled,
-                    fill: mask.fill,
-                })
-            }
+            (Some(mask), Some(t)) => Some(Mask {
+                image: resample_mask(mask, &inv, t, filter)?,
+                offset: (t.x, t.y),
+                enabled: mask.enabled,
+                fill: mask.fill,
+            }),
             _ => None,
         };
 
