@@ -32,6 +32,8 @@
 //!   affine matrix ([`Affine`], [`Document::transform_layer`]) on the CPU.
 //! - [`crop`]: canvas crop with straighten ([`CropSpec`],
 //!   [`Document::crop_canvas`]). One crop gives one undo edit.
+//! - [`filter`]: Gaussian blur and unsharp mask on pixel layers and masks
+//!   ([`FilterSession`] for a live preview, [`Document::apply_filter`]).
 //! - [`history`]: undo and redo. [`History::push_merge`] makes one undo
 //!   step from a gesture (for example, a slider drag).
 //! - [`mod@file`]: the native layered document file (`.exdoc`):
@@ -86,6 +88,7 @@ pub mod crop;
 pub mod document;
 pub mod error;
 pub mod file;
+pub mod filter;
 pub mod flood;
 pub mod gpu;
 pub mod gradient;
@@ -114,6 +117,12 @@ pub use document::{
 };
 pub use error::{EditorError, EditorResult, SharedGpuError};
 pub use file::{FILE_EXTENSION, FileError, read_document, write_document};
+// `filter::MAX_FILTER_RADIUS` is not re-exported here: the name is in use
+// for the resample filter of `transform`.
+pub use filter::{
+    FilterSession, FilterSpec, FilterTarget, MAX_UNSHARP_AMOUNT, MAX_UNSHARP_THRESHOLD,
+    MIN_FILTER_RADIUS, MIN_UNSHARP_AMOUNT,
+};
 pub use flood::{FillSettings, FloodSample, FloodSettings, MAX_FLOOD_TOLERANCE, flood_region};
 pub use gpu::{
     CURVE_TABLE_SIZE, GpuCompositor, LayerTransformPreview, MAX_VIEW_ORIGIN, MAX_VIEW_SCALE,
