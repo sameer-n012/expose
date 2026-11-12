@@ -42,9 +42,9 @@ use expose_gpu::GpuError;
 
 pub use dto::{
     AdjustmentDto, BackgroundId, BlendModeId, BrushSettingsDto, CurvePointDto, DocumentId,
-    DocumentInfo, EditDto, LayerInfo, LayerKindId, LevelsChannelDto, LocksDto, NewDocumentSpec,
-    SaveResult, SelectionModeId, SelectionOutline, SelectionShapeDto, StrokeTargetDto,
-    TransformPreviewDto,
+    DocumentInfo, EditDto, FilterDto, FilterTargetDto, LayerInfo, LayerKindId, LevelsChannelDto,
+    LocksDto, NewDocumentSpec, SaveResult, SelectionModeId, SelectionOutline, SelectionShapeDto,
+    StrokeTargetDto, TransformPreviewDto,
 };
 pub use engine::{EditorEngine, MAX_VIEW_SIDE, RenderRequest, SaveGuard};
 pub use outline::{MAX_OUTLINE_POINTS, selection_outline};
@@ -92,6 +92,9 @@ pub enum EditorEngineError {
     /// (the stroke ended, or the ID is wrong).
     #[error("stroke {0} is not the active stroke")]
     StrokeNotActive(u64),
+    /// A filter commit came with no filter preview in progress.
+    #[error("no filter preview is active")]
+    FilterNotActive,
     /// The point list of a stroke call is not valid.
     #[error("invalid stroke points: {0}")]
     InvalidStrokePoints(&'static str),
@@ -180,6 +183,7 @@ impl From<EditorEngineError> for CommandError {
             | EditorEngineError::InvalidRender(_)
             | EditorEngineError::MaskExists(_)
             | EditorEngineError::StrokeNotActive(_)
+            | EditorEngineError::FilterNotActive
             | EditorEngineError::InvalidStrokePoints(_)
             | EditorEngineError::SaveInProgress(_) => ErrorKind::InvalidInput,
             EditorEngineError::Editor(inner) => editor_error_kind(inner),

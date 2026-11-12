@@ -22,8 +22,8 @@ use crate::editor::sample::{SampleSourceDto, SampledColor};
 use crate::editor::save::{read_linked_document, save_snapshot};
 use crate::editor::{
     BrushSettingsDto, DocumentId, DocumentInfo, DocumentOrigin, EditDto, EditorEngine,
-    EditorEngineError, NewDocumentSpec, RenderRequest, SaveGuard, SaveResult, SavedFiles,
-    SelectionOutline, StrokeTargetDto, TransformPreviewDto, build_document,
+    EditorEngineError, FilterDto, FilterTargetDto, NewDocumentSpec, RenderRequest, SaveGuard,
+    SaveResult, SavedFiles, SelectionOutline, StrokeTargetDto, TransformPreviewDto, build_document,
 };
 use crate::error::{CommandError, ErrorKind};
 use crate::state::CatalogState;
@@ -526,6 +526,53 @@ pub async fn editor_layer_bounds(
     layer_id: u64,
 ) -> Result<Option<LayerBounds>, CommandError> {
     Ok(engine.layer_bounds_async(document_id, layer_id).await?)
+}
+
+/// Shows a filter on a layer (a live preview that the layer holds until the
+/// commit or the cancel). The first call starts the preview session; each
+/// later call applies the new settings to the original values. A preview
+/// for another layer or target cancels the first. A queued older preview
+/// of the same document is replaced and gets `superseded`.
+///
+/// Errors: `notFound` (document or layer), `superseded`, `invalidInput`
+/// (a value out of range, a locked layer, a layer of the wrong kind, a
+/// mask target on a layer without a mask), `internal`.
+#[tauri::command]
+pub async fn editor_filter_preview(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+    layer_id: u64,
+    target: FilterTargetDto,
+    filter: FilterDto,
+) -> Result<DocumentInfo, CommandError> {
+    Ok(engine
+        .filter_preview_async(document_id, layer_id, target.into(), filter.to_spec())
+        .await?)
+}
+
+/// Ends the filter preview with one history step ("Gaussian Blur" or
+/// "Unsharp Mask"). Returns the new document info.
+///
+/// Errors: `notFound` (document), `invalidInput` (no preview is active),
+/// `internal`.
+#[tauri::command]
+pub async fn editor_filter_commit(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+) -> Result<DocumentInfo, CommandError> {
+    Ok(engine.filter_commit_async(document_id).await?)
+}
+
+/// Ends the filter preview and restores the layer. With no preview, the
+/// document does not change. Returns the document info.
+///
+/// Errors: `notFound` (document), `internal`.
+#[tauri::command]
+pub async fn editor_filter_cancel(
+    engine: State<'_, EditorEngine>,
+    document_id: DocumentId,
+) -> Result<DocumentInfo, CommandError> {
+    Ok(engine.filter_cancel_async(document_id).await?)
 }
 
 /// Undoes the last step of a document. With no step to undo, the document
