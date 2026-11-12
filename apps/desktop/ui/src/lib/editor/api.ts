@@ -276,6 +276,18 @@ export interface RenderArea {
 /** A 2D affine matrix `[a, b, c, d, e, f]` (the order of a CSS `matrix()`), in canvas pixels. */
 export type TransformMatrix = [number, number, number, number, number, number];
 
+/** What a filter changes: the pixels of a pixel layer, or the mask of a layer. */
+export type FilterTarget = 'pixels' | 'mask';
+
+/**
+ * A filter and its values.
+ * - gaussianBlur: radius 0.1 to 1000 pixels.
+ * - unsharpMask: amount as a fraction 0.01 to 5 (1 is 100 %), radius 0.1 to 1000 pixels, threshold 0 to 255.
+ */
+export type FilterDto =
+  | { type: 'gaussianBlur'; radius: number }
+  | { type: 'unsharpMask'; amount: number; radius: number; threshold: number };
+
 /** The bounds of the content of a layer, in canvas pixels. x and y can be negative. */
 export interface LayerBounds {
   x: number;
@@ -344,6 +356,16 @@ export interface EditorApi {
   maskThumbnail(documentId: number, layerId: number, maxSize: number): Promise<ArrayBuffer>;
   /** The bounds of the non-transparent content of a pixel layer, or null if the layer is empty. */
   layerBounds(documentId: number, layerId: number): Promise<LayerBounds | null>;
+  /**
+   * Starts a filter session (an older session of another layer or target ends)
+   * and applies the filter from the original pixels. Any other edit, stroke,
+   * undo, redo, save, or close ends the session in the shell.
+   */
+  filterPreview(documentId: number, layerId: number, target: FilterTarget, filter: FilterDto): Promise<DocumentInfo>;
+  /** Keeps the previewed filter as one history step. */
+  filterCommit(documentId: number): Promise<DocumentInfo>;
+  /** Restores the layer. No history step. */
+  filterCancel(documentId: number): Promise<DocumentInfo>;
   /** Starts a stroke on a layer. Returns the stroke id. One stroke is active in a document. */
   strokeBegin(documentId: number, layerId: number, target: StrokeTargetDto, brush: BrushSettingsDto): Promise<number>;
   /** Adds points: a flat list [x, y, pressure, ...] in canvas pixels. 1 to 3000 points per call. */
@@ -371,6 +393,9 @@ export const editorApi: EditorApi = {
   sampleColor: (documentId, x, y, size, source, layerId) => invoke<SampledColor>('editor_sample_color', { documentId, x, y, size, source, layerId }),
   maskThumbnail: (documentId, layerId, maxSize) => invoke<ArrayBuffer>('editor_mask_thumbnail', { documentId, layerId, maxSize }),
   layerBounds: (documentId, layerId) => invoke<LayerBounds | null>('editor_layer_bounds', { documentId, layerId }),
+  filterPreview: (documentId, layerId, target, filter) => invoke<DocumentInfo>('editor_filter_preview', { documentId, layerId, target, filter }),
+  filterCommit: (documentId) => invoke<DocumentInfo>('editor_filter_commit', { documentId }),
+  filterCancel: (documentId) => invoke<DocumentInfo>('editor_filter_cancel', { documentId }),
   strokeBegin: (documentId, layerId, target, brush) => invoke<number>('editor_stroke_begin', { documentId, layerId, target, brush }),
   strokePoints: (documentId, strokeId, points) => invoke<null>('editor_stroke_points', { documentId, strokeId, points }),
   strokeEnd: (documentId, strokeId) => invoke<DocumentInfo>('editor_stroke_end', { documentId, strokeId }),

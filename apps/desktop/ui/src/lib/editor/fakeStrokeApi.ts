@@ -19,6 +19,15 @@ export function strokeStubs() {
   return {
     maskThumbnail: vi.fn(async (..._args: unknown[]): Promise<ArrayBuffer> => thumbnailBuffer(2, 2)),
     layerBounds: vi.fn(async (..._args: unknown[]): Promise<LayerBounds | null> => ({ x: 0, y: 0, width: 100, height: 80 })),
+    filterPreview: vi.fn(async (..._args: unknown[]): Promise<DocumentInfo> => {
+      throw new Error('filterPreview is not faked.');
+    }),
+    filterCommit: vi.fn(async (..._args: unknown[]): Promise<DocumentInfo> => {
+      throw new Error('filterCommit is not faked.');
+    }),
+    filterCancel: vi.fn(async (..._args: unknown[]): Promise<DocumentInfo> => {
+      throw new Error('filterCancel is not faked.');
+    }),
     sampleColor: vi.fn(async (..._args: unknown[]): Promise<SampledColor> => ({ color: '#336699', alpha: 1 })),
     strokeBegin: vi.fn(async (..._args: unknown[]) => 1),
     strokePoints: vi.fn(async (..._args: unknown[]) => null),

@@ -35,6 +35,7 @@ import {
   type DocumentInfo,
   type EditDto,
   type EditorApi,
+  type FilterTarget,
   type LayerBounds,
   type LayerInfo,
   type LocksDto,
@@ -65,6 +66,7 @@ import {
 import { EMPTY_CLONE_STATE, afterStroke, cloneTarget, defaultCloneBrush, isCloneTool, strokeOffset, withSource, type CloneState, type CloneTool } from '../editor/clone';
 import { defaultBucket, defaultWand, fillEdit, magicWandEdit, type FloodSettings, type PaintBucketSettings } from '../editor/flood';
 import { clampFeather, cycleFill, cycleLasso, cycleMarquee, isFillTool, isLassoTool, type EditorTool, type FillTool, type LassoTool } from '../editor/selection';
+import { FilterClient, defaultFilterValues, type FilterKind, type FilterValues } from '../editor/filter';
 import { defaultGradient, gradientEdit, presetStops, type GradientSettings } from '../editor/gradient';
 import { NO_LOCKS, allLayerIds, canMaskFromSelection, effectiveLocks, findLayer, maskCommands, moveStep, newLayerIds } from '../editor/layers';
 import { untitledName } from '../editor/newDocument';
@@ -118,6 +120,15 @@ function errorKind(error: unknown): string | null {
   return null;
 }
 
+/** An open filter dialog: the filter, the layer and target it works on, and its transport. */
+export interface FilterSession {
+  readonly kind: FilterKind;
+  readonly tab: EditorTab;
+  readonly layerId: number;
+  readonly target: FilterTarget;
+  readonly client: FilterClient;
+}
+
 export class EditorStore {
   /** The open tabs, in strip order. */
   #tabs = $state.raw<readonly EditorTab[]>([]);
@@ -160,6 +171,10 @@ export class EditorStore {
   gradient = $state<GradientSettings>(defaultGradient());
   /** True while the gradient editor dialog is open. */
   gradientDialogOpen = $state(false);
+  /** The last values of the filter dialogs (this session only). */
+  filterValues = $state<FilterValues>(defaultFilterValues());
+  /** The open filter dialog, or null. The tools are blocked while it is open. */
+  filterDialog = $state.raw<FilterSession | null>(null);
 
   readonly #library: EditorStoreOptions['library'];
   readonly #modules: EditorStoreOptions['modules'];
@@ -217,6 +232,8 @@ export class EditorStore {
       return;
     }
     old?.endGesture();
+    // A tab switch cancels an open filter dialog.
+    this.closeFilterDialog();
     // A tab switch ends a free transform without an edit (ADR 0029).
     if (old !== null && !old.transformBusy) {
       old.transform = null;
@@ -258,6 +275,12 @@ export class EditorStore {
       return true;
     }
     if (tab.info !== null) {
+      // A filter dialog of this tab cancels first: its preview makes the document dirty.
+      const filter = this.filterDialog;
+      if (filter !== null && filter.tab === tab) {
+        this.filterDialog = null;
+        await filter.client.dispose();
+      }
       // Queued edits and a running save change `dirty`.
       await this.#settle(tab);
       if (tab.dirty) {
@@ -515,6 +538,10 @@ export class EditorStore {
 
   /** Sets the tool of the canvas. */
   setTool(tool: EditorTool): void {
+    // The tools are blocked while a filter dialog is open.
+    if (this.filterDialog !== null) {
+      return;
+    }
     // A tool change ends a free transform without an edit (ADR 0029).
     this.cancelTransform();
     this.tool = tool;
@@ -1206,6 +1233,8 @@ export class EditorStore {
     if (!tab.canSave) {
       return Promise.resolve(false);
     }
+    // A save ends the filter session in the shell.
+    this.#abandonFilter(tab);
     const run = this.#runSave(tab, folder).finally(() => {
       tab.saveRun = null;
     });
@@ -1306,6 +1335,90 @@ export class EditorStore {
       await this.#api.close(documentId);
     } catch (error: unknown) {
       this.#toasts.error('Close the Editor document failed.', error);
+    }
+  }
+
+  // ---- Filters (Gaussian blur, unsharp mask) ----
+
+  /** What a filter changes now: the mask if the mask is the paint target, else the pixels. */
+  get filterTarget(): FilterTarget {
+    return this.paintTarget;
+  }
+
+  /**
+   * The reason why no filter can run now, or null if one can. Filters work
+   * on the pixels of a pixel layer, or on a mask. The pixels lock and the
+   * all lock block the pixels; the all lock blocks the mask.
+   */
+  get filterBlockReason(): string | null {
+    if (this.info === null || this.status !== 'ready') {
+      return 'No document is open.';
+    }
+    const layer = this.selected;
+    if (layer === null) {
+      return 'Select a layer to filter.';
+    }
+    const target = this.filterTarget;
+    if (target === 'pixels' && layer.kind !== 'pixel') {
+      return 'Filters work on pixel layers. Select a pixel layer, or click the mask of a layer.';
+    }
+    const locks = this.selectedLocks;
+    if (locks.all || (target === 'pixels' && locks.pixels)) {
+      return 'The layer is locked.';
+    }
+    return null;
+  }
+
+  /**
+   * Opens the dialog of a filter for the selected layer. Does nothing while
+   * a filter cannot run (a toast shows the reason) or a dialog is open.
+   */
+  openFilterDialog(kind: FilterKind): void {
+    const tab = this.#activeTab;
+    const info = tab?.info ?? null;
+    const layer = this.selected;
+    if (tab === null || info === null || this.filterDialog !== null) {
+      return;
+    }
+    const reason = this.filterBlockReason;
+    if (reason !== null || layer === null) {
+      this.#toasts.info(reason ?? 'Select a layer to filter.');
+      return;
+    }
+    this.cancelTransform();
+    // A paint tool would start a stroke, and a stroke ends the filter session.
+    this.tool = 'hand';
+    const client = new FilterClient({
+      api: this.#api,
+      documentId: info.documentId,
+      layerId: layer.id,
+      target: this.filterTarget,
+      onInfo: (next) => tab.apply(next),
+      onError: (error) => {
+        this.#toasts.error(`Apply the filter failed: ${describeError(error)}`, error);
+        if (this.filterDialog?.client === client) {
+          this.closeFilterDialog();
+        }
+      },
+    });
+    this.filterDialog = { kind, tab, layerId: layer.id, target: this.filterTarget, client };
+  }
+
+  /** Closes the filter dialog and cancels its session (Cancel, Escape, tab switch). */
+  closeFilterDialog(): void {
+    const session = this.filterDialog;
+    if (session !== null) {
+      this.filterDialog = null;
+      void session.client.dispose();
+    }
+  }
+
+  /** Closes the filter dialog of a tab without a cancel call: another command already ended the session in the shell. */
+  #abandonFilter(tab: EditorTab): void {
+    const session = this.filterDialog;
+    if (session !== null && session.tab === tab) {
+      this.filterDialog = null;
+      session.client.abandon();
     }
   }
 
@@ -1424,7 +1537,7 @@ export class EditorStore {
   async startTransform(): Promise<void> {
     const tab = this.#activeTab;
     const info = tab?.info ?? null;
-    if (tab === null || info === null || tab.status !== 'ready' || tab.transform !== null) {
+    if (tab === null || info === null || tab.status !== 'ready' || tab.transform !== null || this.filterDialog !== null) {
       return;
     }
     const layer = this.selected;
@@ -1668,6 +1781,8 @@ export class EditorStore {
    * the info at its start. Errors go to a toast. A closed tab skips its tasks.
    */
   #enqueue(tab: EditorTab, task: (info: DocumentInfo) => Promise<void>): void {
+    // Any queued edit ends the filter session in the shell: the dialog closes without a cancel call.
+    this.#abandonFilter(tab);
     tab.pending += 1;
     tab.chain = tab.chain
       .then(async () => {
