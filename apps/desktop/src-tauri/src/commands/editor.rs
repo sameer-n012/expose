@@ -397,7 +397,7 @@ pub async fn editor_stroke_begin(
     target: StrokeTargetDto,
     brush: BrushSettingsDto,
 ) -> Result<u64, CommandError> {
-    let target = target.to_target()?;
+    let target = target.to_kind()?;
     Ok(engine
         .stroke_begin_async(document_id, layer_id, target, brush.into())
         .await?)

@@ -9,12 +9,14 @@ use expose_core::color::ColorSpaceId;
 use expose_core::develop::CurvePoint;
 use expose_editor::{
     Adjustment, Background, BitDepth, BlendMode, BlendSpace, BrightnessContrast, BrushSettings,
-    ColorMode, Curves, Document, DocumentSpec, GradientShape, GroupIsolation, HueSaturation,
-    Interpolation, Layer, LayerKind, LayerTransformPreview, Levels, LevelsChannel, Locks,
-    MAX_DIMENSION, MAX_PIXELS, SelectionMode, SelectionShape, StrokePoint, StrokeTarget,
+    CloneKind, ColorMode, Curves, Document, DocumentSpec, GradientShape, GroupIsolation,
+    HueSaturation, Interpolation, Layer, LayerKind, LayerTransformPreview, Levels, LevelsChannel,
+    Locks, MAX_CLONE_OFFSET, MAX_DIMENSION, MAX_PIXELS, SelectionMode, SelectionShape, StrokePoint,
+    StrokeTarget,
 };
 use serde::{Deserialize, Serialize};
 
+use super::session::StrokeKind;
 use crate::error::{CommandError, ErrorKind};
 
 /// The identifier of an open document. It is a process counter, so it is
@@ -1073,18 +1075,86 @@ pub enum StrokeTargetDto {
         /// The mask value of the stroke.
         value: f32,
     },
+    /// Copy pixels of the same layer, or of the composite, from the place
+    /// at `offset` from the brush.
+    Clone {
+        /// The offset `[dx, dy]` from the brush to the source, in canvas
+        /// pixels. Whole numbers only.
+        offset: [f64; 2],
+        /// `true` to sample the composite of all layers.
+        sample_all_layers: bool,
+    },
+    /// Like `Clone`, and the result takes the tone and color of the
+    /// target area.
+    Heal {
+        /// See `Clone`.
+        offset: [f64; 2],
+        /// See `Clone`.
+        sample_all_layers: bool,
+    },
+}
+
+/// Converts a JSON clone offset to whole canvas pixels.
+fn clone_offset(offset: [f64; 2]) -> Result<(i32, i32), CommandError> {
+    let limit = f64::from(MAX_CLONE_OFFSET);
+    let mut whole = [0_i32; 2];
+    for (out, v) in whole.iter_mut().zip(offset) {
+        if !v.is_finite() || v.fract() != 0.0 || v.abs() > limit {
+            return Err(CommandError::invalid_input(
+                "a clone offset must be a whole number with an absolute value of 100000 or less",
+            ));
+        }
+        // Whole and in -100000..=100000, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            *out = v as i32;
+        }
+    }
+    Ok((whole[0], whole[1]))
 }
 
 impl StrokeTargetDto {
-    /// Converts to the target of the editor crate. A paint color goes from
-    /// gamma-encoded sRGB to linear Rec. 2020 (the working space).
+    /// Converts to the kind of stroke that the session starts.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError`] of kind `invalidInput` for a bad color value or a
+    /// bad clone offset.
+    pub fn to_kind(self) -> Result<StrokeKind, CommandError> {
+        match self {
+            Self::Clone {
+                offset,
+                sample_all_layers,
+            } => Ok(StrokeKind::Clone {
+                kind: CloneKind::Clone,
+                offset: clone_offset(offset)?,
+                sample_all_layers,
+            }),
+            Self::Heal {
+                offset,
+                sample_all_layers,
+            } => Ok(StrokeKind::Clone {
+                kind: CloneKind::Heal,
+                offset: clone_offset(offset)?,
+                sample_all_layers,
+            }),
+            brush => brush.to_target().map(StrokeKind::Brush),
+        }
+    }
+
+    /// Converts a brush target to the target of the editor crate. A paint
+    /// color goes from gamma-encoded sRGB to linear Rec. 2020 (the working
+    /// space).
     ///
     /// # Errors
     ///
     /// [`CommandError`] of kind `invalidInput` if a color value is not a
-    /// finite number in 0 to 1.
-    pub fn to_target(self) -> Result<StrokeTarget, CommandError> {
+    /// finite number in 0 to 1, or if the target is a clone or heal target.
+    fn to_target(self) -> Result<StrokeTarget, CommandError> {
         match self {
+            Self::Clone { .. } | Self::Heal { .. } => Err(CommandError::invalid_input(
+                "a clone or heal stroke has no brush target",
+            )),
             Self::Paint { color } => {
                 if color
                     .iter()
@@ -1832,6 +1902,50 @@ mod tests {
             panic!("not a paint target");
         };
         assert!((color[0] - 0.6274).abs() < 1e-3 && (color[1] - 0.0691).abs() < 1e-3);
+    }
+
+    #[test]
+    fn clone_and_heal_targets_parse_and_check_the_offset() {
+        let clone: StrokeTargetDto =
+            serde_json::from_str(r#"{"type":"clone","offset":[-12,30],"sampleAllLayers":false}"#)
+                .unwrap();
+        assert_eq!(
+            clone.to_kind().unwrap(),
+            StrokeKind::Clone {
+                kind: CloneKind::Clone,
+                offset: (-12, 30),
+                sample_all_layers: false,
+            }
+        );
+        let heal: StrokeTargetDto = serde_json::from_str(
+            r#"{"type":"heal","offset":[100000,-100000],"sampleAllLayers":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            heal.to_kind().unwrap(),
+            StrokeKind::Clone {
+                kind: CloneKind::Heal,
+                offset: (100_000, -100_000),
+                sample_all_layers: true,
+            }
+        );
+        for bad in [
+            r#"{"type":"clone","offset":[1.5,0],"sampleAllLayers":false}"#,
+            r#"{"type":"heal","offset":[0,100001],"sampleAllLayers":false}"#,
+            r#"{"type":"heal","offset":[-100001,0],"sampleAllLayers":false}"#,
+        ] {
+            let target: StrokeTargetDto = serde_json::from_str(bad).unwrap();
+            let error = target.to_kind().unwrap_err();
+            assert_eq!(error.kind, crate::error::ErrorKind::InvalidInput, "{bad}");
+        }
+        // A missing field does not parse.
+        assert!(
+            serde_json::from_str::<StrokeTargetDto>(r#"{"type":"clone","sampleAllLayers":true}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<StrokeTargetDto>(r#"{"type":"heal","offset":[0,0]}"#).is_err()
+        );
     }
 
     #[test]
