@@ -7,14 +7,16 @@ use std::sync::Arc;
 use expose_core::buffer::WorkingImage;
 use expose_editor::{
     Adjustment, Affine, BrushSettings, CloneKind, CloneSource, CloneSpec, Document, DocumentSpec,
-    Edit, EditorError, FillSettings, FloodSample, FloodSettings, GradientSpec, GradientStop,
-    GradientTarget, History, LayerContent, LayerId, Mask, MaskFill, MaskImage, PixelLayer,
-    Placement, Stroke, StrokePoint, StrokeTarget, flood_region,
+    Edit, EditorError, FillSettings, FilterSession, FilterSpec, FilterTarget, FloodSample,
+    FloodSettings, GradientSpec, GradientStop, GradientTarget, History, LayerContent, LayerId,
+    Mask, MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
+    flood_region,
 };
 
 use super::EditorEngineError;
 use super::dto::{
-    DocumentId, DocumentInfo, EditDto, GradientTargetId, HistoryInfo, MaskFillId, srgb_to_working,
+    DocumentId, DocumentInfo, EditDto, GradientTargetId, HistoryInfo, MaskFillId, filter_step_name,
+    srgb_to_working,
 };
 use super::save::{DocumentOrigin, SavedFiles};
 
@@ -54,6 +56,8 @@ pub struct EditSession {
     saved_revision: u64,
     /// The stroke that the user draws now, if any.
     stroke: Option<ActiveStroke>,
+    /// The filter preview that the user adjusts now, if any.
+    filter: Option<ActiveFilter>,
     /// The ID of the next stroke. IDs start at 1 and stay far below 2^53.
     next_stroke_id: u64,
     /// The last flood sample (magic wand, paint bucket), with its key.
@@ -84,6 +88,24 @@ struct ActiveStroke {
     id: u64,
     name: &'static str,
     stroke: Stroke,
+}
+
+/// A filter preview in progress. The layer holds the filtered values until
+/// the commit or the cancel.
+struct ActiveFilter {
+    session: FilterSession,
+    /// The last settings that were applied. `None` before the first apply.
+    applied: Option<FilterSpec>,
+}
+
+impl std::fmt::Debug for ActiveFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveFilter")
+            .field("layer", &self.session.layer())
+            .field("target", &self.session.target())
+            .field("applied", &self.applied)
+            .finish()
+    }
 }
 
 /// The composite of all layers at one document revision. A clone or heal
@@ -158,6 +180,7 @@ impl EditSession {
             origin,
             saved_revision,
             stroke: None,
+            filter: None,
             next_stroke_id: 1,
             flood_cache: None,
             #[cfg(test)]
@@ -212,7 +235,9 @@ impl EditSession {
         settings: BrushSettings,
         build_composite: impl FnOnce(&Document) -> Result<WorkingImage, EditorEngineError>,
     ) -> Result<u64, EditorEngineError> {
-        // The commit comes first: it can change the revision.
+        // The filter cancel and the commit come first: they can change the
+        // revision.
+        self.cancel_filter()?;
         self.commit_stroke()?;
         let layer = resolve(&self.document, layer)?;
         let name = stroke_step_name(&kind);
@@ -330,6 +355,99 @@ impl EditSession {
         Ok(())
     }
 
+    /// `true` if a filter preview is active.
+    pub const fn has_filter(&self) -> bool {
+        self.filter.is_some()
+    }
+
+    /// Shows a filter on the layer with the number `layer`. The first call
+    /// starts the preview session (an active stroke ends first, and a
+    /// preview for another layer or target is cancelled). Each call applies
+    /// `spec` to the original values, not to the last preview.
+    ///
+    /// # Errors
+    ///
+    /// - [`EditorEngineError::LayerNotFound`] for an unknown layer.
+    /// - [`EditorEngineError::Editor`] for a locked layer, a layer of the
+    ///   wrong kind, a missing mask, or a bad value. A bad value keeps the
+    ///   session if an earlier apply worked, and ends it otherwise.
+    pub fn filter_preview(
+        &mut self,
+        layer: u64,
+        target: FilterTarget,
+        spec: &FilterSpec,
+    ) -> Result<(), EditorEngineError> {
+        self.commit_stroke()?;
+        let layer = resolve(&self.document, layer)?;
+        if self
+            .filter
+            .as_ref()
+            .is_some_and(|f| f.session.layer() != layer || f.session.target() != target)
+        {
+            self.cancel_filter()?;
+        }
+        if self.filter.is_none() {
+            let session = FilterSession::begin(&self.document, layer, target)?;
+            self.filter = Some(ActiveFilter {
+                session,
+                applied: None,
+            });
+        }
+        let Some(active) = self.filter.as_mut() else {
+            return Err(EditorEngineError::Internal("the filter session is missing"));
+        };
+        match active.session.apply(&mut self.document, spec) {
+            Ok(_) => {
+                active.applied = Some(*spec);
+                Ok(())
+            }
+            Err(error) => {
+                if active.applied.is_none() {
+                    // Nothing changed yet: do not keep an idle session.
+                    self.cancel_filter()?;
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Ends the filter preview and records one history step, named after
+    /// the last applied filter. If the filter changed nothing, there is no
+    /// step.
+    ///
+    /// # Errors
+    ///
+    /// - [`EditorEngineError::FilterNotActive`] if no preview is active.
+    /// - [`EditorEngineError::Editor`] if the commit fails. The session is
+    ///   gone.
+    pub fn filter_commit(&mut self) -> Result<(), EditorEngineError> {
+        let active = self
+            .filter
+            .take()
+            .ok_or(EditorEngineError::FilterNotActive)?;
+        let name = active.applied.as_ref().map(filter_step_name);
+        let edit = active.session.commit(&mut self.document)?;
+        if let (Some(edit), Some(name)) = (edit, name) {
+            self.history.push(name, vec![edit]);
+        }
+        Ok(())
+    }
+
+    /// Ends the filter preview, if any. The layer returns to its state
+    /// before the preview. No history step is recorded. Every other
+    /// operation runs this first.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::Editor`] if the cancel fails. The session is
+    /// gone.
+    pub fn cancel_filter(&mut self) -> Result<(), EditorEngineError> {
+        if let Some(active) = self.filter.take() {
+            active.session.cancel(&mut self.document)?;
+        }
+        Ok(())
+    }
+
     fn active_stroke(&self, id: u64) -> Result<&ActiveStroke, EditorEngineError> {
         match self.stroke.as_ref() {
             Some(active) if active.id == id => Ok(active),
@@ -414,6 +532,7 @@ impl EditSession {
     ///   example, an opacity out of range, a lock, or a move into a
     ///   descendant).
     pub fn edit(&mut self, edit: EditDto, gesture: Option<u64>) -> Result<(), EditorEngineError> {
+        self.cancel_filter()?;
         self.commit_stroke()?;
         let name = edit.step_name();
         let undo = match edit {
@@ -622,6 +741,7 @@ impl EditSession {
     /// [`EditorEngineError::History`] if the step fails (a bug; the history
     /// restores the state before the step).
     pub fn undo(&mut self) -> Result<(), EditorEngineError> {
+        self.cancel_filter()?;
         self.commit_stroke()?;
         self.history
             .undo(&mut self.document)
@@ -635,6 +755,7 @@ impl EditSession {
     ///
     /// [`EditorEngineError::History`] if the step fails.
     pub fn redo(&mut self) -> Result<(), EditorEngineError> {
+        self.cancel_filter()?;
         self.commit_stroke()?;
         self.history
             .redo(&mut self.document)
@@ -652,6 +773,7 @@ impl EditSession {
     ///   more than the number of steps.
     /// - [`EditorEngineError::History`] if a step fails.
     pub fn history_jump(&mut self, step: usize) -> Result<(), EditorEngineError> {
+        self.cancel_filter()?;
         self.commit_stroke()?;
         let len = self.history.entries().len();
         if step > len {
@@ -2445,5 +2567,163 @@ mod tests {
             .edit(transform(999, [1.0, 0.0, 0.0, 1.0, 1.0, 0.0]), None)
             .unwrap_err();
         assert!(matches!(unknown, EditorEngineError::LayerNotFound(999)));
+    }
+
+    const BLUR: FilterSpec = FilterSpec::GaussianBlur { radius: 1.0 };
+
+    fn unsharp() -> FilterSpec {
+        FilterSpec::UnsharpMask {
+            amount: 1.0,
+            radius: 1.0,
+            threshold: 0.0,
+        }
+    }
+
+    fn step_names(s: &EditSession) -> Vec<String> {
+        s.info(1).history.steps
+    }
+
+    #[test]
+    fn filter_preview_twice_then_commit_is_one_named_step() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        let original = pixels(&s);
+        let revision = s.info(1).revision;
+        s.filter_preview(bg, FilterTarget::Pixels, &BLUR).unwrap();
+        assert!(s.has_filter());
+        let blurred = pixels(&s);
+        assert_ne!(blurred, original);
+        assert_ne!(s.info(1).revision, revision);
+        s.filter_preview(bg, FilterTarget::Pixels, &unsharp())
+            .unwrap();
+        assert!(step_names(&s).is_empty());
+        s.filter_commit().unwrap();
+        assert!(!s.has_filter());
+        assert_eq!(step_names(&s), ["Unsharp Mask"]);
+        let sharpened = pixels(&s);
+        s.undo().unwrap();
+        assert_eq!(pixels(&s), original);
+        s.redo().unwrap();
+        assert_eq!(pixels(&s), sharpened);
+    }
+
+    #[test]
+    fn filter_commit_without_preview_is_an_error() {
+        let mut s = two_color_session();
+        assert!(matches!(
+            s.filter_commit(),
+            Err(EditorEngineError::FilterNotActive)
+        ));
+        // A cancel without a preview does nothing.
+        s.cancel_filter().unwrap();
+    }
+
+    #[test]
+    fn filter_cancel_restores_the_pixels_without_a_step() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        let original = pixels(&s);
+        s.filter_preview(bg, FilterTarget::Pixels, &BLUR).unwrap();
+        s.cancel_filter().unwrap();
+        assert_eq!(pixels(&s), original);
+        assert!(step_names(&s).is_empty());
+        assert!(!s.has_filter());
+    }
+
+    #[test]
+    fn another_operation_cancels_the_filter() {
+        let original = pixels(&two_color_session());
+        let bg_edit = |bg| EditDto::SetOpacity {
+            layer_id: bg,
+            opacity: 0.5,
+        };
+        // An edit.
+        let mut s = two_color_session();
+        let bg = background(&s);
+        s.filter_preview(bg, FilterTarget::Pixels, &BLUR).unwrap();
+        s.edit(bg_edit(bg), None).unwrap();
+        assert!(!s.has_filter());
+        assert_eq!(pixels(&s), original);
+        assert_eq!(step_names(&s), ["Layer Opacity"]);
+        // An undo, a redo, and a history jump.
+        for op in 0..3 {
+            s.filter_preview(bg, FilterTarget::Pixels, &BLUR).unwrap();
+            match op {
+                0 => s.undo().unwrap(),
+                1 => s.redo().unwrap(),
+                _ => s.history_jump(0).unwrap(),
+            }
+            assert!(!s.has_filter(), "operation {op}");
+            assert_eq!(pixels(&s), original, "operation {op}");
+        }
+        // A stroke begin.
+        s.filter_preview(bg, FilterTarget::Pixels, &BLUR).unwrap();
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        assert!(!s.has_filter());
+        assert_eq!(pixels(&s), original);
+        s.stroke_cancel(id).unwrap();
+    }
+
+    #[test]
+    fn filter_preview_commits_an_active_stroke_first() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        let id = s.stroke_begin(bg, white(), brush()).unwrap();
+        s.stroke_points(id, &dabs()).unwrap();
+        s.filter_preview(bg, FilterTarget::Pixels, &BLUR).unwrap();
+        assert_eq!(step_names(&s).len(), 1);
+        assert!(s.has_filter());
+        s.cancel_filter().unwrap();
+    }
+
+    #[test]
+    fn filter_preview_on_another_layer_cancels_the_first() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        let original = pixels(&s);
+        s.edit(
+            EditDto::AddPixelLayer {
+                above_layer_id: None,
+            },
+            None,
+        )
+        .unwrap();
+        let top = s.document().layers()[1].id().get();
+        s.filter_preview(bg, FilterTarget::Pixels, &BLUR).unwrap();
+        s.filter_preview(top, FilterTarget::Pixels, &BLUR).unwrap();
+        assert_eq!(pixels(&s), original);
+        s.filter_commit().unwrap();
+        assert_eq!(pixels(&s), original);
+    }
+
+    #[test]
+    fn filter_preview_rejects_bad_input_and_keeps_no_idle_session() {
+        let mut s = two_color_session();
+        let bg = background(&s);
+        let bad = FilterSpec::GaussianBlur { radius: -1.0 };
+        let error = s
+            .filter_preview(bg, FilterTarget::Pixels, &bad)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EditorEngineError::Editor(EditorError::OutOfRange { .. })
+        ));
+        assert!(!s.has_filter());
+        // A mask target on a layer with no mask.
+        let error = s.filter_preview(bg, FilterTarget::Mask, &BLUR).unwrap_err();
+        assert!(matches!(
+            error,
+            EditorEngineError::Editor(EditorError::NoMask(_))
+        ));
+        assert!(matches!(
+            s.filter_preview(999, FilterTarget::Pixels, &BLUR),
+            Err(EditorEngineError::LayerNotFound(999))
+        ));
+        // A bad value after a good apply keeps the session.
+        s.filter_preview(bg, FilterTarget::Pixels, &BLUR).unwrap();
+        assert!(s.filter_preview(bg, FilterTarget::Pixels, &bad).is_err());
+        assert!(s.has_filter());
+        s.cancel_filter().unwrap();
+        assert!(step_names(&s).is_empty());
     }
 }

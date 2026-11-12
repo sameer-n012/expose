@@ -9,10 +9,10 @@ use expose_core::color::ColorSpaceId;
 use expose_core::develop::CurvePoint;
 use expose_editor::{
     Adjustment, Background, BitDepth, BlendMode, BlendSpace, BrightnessContrast, BrushSettings,
-    CloneKind, ColorMode, Curves, Document, DocumentSpec, GradientShape, GroupIsolation,
-    HueSaturation, Interpolation, Layer, LayerKind, LayerTransformPreview, Levels, LevelsChannel,
-    Locks, MAX_CLONE_OFFSET, MAX_DIMENSION, MAX_PIXELS, SelectionMode, SelectionShape, StrokePoint,
-    StrokeTarget,
+    CloneKind, ColorMode, Curves, Document, DocumentSpec, FilterSpec, FilterTarget, GradientShape,
+    GroupIsolation, HueSaturation, Interpolation, Layer, LayerKind, LayerTransformPreview, Levels,
+    LevelsChannel, Locks, MAX_CLONE_OFFSET, MAX_DIMENSION, MAX_PIXELS, SelectionMode,
+    SelectionShape, StrokePoint, StrokeTarget,
 };
 use serde::{Deserialize, Serialize};
 
@@ -894,6 +894,78 @@ pub enum EditDto {
         /// How the pixels are resampled.
         interpolation: InterpolationId,
     },
+}
+
+/// A filter with its settings, for `editor_filter_preview`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum FilterDto {
+    /// A Gaussian blur. `radius` is in pixels.
+    GaussianBlur {
+        /// The blur radius (the standard deviation) in pixels.
+        radius: f32,
+    },
+    /// An unsharp mask. `amount` is a fraction (1.5 is 150 %).
+    UnsharpMask {
+        /// The strength, as a fraction.
+        amount: f32,
+        /// The blur radius in pixels.
+        radius: f32,
+        /// The smallest difference that is sharpened, in 0 to 255 levels.
+        threshold: f32,
+    },
+}
+
+impl FilterDto {
+    /// The editor filter settings. The editor checks the values when it
+    /// applies them.
+    #[must_use]
+    pub const fn to_spec(self) -> FilterSpec {
+        match self {
+            Self::GaussianBlur { radius } => FilterSpec::GaussianBlur { radius },
+            Self::UnsharpMask {
+                amount,
+                radius,
+                threshold,
+            } => FilterSpec::UnsharpMask {
+                amount,
+                radius,
+                threshold,
+            },
+        }
+    }
+}
+
+/// The history step name of a filter.
+#[must_use]
+pub const fn filter_step_name(spec: &FilterSpec) -> &'static str {
+    match spec {
+        FilterSpec::GaussianBlur { .. } => "Gaussian Blur",
+        FilterSpec::UnsharpMask { .. } => "Unsharp Mask",
+    }
+}
+
+/// What a filter changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterTargetDto {
+    /// The pixels of a pixel layer.
+    Pixels,
+    /// The mask of a layer.
+    Mask,
+}
+
+impl From<FilterTargetDto> for FilterTarget {
+    fn from(target: FilterTargetDto) -> Self {
+        match target {
+            FilterTargetDto::Pixels => Self::Pixels,
+            FilterTargetDto::Mask => Self::Mask,
+        }
+    }
 }
 
 /// How a transform resamples the pixels.
@@ -2044,6 +2116,44 @@ mod tests {
             "matrix": [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], "interpolation": "lanczos",
         }));
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn filter_dto_parses_and_converts() {
+        let blur: FilterDto = serde_json::from_value(serde_json::json!({
+            "type": "gaussianBlur", "radius": 2.0,
+        }))
+        .unwrap();
+        assert_eq!(blur.to_spec(), FilterSpec::GaussianBlur { radius: 2.0 });
+        assert_eq!(filter_step_name(&blur.to_spec()), "Gaussian Blur");
+        let unsharp: FilterDto = serde_json::from_value(serde_json::json!({
+            "type": "unsharpMask", "amount": 1.5, "radius": 1.0, "threshold": 0,
+        }))
+        .unwrap();
+        assert_eq!(
+            unsharp.to_spec(),
+            FilterSpec::UnsharpMask {
+                amount: 1.5,
+                radius: 1.0,
+                threshold: 0.0
+            }
+        );
+        assert_eq!(filter_step_name(&unsharp.to_spec()), "Unsharp Mask");
+        let bad = serde_json::from_value::<FilterDto>(serde_json::json!({
+            "type": "median", "radius": 2.0,
+        }));
+        assert!(bad.is_err());
+        let missing = serde_json::from_value::<FilterDto>(serde_json::json!({
+            "type": "unsharpMask", "amount": 1.0,
+        }));
+        assert!(missing.is_err());
+        assert_eq!(
+            FilterTarget::from(FilterTargetDto::Mask),
+            FilterTarget::Mask
+        );
+        let target: FilterTargetDto = serde_json::from_value(serde_json::json!("pixels")).unwrap();
+        assert_eq!(FilterTarget::from(target), FilterTarget::Pixels);
+        assert!(serde_json::from_value::<FilterTargetDto>(serde_json::json!("alpha")).is_err());
     }
 
     #[test]

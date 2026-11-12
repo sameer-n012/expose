@@ -35,7 +35,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use expose_develop::{DisplayEncoder, DisplaySpace};
-use expose_editor::{BrushSettings, Document, GpuCompositor, StrokePoint, ViewSpec};
+use expose_editor::{
+    BrushSettings, Document, FilterSpec, FilterTarget, GpuCompositor, StrokePoint, ViewSpec,
+};
 use expose_gpu::{GpuContext, GpuContextOptions};
 
 use super::EditorEngineError;
@@ -121,6 +123,24 @@ enum Job {
     StrokeCancel {
         document: DocumentId,
         stroke: u64,
+        reply: Reply<DocumentInfo>,
+    },
+    /// Shows a filter on a layer (starts the preview session if needed).
+    FilterPreview {
+        document: DocumentId,
+        layer: u64,
+        target: FilterTarget,
+        spec: FilterSpec,
+        reply: Reply<DocumentInfo>,
+    },
+    /// Ends the filter preview with a history step.
+    FilterCommit {
+        document: DocumentId,
+        reply: Reply<DocumentInfo>,
+    },
+    /// Ends the filter preview and restores the layer.
+    FilterCancel {
+        document: DocumentId,
         reply: Reply<DocumentInfo>,
     },
     Undo {
@@ -328,6 +348,100 @@ impl EditorEngine {
             document,
             edit,
             gesture,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
+    /// Shows a filter on a layer and waits for the new document info (see
+    /// [`EditSession::filter_preview`]). A preview job of the same document
+    /// that still waits in the queue is replaced: it gets
+    /// [`EditorEngineError::Superseded`], and only the newest job runs.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`],
+    /// [`EditorEngineError::LayerNotFound`],
+    /// [`EditorEngineError::Superseded`], and the filter errors.
+    pub async fn filter_preview_async(
+        &self,
+        document: DocumentId,
+        layer: u64,
+        target: FilterTarget,
+        spec: FilterSpec,
+    ) -> Result<DocumentInfo, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let job = Job::FilterPreview {
+            document,
+            layer,
+            target,
+            spec,
+            reply: reply_to(sender),
+        };
+        self.push_filter_preview(document, job);
+        receive(receiver).await
+    }
+
+    /// Queues a filter preview job. A waiting preview job of the same
+    /// document is replaced and gets [`EditorEngineError::Superseded`].
+    fn push_filter_preview(&self, document: DocumentId, job: Job) {
+        let replaced = {
+            let mut queue = self.shared.lock();
+            if queue.stop {
+                drop(queue);
+                fail_job(job, &stopped());
+                return;
+            }
+            let waiting = queue
+                .jobs
+                .iter_mut()
+                .find(|w| matches!(w, Job::FilterPreview { document: d, .. } if *d == document));
+            if let Some(slot) = waiting {
+                Some(std::mem::replace(slot, job))
+            } else {
+                queue.jobs.push_back(job);
+                None
+            }
+        };
+        self.shared.wake.notify_one();
+        // Reply outside the lock.
+        if let Some(Job::FilterPreview { reply, .. }) = replaced {
+            reply(Err(EditorEngineError::Superseded));
+        }
+    }
+
+    /// Ends the filter preview of a document with one history step and
+    /// waits for the new document info.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`],
+    /// [`EditorEngineError::FilterNotActive`], and the commit errors.
+    pub async fn filter_commit_async(
+        &self,
+        document: DocumentId,
+    ) -> Result<DocumentInfo, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::FilterCommit {
+            document,
+            reply: reply_to(sender),
+        });
+        receive(receiver).await
+    }
+
+    /// Ends the filter preview of a document and restores the layer. With
+    /// no preview, the document does not change.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorEngineError::DocumentNotFound`] and the cancel errors.
+    pub async fn filter_cancel_async(
+        &self,
+        document: DocumentId,
+    ) -> Result<DocumentInfo, EditorEngineError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.push_job(Job::FilterCancel {
+            document,
             reply: reply_to(sender),
         });
         receive(receiver).await
@@ -730,6 +844,9 @@ fn fail_job(job: Job, error: &EditorEngineError) {
         | Job::Edit { reply, .. }
         | Job::StrokeEnd { reply, .. }
         | Job::StrokeCancel { reply, .. }
+        | Job::FilterPreview { reply, .. }
+        | Job::FilterCommit { reply, .. }
+        | Job::FilterCancel { reply, .. }
         | Job::Undo { reply, .. }
         | Job::Redo { reply, .. }
         | Job::HistoryJump { reply, .. } => reply(Err(error())),
@@ -905,7 +1022,9 @@ impl Renderer {
         if doc.saving {
             return Err(EditorEngineError::SaveInProgress(id));
         }
-        // A stroke in progress is part of the saved state.
+        // A filter preview is not part of the saved state. A stroke in
+        // progress is.
+        doc.session.cancel_filter()?;
         doc.session.commit_stroke()?;
         let Gpu {
             ctx, compositor, ..
@@ -1152,6 +1271,36 @@ impl Renderer {
             | Job::StrokePoints { .. }
             | Job::StrokeEnd { .. }
             | Job::StrokeCancel { .. }) => self.run_stroke_job(job),
+            Job::FilterPreview {
+                document,
+                layer,
+                target,
+                spec,
+                reply,
+            } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    session.filter_preview(layer, target, &spec)?;
+                    Ok(session.info(document))
+                });
+                reply(result);
+            }
+            Job::FilterCommit { document, reply } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    session.filter_commit()?;
+                    Ok(session.info(document))
+                });
+                reply(result);
+            }
+            Job::FilterCancel { document, reply } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    session.cancel_filter()?;
+                    Ok(session.info(document))
+                });
+                reply(result);
+            }
             Job::Undo { document, reply } => {
                 let result = guarded(self, |r| {
                     let session = r.session(document)?;
@@ -1779,6 +1928,45 @@ mod tests {
         };
         assert!(jobs.is_empty());
         assert_eq!(renders.len(), 2);
+    }
+
+    #[test]
+    fn newer_filter_preview_replaces_the_waiting_one_of_the_same_document() {
+        let engine = engine_without_thread();
+        let (sender, receiver) = mpsc::channel();
+        let push = |document, tag: u32, radius: f32| {
+            let sender = sender.clone();
+            let reply: Reply<DocumentInfo> = Box::new(move |result| {
+                drop(sender.send((tag, result.map(|_| ()))));
+            });
+            engine.push_filter_preview(
+                document,
+                Job::FilterPreview {
+                    document,
+                    layer: 1,
+                    target: FilterTarget::Pixels,
+                    spec: FilterSpec::GaussianBlur { radius },
+                    reply,
+                },
+            );
+        };
+        push(1, 0, 1.0);
+        push(2, 1, 1.0);
+        push(1, 2, 3.0);
+        let (tag, result) = receiver.try_recv().unwrap();
+        assert_eq!(tag, 0);
+        assert!(matches!(result, Err(EditorEngineError::Superseded)));
+        assert!(receiver.try_recv().is_err());
+        let queue = engine.shared.lock();
+        assert_eq!(queue.jobs.len(), 2);
+        assert!(matches!(
+            queue.jobs.front(),
+            Some(Job::FilterPreview {
+                document: 1,
+                spec: FilterSpec::GaussianBlur { radius },
+                ..
+            }) if (*radius - 3.0).abs() < f32::EPSILON
+        ));
     }
 
     #[test]
