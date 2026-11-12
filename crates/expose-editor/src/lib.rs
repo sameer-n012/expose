@@ -20,8 +20,9 @@
 //! - [`selection`]: the document selection (rectangle, ellipse, and
 //!   polygon shapes, combine modes, feather, invert, mask from selection).
 //!   [`Document::selection_version`] changes at each selection change.
-//! - [`brush`]: brush strokes (paint, erase, mask paint) on pixel layers
-//!   and masks ([`Stroke`]). One stroke gives one undo edit.
+//! - [`brush`]: brush strokes (paint, erase, mask paint, clone stamp,
+//!   healing brush) on pixel layers and masks ([`Stroke`],
+//!   [`Stroke::begin_clone`]). One stroke gives one undo edit.
 //! - [`flood`]: flood regions for the magic wand and the paint bucket
 //!   ([`flood_region`], [`Document::select_region`],
 //!   [`Document::fill_region`]).
@@ -85,6 +86,7 @@ pub mod file;
 pub mod flood;
 pub mod gpu;
 pub mod gradient;
+mod heal;
 pub mod history;
 pub mod layer;
 pub mod ops;
@@ -98,8 +100,9 @@ pub use adjust::{
 };
 pub use blend::{BlendMode, BlendSpace, RangeHandling};
 pub use brush::{
-    BrushSettings, MAX_BRUSH_SIZE, MAX_BRUSH_SPACING, MAX_STROKE_COORD, MIN_BRUSH_SIZE,
-    MIN_BRUSH_SPACING, MIN_DAB_STEP, STROKE_TILE_SIZE, Stroke, StrokePoint, StrokeTarget,
+    BrushSettings, CloneKind, CloneSource, CloneSpec, MAX_BRUSH_SIZE, MAX_BRUSH_SPACING,
+    MAX_CLONE_OFFSET, MAX_STROKE_COORD, MIN_BRUSH_SIZE, MIN_BRUSH_SPACING, MIN_DAB_STEP,
+    STROKE_TILE_SIZE, Stroke, StrokePoint, StrokeTarget,
 };
 pub use composite::{composite, composite_straight, to_straight_alpha};
 pub use document::{
