@@ -10,7 +10,7 @@ Operator checks in the real webview (2026-10-04/05): loupe view, Grid/Loupe keys
 
 ## In progress
 
-- (none — all agent branches are merged; 2026-11-05)
+- (none — all agent branches are merged; 2026-11-12)
 
 ## Next (suggested order)
 
@@ -36,6 +36,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
    - Follow-ups: fills with a non-Normal blend mode take ~1.1 s at 4096² (`PaintBlend::source` calls the transfer function six times per pixel; a lookup table would help the brush, bucket, and gradient; O); measure the bucket fill again (ADR 0027 had 40–50 ms, the shared fill core measured 135–170 ms on a loaded machine); the preview swatch interpolates in gamma sRGB also for a document in linear blend space; dither (if the check finds banding); save gradient presets between sessions.
 11. [ ] **editor-transform-check** (operator) — check in the real webview: `Mod+T` and the toolbar button on a pixel layer; toast on an empty layer and on another layer kind; box, 8 handles, and reference point; move, scale (Shift aspect, Alt center), rotate (Shift 15°), reference point drag and the 3×3 grid; arrow keys; X, Y, W, H, angle inputs; interpolation; Enter, Commit, Escape, Cancel; undo during the mode only cancels; a tool, layer, or tab change cancels; one undo step after a commit; the mask moves with the layer; pixels moved off the canvas come back with a later move; a whole-pixel move does not blur; all of this also in a rotated view; preview speed at a large size and for a layer in a group; the time and the UI state during a commit at 4096² (about 1.2 s). After the check, mark "Free transform (move, scale, rotate) with reference point" in `FEATURES.md` (ADR 0029).
    - Follow-ups: transform of the selected pixels (floating selection); a clear toast for a locked layer (now the generic edit error; S); run the commit off the render thread if the check shows a stall (O); faster preview for a layer in a group; a preview for a layer larger than the GPU texture limit (now an error); shear can alias a little in the downscale filter; the engine GPU tests return early on a machine with no GPU (check that they run in `scripts/check.sh`; S).
+12. [ ] **editor-clone-heal-check** (operator) — check in the real webview: clone stamp (`S`) and healing brush (`J`) on a pixel layer; Alt+click sets the source point; a stroke without a source point gives a toast; the source crosshair follows the pointer (also zoomed, panned, rotated); "Aligned" on (later strokes keep the offset) and off (each stroke starts at the source point); "Sample: All layers" on an empty layer over a photo (GPU composite; first stroke after a change can take a moment); size/hardness/opacity/flow/spacing and `[` `]` `{` `}`; a stroke that crosses its own source copies the original (no repeated pattern); the heal result appears at the stroke end (clone look while painting) and matches the tone around the stroke; the time at the stroke end for a large stroke (about 0.35 s per megapixel); a selection limits the stroke; the transparency lock; mask as paint target gives a toast; one undo step ("Clone Stamp" / "Healing Brush") in the History panel; Escape cancels. After the check, mark "Clone stamp (aligned/non-aligned, sample current/all layers)" and "Healing brush (source-based, texture/tone blend)" in `FEATURES.md` (ADR 0030).
+   - Follow-ups: live heal preview during the stroke (heal per batch; O); faster heal pass (encode lookup table, lighter first level; O); heal on the touched tiles, not the bounding box (memory of long diagonal strokes; O); drop the shell composite cache (~256 MiB at 4096²) when the tool changes (S); add `MAX_CLONE_OFFSET` to `lib/rustConstants.test.ts` (S).
 
 ### Follow-ups from editor-gpu (ADR 0012)
 
@@ -68,6 +70,8 @@ Model hint: **S** = easier task (use the sonnet model), **O** = hard task (use t
 - JPEG encoder: keep the local baseline encoder, or approve `jpeg-encoder` (licence "(MIT OR Apache-2.0) AND IJG") (ADR 0006, "Open").
 
 ## Done
+
+- [x] **editor-clone-stamp + editor-healing-brush** (PRs #104–#106, ADR 0030) — crate `Stroke::begin_clone` (`CloneSpec`, `CloneSource::{Layer, Image}`, `CloneKind::{Clone, Heal}`, `MAX_CLONE_OFFSET`; whole-pixel offset, source snapshot from the stroke tiles, row-by-row dabs; heal pass at the stroke end in `heal.rs`, CG + multigrid, ~348 ms per 1 MP); shell `StrokeTargetDto` `clone` / `heal`, `StrokeKind`, `EditSession::stroke_begin_kind`, GPU composite cached by revision; UI tools `S` / `J`, `CloneOptions.svelte`, `lib/editor/clone.ts`, Alt+click source point per tab, source crosshair. Waits for the operator check (item 12 in "Next").
 
 - [x] **editor-free-transform** (PRs #99–#102, ADR 0029) — crate `expose_editor::transform` (`Affine`, `Interpolation`, `CanvasRect`, `Document::layer_content_bounds`, `Document::transform_layer`, `EditKind::PixelLayer`, `EditorError::InvalidTransform`); GPU `GpuCompositor::render_view_transformed` + `LayerTransformPreview` (transform mode in `blend_layer.wgsl`; 29 ms per frame at 4096², 10 layers); UI `Mod+T` mode (`lib/editor/transform.ts`, `TransformOptions.svelte`, overlay in `EditorView.svelte`); shell `editor_layer_bounds`, `editor_render` `transformPreview`, `EditDto::TransformLayer`, `EditorEngineError::InvalidRender`. Waits for the operator check (item 11 in "Next").
 
