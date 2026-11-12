@@ -911,6 +911,9 @@ struct OpenDoc {
     /// size changes.
     display: Option<DisplayEncoder>,
     next_seq: u32,
+    /// The canvas size at the last check. A crop, and the undo or redo of
+    /// a crop, change it (see `Renderer::clear_if_resized`).
+    canvas_size: (u32, u32),
     /// `true` from the snapshot of a save to its end.
     saving: bool,
 }
@@ -921,6 +924,24 @@ struct Renderer {
     gpu: Option<Gpu>,
     documents: HashMap<DocumentId, OpenDoc>,
     next_id: DocumentId,
+}
+
+/// Clears the compositor cache if the canvas size of `doc` changed since
+/// the last check (a crop, or the undo or redo of a crop). The cached
+/// composite, the "below" snapshot, and the pyramid textures have the old
+/// canvas size, and an offset-only crop keeps the layer versions, so the
+/// layer keys do not show the change. The check is cheap.
+fn clear_if_resized(gpu: &mut Option<Gpu>, doc: &mut OpenDoc) {
+    let document = doc.session.document();
+    let size = (document.width(), document.height());
+    if size != doc.canvas_size {
+        doc.canvas_size = size;
+        // With no GPU yet, there is no cache to clear.
+        if let Some(gpu) = gpu {
+            gpu.compositor.clear_cache();
+            gpu.mask_view_cached = false;
+        }
+    }
 }
 
 /// Returns the GPU objects and makes them at the first call.
@@ -955,6 +976,7 @@ impl Renderer {
         // Make the GPU context now, so that a machine with no GPU gets the
         // error at the open and not at the first frame.
         ensure_gpu(&mut self.gpu)?;
+        let canvas_size = (document.width(), document.height());
         let session = EditSession::with_origin(document, origin)?;
         self.next_id += 1;
         let id = self.next_id;
@@ -966,6 +988,7 @@ impl Renderer {
                 space,
                 display: None,
                 next_seq: 0,
+                canvas_size,
                 saving: false,
             },
         );
@@ -998,6 +1021,7 @@ impl Renderer {
         let doc = documents
             .get_mut(&id)
             .ok_or(EditorEngineError::DocumentNotFound(id))?;
+        clear_if_resized(gpu, doc);
         doc.session
             .stroke_begin_kind(layer, kind, settings, |document| {
                 let Gpu {
@@ -1026,6 +1050,7 @@ impl Renderer {
         // progress is.
         doc.session.cancel_filter()?;
         doc.session.commit_stroke()?;
+        clear_if_resized(gpu, doc);
         let Gpu {
             ctx, compositor, ..
         } = ensure_gpu(gpu)?;
@@ -1104,6 +1129,7 @@ impl Renderer {
         let doc = documents
             .get_mut(&id)
             .ok_or(EditorEngineError::DocumentNotFound(id))?;
+        clear_if_resized(gpu, doc);
         let Gpu {
             ctx,
             compositor,
@@ -1271,36 +1297,9 @@ impl Renderer {
             | Job::StrokePoints { .. }
             | Job::StrokeEnd { .. }
             | Job::StrokeCancel { .. }) => self.run_stroke_job(job),
-            Job::FilterPreview {
-                document,
-                layer,
-                target,
-                spec,
-                reply,
-            } => {
-                let result = guarded(self, |r| {
-                    let session = r.session(document)?;
-                    session.filter_preview(layer, target, &spec)?;
-                    Ok(session.info(document))
-                });
-                reply(result);
-            }
-            Job::FilterCommit { document, reply } => {
-                let result = guarded(self, |r| {
-                    let session = r.session(document)?;
-                    session.filter_commit()?;
-                    Ok(session.info(document))
-                });
-                reply(result);
-            }
-            Job::FilterCancel { document, reply } => {
-                let result = guarded(self, |r| {
-                    let session = r.session(document)?;
-                    session.cancel_filter()?;
-                    Ok(session.info(document))
-                });
-                reply(result);
-            }
+            job @ (Job::FilterPreview { .. }
+            | Job::FilterCommit { .. }
+            | Job::FilterCancel { .. }) => self.run_filter_job(job),
             Job::Undo { document, reply } => {
                 let result = guarded(self, |r| {
                     let session = r.session(document)?;
@@ -1353,6 +1352,46 @@ impl Renderer {
                 reply,
             } => self.run_layer_bounds(document, layer, reply),
             job @ (Job::Redo { .. } | Job::HistoryJump { .. }) => self.run_redo_job(job),
+        }
+    }
+
+    /// Runs a filter preview, commit, or cancel job. Other jobs are a bug.
+    fn run_filter_job(&mut self, job: Job) {
+        match job {
+            Job::FilterPreview {
+                document,
+                layer,
+                target,
+                spec,
+                reply,
+            } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    session.filter_preview(layer, target, &spec)?;
+                    Ok(session.info(document))
+                });
+                reply(result);
+            }
+            Job::FilterCommit { document, reply } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    session.filter_commit()?;
+                    Ok(session.info(document))
+                });
+                reply(result);
+            }
+            Job::FilterCancel { document, reply } => {
+                let result = guarded(self, |r| {
+                    let session = r.session(document)?;
+                    session.cancel_filter()?;
+                    Ok(session.info(document))
+                });
+                reply(result);
+            }
+            other => {
+                debug_assert!(false, "not a filter job");
+                fail_job(other, &stopped());
+            }
         }
     }
 
@@ -1548,6 +1587,44 @@ mod tests {
         assert!(!undone.can_undo && undone.can_redo);
         let body = pollster::block_on(engine.render_async(request)).unwrap();
         assert_eq!(pixel(&body, 12, 4, 4), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn frames_after_a_crop_and_its_undo_show_the_right_canvas() {
+        let Some((engine, info)) = engine_with_document(8, 6, [1.0, 1.0, 1.0, 1.0]) else {
+            return;
+        };
+        let id = info.document_id;
+        let request = RenderRequest {
+            document: id,
+            view: view(0.0, 1.0, 8, 6),
+            show_mask: None,
+            transform_preview: None,
+        };
+        let body = pollster::block_on(engine.render_async(request)).unwrap();
+        assert_eq!(pixel(&body, 8, 7, 5), [255, 255, 255, 255]);
+        let cropped = pollster::block_on(engine.edit_async(
+            id,
+            EditDto::CropCanvas {
+                center_x: 2.0,
+                center_y: 2.0,
+                width: 4,
+                height: 4,
+                angle: 0.0,
+                delete_cropped: false,
+                interpolation: crate::editor::dto::InterpolationId::Nearest,
+            },
+            None,
+        ))
+        .unwrap();
+        assert_eq!((cropped.width, cropped.height), (4, 4));
+        let body = pollster::block_on(engine.render_async(request)).unwrap();
+        assert_eq!(pixel(&body, 8, 3, 3), [255, 255, 255, 255]);
+        assert_eq!(pixel(&body, 8, 4, 4)[3], 0);
+        let undone = pollster::block_on(engine.undo_async(id)).unwrap();
+        assert_eq!((undone.width, undone.height), (8, 6));
+        let body = pollster::block_on(engine.render_async(request)).unwrap();
+        assert_eq!(pixel(&body, 8, 7, 5), [255, 255, 255, 255]);
     }
 
     #[test]

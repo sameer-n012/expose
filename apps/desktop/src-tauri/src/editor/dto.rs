@@ -894,6 +894,25 @@ pub enum EditDto {
         /// How the pixels are resampled.
         interpolation: InterpolationId,
     },
+    /// Crops the canvas to a box that can be turned by `angle` degrees
+    /// (straighten). The selection is cleared. Layers keep or lose the
+    /// pixels outside the new canvas (`delete_cropped`).
+    CropCanvas {
+        /// The center of the box in canvas pixels.
+        center_x: f64,
+        /// The center of the box in canvas pixels.
+        center_y: f64,
+        /// The new canvas width in pixels.
+        width: u32,
+        /// The new canvas height in pixels.
+        height: u32,
+        /// The turn of the box in degrees (positive is clockwise).
+        angle: f64,
+        /// `true` to remove the pixels outside the new canvas.
+        delete_cropped: bool,
+        /// How the pixels are resampled when `angle` is not 0.
+        interpolation: InterpolationId,
+    },
 }
 
 /// A filter with its settings, for `editor_filter_preview`.
@@ -1123,6 +1142,7 @@ impl EditDto {
             Self::Fill { .. } => "Paint Bucket",
             Self::Gradient { .. } => "Gradient",
             Self::TransformLayer { .. } => "Free Transform",
+            Self::CropCanvas { .. } => "Crop",
         }
     }
 }
@@ -2116,6 +2136,51 @@ mod tests {
             "matrix": [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], "interpolation": "lanczos",
         }));
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn crop_canvas_parses_with_all_interpolations() {
+        for (name, expected) in [
+            ("bicubic", InterpolationId::Bicubic),
+            ("bilinear", InterpolationId::Bilinear),
+            ("nearest", InterpolationId::Nearest),
+        ] {
+            let edit: EditDto = serde_json::from_value(serde_json::json!({
+                "type": "cropCanvas",
+                "centerX": 10.5, "centerY": 4.0,
+                "width": 100, "height": 50, "angle": -2.5,
+                "deleteCropped": true, "interpolation": name,
+            }))
+            .unwrap();
+            assert_eq!(
+                edit,
+                EditDto::CropCanvas {
+                    center_x: 10.5,
+                    center_y: 4.0,
+                    width: 100,
+                    height: 50,
+                    angle: -2.5,
+                    delete_cropped: true,
+                    interpolation: expected,
+                }
+            );
+            assert_eq!(edit.step_name(), "Crop");
+            let again: EditDto =
+                serde_json::from_str(&serde_json::to_string(&edit).unwrap()).unwrap();
+            assert_eq!(again, edit);
+        }
+        for bad in [
+            serde_json::json!({"type": "cropCanvas", "centerX": 0, "centerY": 0,
+                "width": -1, "height": 5, "angle": 0, "deleteCropped": false,
+                "interpolation": "nearest"}),
+            serde_json::json!({"type": "cropCanvas", "centerX": 0, "centerY": 0,
+                "width": 5, "height": 5, "angle": 0, "deleteCropped": false,
+                "interpolation": "lanczos"}),
+            serde_json::json!({"type": "cropCanvas", "centerX": 0, "centerY": 0,
+                "width": 5, "height": 5}),
+        ] {
+            assert!(serde_json::from_value::<EditDto>(bad).is_err());
+        }
     }
 
     #[test]

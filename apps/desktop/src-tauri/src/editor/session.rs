@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use expose_core::buffer::WorkingImage;
 use expose_editor::{
-    Adjustment, Affine, BrushSettings, CloneKind, CloneSource, CloneSpec, Document, DocumentSpec,
-    Edit, EditorError, FillSettings, FilterSession, FilterSpec, FilterTarget, FloodSample,
-    FloodSettings, GradientSpec, GradientStop, GradientTarget, History, LayerContent, LayerId,
-    Mask, MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
+    Adjustment, Affine, BrushSettings, CloneKind, CloneSource, CloneSpec, CropSpec, Document,
+    DocumentSpec, Edit, EditorError, FillSettings, FilterSession, FilterSpec, FilterTarget,
+    FloodSample, FloodSettings, GradientSpec, GradientStop, GradientTarget, History, LayerContent,
+    LayerId, Mask, MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
     flood_region,
 };
 
@@ -534,6 +534,13 @@ impl EditSession {
     pub fn edit(&mut self, edit: EditDto, gesture: Option<u64>) -> Result<(), EditorEngineError> {
         self.cancel_filter()?;
         self.commit_stroke()?;
+        if matches!(edit, EditDto::CropCanvas { .. }) {
+            // The caches have the old canvas size. The revision key would
+            // drop them too; drop them here so that this does not depend
+            // on it.
+            self.flood_cache = None;
+            self.composite_cache = None;
+        }
         let name = edit.step_name();
         let undo = match edit {
             edit @ (EditDto::MagicWand { .. } | EditDto::Fill { .. }) => self.apply_flood(&edit)?,
@@ -952,6 +959,22 @@ fn apply(document: &mut Document, edit: EditDto) -> Result<Edit, EditorEngineErr
             let id = resolve(document, layer_id)?;
             document.transform_layer(id, &Affine::from_array(matrix), interpolation.into())?
         }
+        EditDto::CropCanvas {
+            center_x,
+            center_y,
+            width,
+            height,
+            angle,
+            delete_cropped,
+            interpolation,
+        } => document.crop_canvas(&CropSpec {
+            center: (center_x, center_y),
+            width,
+            height,
+            angle,
+            delete_cropped,
+            interpolation: interpolation.into(),
+        })?,
         // `EditSession::edit` handles these (they use the sample cache).
         EditDto::MagicWand { .. } | EditDto::Fill { .. } | EditDto::Gradient { .. } => {
             return Err(EditorEngineError::Internal("not a plain edit"));
@@ -2567,6 +2590,71 @@ mod tests {
             .edit(transform(999, [1.0, 0.0, 0.0, 1.0, 1.0, 0.0]), None)
             .unwrap_err();
         assert!(matches!(unknown, EditorEngineError::LayerNotFound(999)));
+    }
+
+    fn crop(width: u32, height: u32, angle: f64) -> EditDto {
+        EditDto::CropCanvas {
+            center_x: 2.0,
+            center_y: 1.5,
+            width,
+            height,
+            angle,
+            delete_cropped: false,
+            interpolation: crate::editor::dto::InterpolationId::Bilinear,
+        }
+    }
+
+    #[test]
+    fn crop_changes_the_size_clears_the_selection_and_undoes() {
+        let mut s = two_color_session();
+        s.edit(EditDto::SelectAll, None).unwrap();
+        assert!(s.info(1).has_selection);
+        // Warm the flood cache, so that the crop must drop it.
+        s.edit(wand(0.0, 0.0, SelectionModeId::Replace, None), None)
+            .unwrap();
+        s.edit(crop(2, 2, 0.0), None).unwrap();
+        let info = s.info(1);
+        assert_eq!((info.width, info.height), (2, 2));
+        assert!(!info.has_selection);
+        assert_eq!(info.history.steps.last().map(String::as_str), Some("Crop"));
+        // A wand click on the new canvas works with the new size.
+        s.edit(wand(1.0, 1.0, SelectionModeId::Replace, None), None)
+            .unwrap();
+        s.undo().unwrap();
+        s.undo().unwrap();
+        let info = s.info(1);
+        assert_eq!((info.width, info.height), (4, 3));
+        s.redo().unwrap();
+        assert_eq!((s.info(1).width, s.info(1).height), (2, 2));
+        assert!(!s.info(1).has_selection);
+    }
+
+    #[test]
+    fn crop_rejects_bad_values_without_a_step() {
+        let mut s = two_color_session();
+        for edit in [
+            crop(0, 2, 0.0),
+            crop(2, 2, 90.0),
+            crop(2, 2, f64::NAN),
+            EditDto::CropCanvas {
+                center_x: f64::INFINITY,
+                center_y: 0.0,
+                width: 2,
+                height: 2,
+                angle: 0.0,
+                delete_cropped: true,
+                interpolation: crate::editor::dto::InterpolationId::Nearest,
+            },
+        ] {
+            let error = s.edit(edit, None).unwrap_err();
+            assert!(
+                matches!(error, EditorEngineError::Editor(_)),
+                "unexpected {error:?}"
+            );
+        }
+        let info = s.info(1);
+        assert_eq!((info.width, info.height), (4, 3));
+        assert!(info.history.steps.is_empty());
     }
 
     const BLUR: FilterSpec = FilterSpec::GaussianBlur { radius: 1.0 };
