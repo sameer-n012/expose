@@ -35,7 +35,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use expose_develop::{DisplayEncoder, DisplaySpace};
-use expose_editor::{BrushSettings, Document, GpuCompositor, StrokePoint, StrokeTarget, ViewSpec};
+use expose_editor::{BrushSettings, Document, GpuCompositor, StrokePoint, ViewSpec};
 use expose_gpu::{GpuContext, GpuContextOptions};
 
 use super::EditorEngineError;
@@ -47,7 +47,7 @@ use super::dto::{
 use super::outline::{MAX_OUTLINE_POINTS, selection_outline};
 use super::sample::{SampleSourceDto, SampledColor, sample_color};
 use super::save::{DocumentOrigin, SaveSnapshot, SavedFiles};
-use super::session::EditSession;
+use super::session::{EditSession, StrokeKind};
 use super::thumbnail::{MaskThumbnail, mask_thumbnail};
 use crate::preview::frame::{FRAME_HEADER_BYTES, FrameHeader, FrameTimings, rgba8_body_len};
 
@@ -103,7 +103,7 @@ enum Job {
     StrokeBegin {
         document: DocumentId,
         layer: u64,
-        target: StrokeTarget,
+        target: StrokeKind,
         settings: BrushSettings,
         reply: Reply<u64>,
     },
@@ -345,7 +345,7 @@ impl EditorEngine {
         &self,
         document: DocumentId,
         layer: u64,
-        target: StrokeTarget,
+        target: StrokeKind,
         settings: BrushSettings,
     ) -> Result<u64, EditorEngineError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -868,6 +868,32 @@ impl Renderer {
             .ok_or(EditorEngineError::DocumentNotFound(id))
     }
 
+    /// Starts a stroke. A clone or heal stroke that samples all layers gets
+    /// the composite from the GPU compositor (cached in the session).
+    fn stroke_begin(
+        &mut self,
+        id: DocumentId,
+        layer: u64,
+        kind: StrokeKind,
+        settings: BrushSettings,
+    ) -> Result<u64, EditorEngineError> {
+        let Self { gpu, documents, .. } = self;
+        let doc = documents
+            .get_mut(&id)
+            .ok_or(EditorEngineError::DocumentNotFound(id))?;
+        doc.session
+            .stroke_begin_kind(layer, kind, settings, |document| {
+                let Gpu {
+                    ctx, compositor, ..
+                } = ensure_gpu(gpu)?;
+                Ok(pollster::block_on(compositor.composite_gpu_image(
+                    ctx,
+                    document,
+                    document.bounds(),
+                ))?)
+            })
+    }
+
     /// See [`EditorEngine::snapshot_async`]. The GPU composite reuses the
     /// cached layer textures of the view render.
     fn snapshot(&mut self, id: DocumentId) -> Result<SaveSnapshot, EditorEngineError> {
@@ -1035,9 +1061,7 @@ impl Renderer {
                 settings,
                 reply,
             } => {
-                let result = guarded(self, |r| {
-                    r.session(document)?.stroke_begin(layer, target, settings)
-                });
+                let result = guarded(self, |r| r.stroke_begin(document, layer, target, settings));
                 reply(result);
             }
             Job::StrokePoints {
@@ -1440,9 +1464,9 @@ mod tests {
             pressure_opacity: false,
             ..BrushSettings::default()
         };
-        let target = StrokeTarget::Paint {
+        let target = StrokeKind::Brush(expose_editor::StrokeTarget::Paint {
             color: [1.0, 1.0, 1.0],
-        };
+        });
         let stroke =
             pollster::block_on(engine.stroke_begin_async(id, info.layers[0].id, target, brush))
                 .unwrap();

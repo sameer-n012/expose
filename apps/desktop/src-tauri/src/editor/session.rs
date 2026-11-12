@@ -2,12 +2,14 @@
 //! engine thread owns one [`EditSession`] for each open document; tests
 //! use it directly.
 
+use std::sync::Arc;
+
 use expose_core::buffer::WorkingImage;
 use expose_editor::{
-    Adjustment, Affine, BrushSettings, Document, DocumentSpec, Edit, EditorError, FillSettings,
-    FloodSample, FloodSettings, GradientSpec, GradientStop, GradientTarget, History, LayerContent,
-    LayerId, Mask, MaskFill, MaskImage, PixelLayer, Placement, Stroke, StrokePoint, StrokeTarget,
-    flood_region,
+    Adjustment, Affine, BrushSettings, CloneKind, CloneSource, CloneSpec, Document, DocumentSpec,
+    Edit, EditorError, FillSettings, FloodSample, FloodSettings, GradientSpec, GradientStop,
+    GradientTarget, History, LayerContent, LayerId, Mask, MaskFill, MaskImage, PixelLayer,
+    Placement, Stroke, StrokePoint, StrokeTarget, flood_region,
 };
 
 use super::EditorEngineError;
@@ -59,6 +61,11 @@ pub struct EditSession {
     /// The number of flood samples built so far (tests check the cache).
     #[cfg(test)]
     flood_samples_built: u32,
+    /// The last composite for clone and heal strokes.
+    composite_cache: Option<CompositeCache>,
+    /// The number of composites built so far (tests check the cache).
+    #[cfg(test)]
+    composites_built: u32,
 }
 
 /// What a cached flood sample was made from. A selection change keeps the
@@ -79,12 +86,44 @@ struct ActiveStroke {
     stroke: Stroke,
 }
 
+/// The composite of all layers at one document revision. A clone or heal
+/// stroke with "sample all layers" reads it.
+#[derive(Debug)]
+struct CompositeCache {
+    revision: u64,
+    image: Arc<WorkingImage>,
+}
+
+/// What a stroke does: a brush stroke, or a clone or heal stroke.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StrokeKind {
+    /// Paint, erase, or mask paint.
+    Brush(StrokeTarget),
+    /// Copy pixels from a place at an offset.
+    Clone {
+        /// Plain copy or heal.
+        kind: CloneKind,
+        /// The offset `(dx, dy)` from the brush to the source.
+        offset: (i32, i32),
+        /// `true` to sample the composite of all layers.
+        sample_all_layers: bool,
+    },
+}
+
 /// The name of the history step of a stroke with `target`.
-const fn stroke_step_name(target: &StrokeTarget) -> &'static str {
+const fn stroke_step_name(target: &StrokeKind) -> &'static str {
     match target {
-        StrokeTarget::Paint { .. } => "Brush",
-        StrokeTarget::Erase => "Eraser",
-        StrokeTarget::Mask { .. } => "Mask Brush",
+        StrokeKind::Brush(StrokeTarget::Paint { .. }) => "Brush",
+        StrokeKind::Brush(StrokeTarget::Erase) => "Eraser",
+        StrokeKind::Brush(StrokeTarget::Mask { .. }) => "Mask Brush",
+        StrokeKind::Clone {
+            kind: CloneKind::Clone,
+            ..
+        } => "Clone Stamp",
+        StrokeKind::Clone {
+            kind: CloneKind::Heal,
+            ..
+        } => "Healing Brush",
     }
 }
 
@@ -123,6 +162,9 @@ impl EditSession {
             flood_cache: None,
             #[cfg(test)]
             flood_samples_built: 0,
+            composite_cache: None,
+            #[cfg(test)]
+            composites_built: 0,
         })
     }
 
@@ -148,14 +190,80 @@ impl EditSession {
         target: StrokeTarget,
         settings: BrushSettings,
     ) -> Result<u64, EditorEngineError> {
+        self.stroke_begin_kind(layer, StrokeKind::Brush(target), settings, |_| {
+            Err(EditorEngineError::Internal(
+                "a brush stroke needs no composite",
+            ))
+        })
+    }
+
+    /// Starts a stroke like [`Self::stroke_begin`]. For a clone or heal
+    /// stroke with "sample all layers", `build_composite` makes the
+    /// composite of the document. The session calls it only when it has no
+    /// composite of the current revision.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::stroke_begin`] and of `build_composite`.
+    pub fn stroke_begin_kind(
+        &mut self,
+        layer: u64,
+        kind: StrokeKind,
+        settings: BrushSettings,
+        build_composite: impl FnOnce(&Document) -> Result<WorkingImage, EditorEngineError>,
+    ) -> Result<u64, EditorEngineError> {
+        // The commit comes first: it can change the revision.
         self.commit_stroke()?;
         let layer = resolve(&self.document, layer)?;
-        let name = stroke_step_name(&target);
-        let stroke = Stroke::begin(&self.document, layer, target, settings)?;
+        let name = stroke_step_name(&kind);
+        let stroke = match kind {
+            StrokeKind::Brush(target) => Stroke::begin(&self.document, layer, target, settings)?,
+            StrokeKind::Clone {
+                kind,
+                offset,
+                sample_all_layers,
+            } => {
+                let source = if sample_all_layers {
+                    CloneSource::Image(self.composite(build_composite)?)
+                } else {
+                    CloneSource::Layer
+                };
+                let spec = CloneSpec {
+                    kind,
+                    offset,
+                    source,
+                };
+                Stroke::begin_clone(&self.document, layer, spec, settings)?
+            }
+        };
         let id = self.next_stroke_id;
         self.next_stroke_id += 1;
         self.stroke = Some(ActiveStroke { id, name, stroke });
         Ok(id)
+    }
+
+    /// The composite of the document at the current revision. It comes from
+    /// the cache, or from `build` (and then goes into the cache).
+    fn composite(
+        &mut self,
+        build: impl FnOnce(&Document) -> Result<WorkingImage, EditorEngineError>,
+    ) -> Result<Arc<WorkingImage>, EditorEngineError> {
+        let revision = self.document.revision();
+        if let Some(cache) = &self.composite_cache
+            && cache.revision == revision
+        {
+            return Ok(Arc::clone(&cache.image));
+        }
+        let image = Arc::new(build(&self.document)?);
+        #[cfg(test)]
+        {
+            self.composites_built += 1;
+        }
+        self.composite_cache = Some(CompositeCache {
+            revision,
+            image: Arc::clone(&image),
+        });
+        Ok(image)
     }
 
     /// Adds points to the active stroke. The layer changes in place.
@@ -1585,6 +1693,104 @@ mod tests {
         assert!(!s.info(1).can_undo);
         s.redo().unwrap();
         assert_ne!(pixels(&s), before);
+    }
+
+    /// A session whose red channel grows with x, so a copy changes pixels.
+    fn ramp_session() -> EditSession {
+        let mut image = WorkingImage::new_filled(8, 3, [0.0, 0.25, 0.125, 1.0]).unwrap();
+        for (i, p) in image.pixels_mut().iter_mut().enumerate() {
+            // `i % 8` is below 8, so the cast to u8 is exact.
+            #[allow(clippy::cast_possible_truncation)]
+            let x = (i % 8) as u8;
+            p[0] = f32::from(x) / 8.0;
+        }
+        EditSession::new(build_document(image).unwrap()).unwrap()
+    }
+
+    fn clone_kind(kind: CloneKind, sample_all_layers: bool) -> StrokeKind {
+        StrokeKind::Clone {
+            kind,
+            offset: (-2, 0),
+            sample_all_layers,
+        }
+    }
+
+    fn no_composite(_: &Document) -> Result<WorkingImage, EditorEngineError> {
+        Err(EditorEngineError::Internal("no composite expected"))
+    }
+
+    #[test]
+    fn clone_stroke_copies_pixels_in_one_named_step() {
+        let mut s = ramp_session();
+        let bg = background(&s);
+        let before = pixels(&s);
+        let kind = clone_kind(CloneKind::Clone, false);
+        let id = s
+            .stroke_begin_kind(bg, kind, brush(), no_composite)
+            .unwrap();
+        s.stroke_points(id, &[StrokePoint::new(4.5, 1.5, 1.0)])
+            .unwrap();
+        s.stroke_end(id).unwrap();
+        let after = pixels(&s);
+        // The dab center (4, 1) now holds the pixel at (2, 1).
+        assert!((after[8 + 4][0] - before[8 + 2][0]).abs() < 1e-4);
+        assert_ne!(after, before);
+        let info = s.info(1);
+        assert_eq!(
+            info.history.steps.last().map(String::as_str),
+            Some("Clone Stamp")
+        );
+        s.undo().unwrap();
+        assert_eq!(pixels(&s), before);
+        assert!(!s.info(1).can_undo);
+    }
+
+    #[test]
+    fn heal_stroke_has_its_own_step_name() {
+        let mut s = ramp_session();
+        let bg = background(&s);
+        let kind = clone_kind(CloneKind::Heal, false);
+        let id = s
+            .stroke_begin_kind(bg, kind, brush(), no_composite)
+            .unwrap();
+        s.stroke_points(id, &[StrokePoint::new(4.5, 1.5, 1.0)])
+            .unwrap();
+        s.stroke_end(id).unwrap();
+        let info = s.info(1);
+        assert_eq!(
+            info.history.steps.last().map(String::as_str),
+            Some("Healing Brush")
+        );
+        assert_eq!(info.history.steps.len(), 1);
+    }
+
+    #[test]
+    fn composite_cache_is_reused_until_the_document_changes() {
+        let mut s = ramp_session();
+        let bg = background(&s);
+        let build = |doc: &Document| {
+            expose_editor::composite(doc, doc.bounds()).map_err(EditorEngineError::from)
+        };
+        let kind = clone_kind(CloneKind::Clone, true);
+        let id = s.stroke_begin_kind(bg, kind, brush(), build).unwrap();
+        s.stroke_end(id).unwrap();
+        assert_eq!(s.composites_built, 1);
+        // A stroke without a point changes nothing: the cache stays valid.
+        let id = s.stroke_begin_kind(bg, kind, brush(), build).unwrap();
+        s.stroke_end(id).unwrap();
+        assert_eq!(s.composites_built, 1);
+        // An edit gives a new revision.
+        s.edit(
+            EditDto::SetOpacity {
+                layer_id: bg,
+                opacity: 0.5,
+            },
+            None,
+        )
+        .unwrap();
+        let id = s.stroke_begin_kind(bg, kind, brush(), build).unwrap();
+        s.stroke_end(id).unwrap();
+        assert_eq!(s.composites_built, 2);
     }
 
     fn two_edits(s: &mut EditSession) {
