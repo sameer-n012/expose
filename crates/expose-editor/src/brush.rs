@@ -2,14 +2,17 @@
 //!
 //! # Use
 //!
-//! 1. [`Stroke::begin`] checks the settings, the layer kind, and the locks.
+//! 1. [`Stroke::begin`] (paint, erase, mask paint) or [`Stroke::begin_clone`]
+//!    (clone stamp, healing brush) checks the settings, the layer kind, and
+//!    the locks.
 //! 2. [`Stroke::add_points`] places dabs along the pointer path and
 //!    changes the layer in place. It returns the changed rectangle in
 //!    canvas coordinates, so that the caller can update only that part of
 //!    the view.
 //! 3. [`Stroke::end`] returns one undo [`Edit`] for the full stroke. Give it
 //!    to [`History::push`](crate::History::push). Or [`Stroke::cancel`]
-//!    restores the original values.
+//!    restores the original values. For a heal stroke, `end` also changes
+//!    the layer (see "Clone and heal"), so the caller must render again.
 //!
 //! # Dab placement
 //!
@@ -72,6 +75,39 @@
 //! strokes accept only [`BlendMode::Normal`]. No stroke accepts
 //! [`BlendMode::Dissolve`].
 //!
+//! # Clone and heal
+//!
+//! A clone stroke ([`CloneKind::Clone`]) copies source pixels to the
+//! stroke position. The source position is the destination canvas
+//! position plus [`CloneSpec::offset`] (whole pixels, no resampling). The
+//! source ([`CloneSource`]) is the stroke layer or a canvas-sized image.
+//! The stroke reads the source as it was at the start of the stroke, also
+//! where the stroke crosses its own source area. A destination pixel with
+//! a source position outside the source does not change. The result is
+//! `lerp(orig, src, c)` (premultiplied). With the transparency lock, the
+//! alpha stays and `rgb = lerp(orig_rgb, src_straight * orig_a, c)`.
+//!
+//! A heal stroke ([`CloneKind::Heal`]) shows the clone result while it
+//! is active. Then [`Stroke::end`] adjusts the tone of the result to the
+//! area around it:
+//!
+//! ```text
+//! R = pixels with coverage > 0 and a source pixel
+//! S = source value, D = destination tone
+//! M = membrane: ΔM = 0 in R, M = D - S on the pixels next to R
+//! H = S + M
+//! result = lerp(orig, H, c)
+//! ```
+//!
+//! `D` is the layer before the stroke for [`CloneSource::Layer`], and the
+//! source image at the same position (no offset) for
+//! [`CloneSource::Image`]. The values are straight colors, encoded with
+//! the document blend space at the start of the stroke, and linear alpha.
+//! A pixel next to `R` without a source pixel or a destination tone, or
+//! outside the layer buffer, gives a zero gradient. After the solve, the
+//! alpha is clamped to `0..=1` and the color to `>= 0`. The solver is in
+//! `heal.rs` (a multigrid preconditioned conjugate gradient solve).
+//!
 //! # Memory
 //!
 //! The stroke keeps the original values and the coverage in tiles of
@@ -87,12 +123,14 @@
 //! changed, the call returns [`EditorError::StrokeConflict`].
 
 use std::fmt;
+use std::sync::Arc;
 
-use expose_core::buffer::{Rect, Rgba};
+use expose_core::buffer::{Rect, Rgba, WorkingImage};
 
-use crate::blend::{BlendMode, BlendSpace, unpremultiply};
+use crate::blend::{BlendMode, BlendSpace, premultiply, unpremultiply};
 use crate::document::Document;
 use crate::error::{EditorError, EditorResult, check_range};
+use crate::heal::{Cell, solve_membrane};
 use crate::layer::{Layer, LayerId, LayerKind, LockKind, Locks, MaskImage};
 use crate::ops::Edit;
 
@@ -110,6 +148,8 @@ pub const MIN_DAB_STEP: f64 = 0.5;
 pub const MAX_STROKE_COORD: f64 = 1.0e5;
 /// Edge length of the stroke tiles in pixels.
 pub const STROKE_TILE_SIZE: u32 = 64;
+/// Largest absolute value of a clone offset component (pixels).
+pub const MAX_CLONE_OFFSET: i32 = 100_000;
 
 /// The settings of a brush.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -196,6 +236,53 @@ pub enum StrokeTarget {
         /// shows).
         value: f32,
     },
+}
+
+/// Where a clone or heal stroke reads its source pixels.
+#[derive(Clone)]
+pub enum CloneSource {
+    /// The stroke layer itself, as it was at the start of the stroke.
+    Layer,
+    /// A canvas-sized image (premultiplied linear Rec. 2020), for example
+    /// the composite of all visible layers.
+    Image(Arc<WorkingImage>),
+}
+
+impl fmt::Debug for CloneSource {
+    /// Shows the image size, not the pixels.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Layer => f.write_str("Layer"),
+            Self::Image(img) => f
+                .debug_struct("Image")
+                .field("width", &img.width())
+                .field("height", &img.height())
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// The kind of a clone stroke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloneKind {
+    /// Copy the source pixels (clone stamp).
+    Clone,
+    /// Copy the source texture and adjust its tone to the area around the
+    /// stroke (healing brush).
+    Heal,
+}
+
+/// The parameters of a clone or heal stroke (see "Clone and heal" in the
+/// [module documentation](self)).
+#[derive(Debug, Clone)]
+pub struct CloneSpec {
+    /// Clone or heal.
+    pub kind: CloneKind,
+    /// Source position minus destination position, in canvas pixels. Each
+    /// component is in `-MAX_CLONE_OFFSET..=MAX_CLONE_OFFSET`.
+    pub offset: (i32, i32),
+    /// Where the stroke reads the source pixels.
+    pub source: CloneSource,
 }
 
 /// One pointer sample of a stroke.
@@ -285,6 +372,10 @@ pub(crate) enum Mode {
     Mask {
         value: f32,
     },
+    /// A clone or heal stroke on a pixel layer. The stroke keeps the
+    /// source and the rule in its `CloneState`; this mode only marks the
+    /// target kind.
+    Clone,
 }
 
 impl Mode {
@@ -346,8 +437,9 @@ impl Mode {
                 let k = 1.0 - c;
                 [o[0] * k, o[1] * k, o[2] * k, o[3] * k]
             }
-            // `begin` does not make a mask mode for a pixel layer.
-            Self::Mask { .. } => o,
+            // `begin` does not make a mask mode for a pixel layer. A clone
+            // stroke does not use this function (see `CloneRule`).
+            Self::Mask { .. } | Self::Clone => o,
         }
     }
 
@@ -424,6 +516,40 @@ impl<T: Texel> TileGrid<T> {
 
     fn tile_count(&self) -> usize {
         self.tiles.iter().filter(|t| t.is_some()).count()
+    }
+
+    /// Returns the tile that holds the buffer pixel `(x, y)`, if it
+    /// exists, and the index of the pixel in the tile. The caller makes
+    /// sure that the pixel is in the buffer.
+    #[inline]
+    fn tile_at(&self, x: u32, y: u32) -> Option<(&Tile<T>, usize)> {
+        let (tx, ty) = (x / STROKE_TILE_SIZE, y / STROKE_TILE_SIZE);
+        let index = ty as usize * self.cols as usize + tx as usize;
+        let tile = self.tiles.get(index)?.as_deref()?;
+        let i = (y - tile.rect.y) as usize * tile.rect.width as usize + (x - tile.rect.x) as usize;
+        Some((tile, i))
+    }
+
+    /// Returns the value of the buffer pixel `(x, y)` before the stroke, or
+    /// `None` if the pixel is outside the buffer. A pixel that the stroke
+    /// changed is always in a tile (the tile is made before the change),
+    /// so a pixel without a tile still has its original value in `buf`.
+    #[inline]
+    fn orig_at(&self, x: i64, y: i64, buf: &[T]) -> Option<T> {
+        let x = u32::try_from(x).ok().filter(|&x| x < self.width)?;
+        let y = u32::try_from(y).ok().filter(|&y| y < self.height)?;
+        match self.tile_at(x, y) {
+            Some((tile, i)) => Some(tile.orig[i]),
+            None => Some(buf[y as usize * self.width as usize + x as usize]),
+        }
+    }
+
+    /// Returns the stroke coverage of the buffer pixel `(x, y)` (0 if no
+    /// tile holds it). The caller makes sure that the pixel is in the
+    /// buffer.
+    #[inline]
+    fn cov_at(&self, x: u32, y: u32) -> f32 {
+        self.tile_at(x, y).map_or(0.0, |(tile, i)| tile.cov[i])
     }
 
     /// Returns the tile `(tx, ty)`. If it does not exist, the function makes
@@ -605,8 +731,31 @@ struct DabContext<'a> {
     opacity: f32,
 }
 
-/// Applies one dab to a buffer. `f` computes the result from the original
-/// value and the coverage. Adds the changed pixels to `changed`.
+/// How a dab computes the new value of a pixel.
+trait DabRule<T> {
+    /// Prepares the buffer row `y` for the columns `x0..x1`. [`apply_dab`]
+    /// calls it before it changes a value of that row in this dab.
+    fn begin_row(&mut self, _grid: &TileGrid<T>, _buf: &[T], _y: i64, _x0: i64, _x1: i64) {}
+
+    /// Returns the new value at the column `x` of the current row from the
+    /// original value `o` and the new coverage `c`. `None` means that the
+    /// pixel does not change and that its coverage stays.
+    fn result(&self, o: T, c: f32, x: i64) -> Option<T>;
+}
+
+/// A rule that computes the result from the original value and the
+/// coverage only.
+struct FnRule<F>(F);
+
+impl<T, F: Fn(T, f32) -> T> DabRule<T> for FnRule<F> {
+    #[inline]
+    fn result(&self, o: T, c: f32, _x: i64) -> Option<T> {
+        Some((self.0)(o, c))
+    }
+}
+
+/// Applies one dab to a buffer, row by row. `rule` computes the results.
+/// Adds the changed pixels to `changed`.
 // Buffer coordinates are clamped to `0..=width` / `0..=height` (u32) before
 // the casts, and canvas coordinates are checked against the selection size.
 #[allow(
@@ -620,7 +769,7 @@ fn apply_dab<T: Texel>(
     buf: &mut [T],
     ctx: &DabContext<'_>,
     dab: &Dab,
-    f: impl Fn(T, f32) -> T,
+    rule: &mut impl DabRule<T>,
     changed: &mut Option<Bounds>,
 ) {
     if dab.strength <= 0.0 || dab.radius <= 0.0 {
@@ -640,67 +789,195 @@ fn apply_dab<T: Texel>(
     }
     let tile = i64::from(STROKE_TILE_SIZE);
     let width = grid.width as usize;
-    for ty in y0 / tile..=(y1 - 1) / tile {
-        for tx in x0 / tile..=(x1 - 1) / tile {
-            let t = grid.tile_mut(tx as u32, ty as u32, buf);
-            let (rx, ry) = (i64::from(t.rect.x), i64::from(t.rect.y));
-            let tw = t.rect.width as usize;
-            let (sx0, sx1) = (x0.max(rx), x1.min(rx + i64::from(t.rect.width)));
-            let (sy0, sy1) = (y0.max(ry), y1.min(ry + i64::from(t.rect.height)));
-            for y in sy0..sy1 {
-                let dy = (y + oy) as f64 + 0.5 - dab.y;
-                let dy2 = dy * dy;
-                if dy2 >= shape.outer2 {
+    for y in y0..y1 {
+        let dy = (y + oy) as f64 + 0.5 - dab.y;
+        let dy2 = dy * dy;
+        if dy2 >= shape.outer2 {
+            continue;
+        }
+        // The selection row (canvas coordinates). Outside the canvas
+        // nothing is selected.
+        let sel_row: Option<&[f32]> = match ctx.selection {
+            None => None,
+            Some(sel) => {
+                let cy = y + oy;
+                if cy < 0 || cy >= i64::from(sel.height()) {
                     continue;
                 }
-                // The selection row (canvas coordinates). Outside the canvas
-                // nothing is selected.
-                let sel_row: Option<&[f32]> = match ctx.selection {
-                    None => None,
-                    Some(sel) => {
-                        let cy = y + oy;
-                        if cy < 0 || cy >= i64::from(sel.height()) {
+                let sw = sel.width() as usize;
+                let start = cy as usize * sw;
+                Some(&sel.data()[start..start + sw])
+            }
+        };
+        // The columns of this row with a dab value above 0 are in
+        // `rx0..rx1` (the range has one more pixel on each side).
+        let half = (shape.outer2 - dy2).sqrt();
+        let rx0 = ((dab.x - half).floor() as i64 - 1 - ox).clamp(x0, x1);
+        let rx1 = ((dab.x + half).ceil() as i64 + 1 - ox).clamp(x0, x1);
+        if rx0 >= rx1 {
+            continue;
+        }
+        rule.begin_row(grid, buf, y, rx0, rx1);
+        let brow = y as usize * width;
+        for tx in rx0 / tile..=(rx1 - 1) / tile {
+            let t = grid.tile_mut(tx as u32, (y / tile) as u32, buf);
+            let (rx, ry) = (i64::from(t.rect.x), i64::from(t.rect.y));
+            let tw = t.rect.width as usize;
+            let (sx0, sx1) = (rx0.max(rx), rx1.min(rx + i64::from(t.rect.width)));
+            let trow = (y - ry) as usize * tw;
+            for x in sx0..sx1 {
+                let dx = (x + ox) as f64 + 0.5 - dab.x;
+                let v = shape.value(dx * dx + dy2);
+                if v <= 0.0 {
+                    continue;
+                }
+                let sel = match sel_row {
+                    None => 1.0,
+                    Some(row) => {
+                        let cx = x + ox;
+                        if cx < 0 || cx >= row.len() as i64 {
                             continue;
                         }
-                        let sw = sel.width() as usize;
-                        let start = cy as usize * sw;
-                        Some(&sel.data()[start..start + sw])
+                        row[cx as usize].clamp(0.0, 1.0)
                     }
                 };
-                let trow = (y - ry) as usize * tw;
-                let brow = y as usize * width;
-                for x in sx0..sx1 {
-                    let dx = (x + ox) as f64 + 0.5 - dab.x;
-                    let v = shape.value(dx * dx + dy2);
-                    if v <= 0.0 {
-                        continue;
-                    }
-                    let sel = match sel_row {
-                        None => 1.0,
-                        Some(row) => {
-                            let cx = x + ox;
-                            if cx < 0 || cx >= row.len() as i64 {
-                                continue;
-                            }
-                            row[cx as usize].clamp(0.0, 1.0)
-                        }
-                    };
-                    let k = v * dab.strength * sel;
-                    if k <= 0.0 {
-                        continue;
-                    }
-                    let ti = trow + (x - rx) as usize;
-                    let old = t.cov[ti];
-                    let new = (old + (1.0 - old) * k).min(ctx.opacity);
-                    if new <= old {
-                        continue;
-                    }
-                    t.cov[ti] = new;
-                    buf[brow + x as usize] = f(t.orig[ti], new);
-                    Bounds::add(changed, x, y);
+                let k = v * dab.strength * sel;
+                if k <= 0.0 {
+                    continue;
                 }
+                let ti = trow + (x - rx) as usize;
+                let old = t.cov[ti];
+                let new = (old + (1.0 - old) * k).min(ctx.opacity);
+                if new <= old {
+                    continue;
+                }
+                let Some(value) = rule.result(t.orig[ti], new, x) else {
+                    continue;
+                };
+                t.cov[ti] = new;
+                buf[brow + x as usize] = value;
+                Bounds::add(changed, x, y);
             }
         }
+    }
+}
+
+/// The state of a clone or heal stroke.
+struct CloneState {
+    kind: CloneKind,
+    /// The clone offset.
+    offset: (i64, i64),
+    source: CloneSource,
+    /// The transparency lock at the start of the stroke.
+    keep_alpha: bool,
+    /// The document blend space at the start of the stroke (heal).
+    space: BlendSpace,
+    /// The layer offset (buffer to canvas).
+    layer_offset: (i64, i64),
+}
+
+impl CloneState {
+    /// Returns the source value for the destination buffer pixel `(x, y)`
+    /// as it was at the start of the stroke, or `None` if the source
+    /// position is outside the source.
+    #[inline]
+    fn source_at(&self, grid: &TileGrid<Rgba>, buf: &[Rgba], x: i64, y: i64) -> Option<Rgba> {
+        match &self.source {
+            CloneSource::Layer => grid.orig_at(x + self.offset.0, y + self.offset.1, buf),
+            CloneSource::Image(img) => image_at(
+                img,
+                x + self.layer_offset.0 + self.offset.0,
+                y + self.layer_offset.1 + self.offset.1,
+            ),
+        }
+    }
+
+    /// Returns the destination tone of the heal pass for the buffer pixel
+    /// `(x, y)`, or `None` if it is not known.
+    fn dest_tone(&self, grid: &TileGrid<Rgba>, buf: &[Rgba], x: i64, y: i64) -> Option<Rgba> {
+        match &self.source {
+            CloneSource::Layer => grid.orig_at(x, y, buf),
+            CloneSource::Image(img) => {
+                image_at(img, x + self.layer_offset.0, y + self.layer_offset.1)
+            }
+        }
+    }
+
+    /// The clone result from the original value `o`, the premultiplied
+    /// source `s`, and the coverage `c`.
+    #[inline]
+    fn blend(&self, o: Rgba, s: Rgba, c: f32) -> Rgba {
+        if self.keep_alpha {
+            let (sc, _) = unpremultiply(s);
+            self.blend_straight(o, sc, 0.0, c)
+        } else {
+            let k = 1.0 - c;
+            [
+                s[0] * c + o[0] * k,
+                s[1] * c + o[1] * k,
+                s[2] * c + o[2] * k,
+                s[3] * c + o[3] * k,
+            ]
+        }
+    }
+
+    /// The clone result from the original value `o`, the straight source
+    /// color `sc` with alpha `sa`, and the coverage `c`.
+    #[inline]
+    fn blend_straight(&self, o: Rgba, sc: [f32; 3], sa: f32, c: f32) -> Rgba {
+        if self.keep_alpha {
+            [
+                o[0] + (sc[0] * o[3] - o[0]) * c,
+                o[1] + (sc[1] * o[3] - o[1]) * c,
+                o[2] + (sc[2] * o[3] - o[2]) * c,
+                o[3],
+            ]
+        } else {
+            self.blend(o, premultiply(sc, sa), c)
+        }
+    }
+
+    /// Straight color encoded with the blend space, and linear alpha.
+    #[inline]
+    fn encode(&self, p: Rgba) -> [f32; 4] {
+        let (c, a) = unpremultiply(p);
+        let e = self.space.encode(c);
+        [e[0], e[1], e[2], a]
+    }
+}
+
+/// Returns the pixel `(x, y)` of `img`, or `None` outside the image.
+#[inline]
+fn image_at(img: &WorkingImage, x: i64, y: i64) -> Option<Rgba> {
+    let x = u32::try_from(x).ok()?;
+    let y = u32::try_from(y).ok()?;
+    img.pixel(x, y)
+}
+
+/// The dab rule of a clone stroke. It reads the source values of a row
+/// before the row changes.
+struct CloneRule<'a> {
+    state: &'a CloneState,
+    /// The source values of the current row, for the columns `x0..`.
+    row: Vec<Option<Rgba>>,
+    x0: i64,
+}
+
+impl DabRule<Rgba> for CloneRule<'_> {
+    fn begin_row(&mut self, grid: &TileGrid<Rgba>, buf: &[Rgba], y: i64, x0: i64, x1: i64) {
+        let state = self.state;
+        self.x0 = x0;
+        self.row.clear();
+        self.row
+            .extend((x0..x1).map(|x| state.source_at(grid, buf, x, y)));
+    }
+
+    // `x` is in the range of the last `begin_row`, so `x - x0 >= 0`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[inline]
+    fn result(&self, o: Rgba, c: f32, x: i64) -> Option<Rgba> {
+        let s = (*self.row.get((x - self.x0) as usize)?)?;
+        Some(self.state.blend(o, s, c))
     }
 }
 
@@ -724,6 +1001,8 @@ pub struct Stroke {
     last: Option<StrokePoint>,
     /// The path distance from the last point to the next dab.
     to_next: f64,
+    /// The clone state of a clone or heal stroke.
+    clone: Option<CloneState>,
 }
 
 impl fmt::Debug for Stroke {
@@ -736,6 +1015,7 @@ impl fmt::Debug for Stroke {
             .field("layer", &self.layer)
             .field("mode", &self.mode)
             .field("settings", &self.settings)
+            .field("clone", &self.clone.as_ref().map(|c| (c.kind, &c.source)))
             .field("tiles", &tiles)
             .finish_non_exhaustive()
     }
@@ -812,6 +1092,81 @@ impl Stroke {
             expected,
             last: None,
             to_next: 0.0,
+            clone: None,
+        })
+    }
+
+    /// Starts a clone or heal stroke on a pixel layer (see "Clone and
+    /// heal" in the [module documentation](self)). The transparency lock
+    /// is allowed.
+    ///
+    /// Errors:
+    /// - [`EditorError::OutOfRange`] / [`EditorError::NonFinite`] for bad
+    ///   settings, [`EditorError::OutOfRange`] for an offset component
+    ///   outside `-MAX_CLONE_OFFSET..=MAX_CLONE_OFFSET`.
+    /// - [`EditorError::InvalidBrush`] for a blend mode other than
+    ///   [`BlendMode::Normal`], or for a [`CloneSource::Image`] that does
+    ///   not have the canvas size.
+    /// - [`EditorError::LayerNotFound`].
+    /// - [`EditorError::NotAPixelLayer`] for a layer that is not a pixel
+    ///   layer.
+    /// - [`EditorError::Locked`] if the pixels lock (or `all`) is set on
+    ///   the layer or on a parent group.
+    pub fn begin_clone(
+        doc: &Document,
+        layer: LayerId,
+        spec: CloneSpec,
+        settings: BrushSettings,
+    ) -> EditorResult<Self> {
+        settings.validate()?;
+        if settings.blend_mode != BlendMode::Normal {
+            return Err(EditorError::InvalidBrush(
+                "a clone or heal stroke can use only the normal blend mode",
+            ));
+        }
+        for (name, v) in [
+            ("clone offset x", spec.offset.0),
+            ("clone offset y", spec.offset.1),
+        ] {
+            if v.unsigned_abs() > MAX_CLONE_OFFSET.unsigned_abs() {
+                return Err(EditorError::OutOfRange {
+                    name,
+                    value: f64::from(v),
+                    min: -f64::from(MAX_CLONE_OFFSET),
+                    max: f64::from(MAX_CLONE_OFFSET),
+                });
+            }
+        }
+        let l = doc.layer(layer).ok_or(EditorError::LayerNotFound(layer))?;
+        if let CloneSource::Image(img) = &spec.source {
+            if (img.width(), img.height()) != (doc.width(), doc.height()) {
+                return Err(EditorError::InvalidBrush(
+                    "the clone source image must have the canvas size",
+                ));
+            }
+        }
+        let locks = doc.effective_locks(layer)?;
+        locks.check(layer, LockKind::Pixels)?;
+        let mode = Mode::Clone;
+        let expected = expected_state(l, mode, locks)?;
+        let (w, h) = expected.size;
+        let clone = CloneState {
+            kind: spec.kind,
+            offset: (i64::from(spec.offset.0), i64::from(spec.offset.1)),
+            source: spec.source,
+            keep_alpha: locks.transparency,
+            space: doc.blend_space,
+            layer_offset: (i64::from(expected.offset.0), i64::from(expected.offset.1)),
+        };
+        Ok(Self {
+            layer,
+            mode,
+            settings,
+            grid: Grid::Pixel(TileGrid::new(w, h)),
+            expected,
+            last: None,
+            to_next: 0.0,
+            clone: Some(clone),
         })
     }
 
@@ -865,8 +1220,20 @@ impl Stroke {
                     return Err(EditorError::StrokeConflict(self.layer));
                 };
                 let buf = p.image_mut().pixels_mut();
-                for dab in &dabs {
-                    apply_dab(grid, buf, &ctx, dab, |o, c| mode.pixel(o, c), &mut changed);
+                if let Some(state) = &self.clone {
+                    let mut rule = CloneRule {
+                        state,
+                        row: Vec::new(),
+                        x0: 0,
+                    };
+                    for dab in &dabs {
+                        apply_dab(grid, buf, &ctx, dab, &mut rule, &mut changed);
+                    }
+                } else {
+                    let mut rule = FnRule(|o, c| mode.pixel(o, c));
+                    for dab in &dabs {
+                        apply_dab(grid, buf, &ctx, dab, &mut rule, &mut changed);
+                    }
                 }
             }
             Grid::Mask(grid) => {
@@ -874,8 +1241,9 @@ impl Stroke {
                     .mask_mut()
                     .ok_or(EditorError::StrokeConflict(self.layer))?;
                 let buf = m.image.data_mut();
+                let mut rule = FnRule(|o, c| mode.mask(o, c));
                 for dab in &dabs {
-                    apply_dab(grid, buf, &ctx, dab, |o, c| mode.mask(o, c), &mut changed);
+                    apply_dab(grid, buf, &ctx, dab, &mut rule, &mut changed);
                 }
             }
         }
@@ -900,6 +1268,7 @@ impl Stroke {
     /// edit.
     pub fn end(mut self, doc: &mut Document) -> EditorResult<Option<Edit>> {
         self.check(doc)?;
+        self.heal_pass(doc)?;
         let id = self.layer;
         let conflict = EditorError::StrokeConflict(id);
         let layer = doc.layer(id).ok_or(conflict.clone())?;
@@ -942,6 +1311,113 @@ impl Stroke {
             // The restored area is not tracked: the change logs are
             // cleared, so caches load all values again (a cancel is rare).
             self.touch(doc, None)?;
+        }
+        Ok(())
+    }
+
+    /// The heal pass of a heal stroke (see "Clone and heal" in the
+    /// [module documentation](self)). Does nothing for other strokes.
+    // Region coordinates are buffer indices in `0..=width` / `0..=height`
+    // (u32), so the casts do not lose values.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap
+    )]
+    fn heal_pass(&mut self, doc: &mut Document) -> EditorResult<()> {
+        let (Some(state), Grid::Pixel(grid)) = (&self.clone, &self.grid) else {
+            return Ok(());
+        };
+        if state.kind != CloneKind::Heal {
+            return Ok(());
+        }
+        // The bounds of the covered pixels (buffer coordinates).
+        let mut covered: Option<Bounds> = None;
+        for tile in grid.tiles.iter().flatten() {
+            let w = tile.rect.width as usize;
+            for (i, &c) in tile.cov.iter().enumerate() {
+                if c > 0.0 {
+                    let x = i64::from(tile.rect.x) + (i % w) as i64;
+                    let y = i64::from(tile.rect.y) + (i / w) as i64;
+                    Bounds::add(&mut covered, x, y);
+                }
+            }
+        }
+        let Some(b) = covered else {
+            return Ok(());
+        };
+        // One more pixel on each side for the boundary values.
+        let (bw, bh) = (i64::from(grid.width), i64::from(grid.height));
+        let (x0, y0) = ((b.x0 - 1).max(0), (b.y0 - 1).max(0));
+        let (x1, y1) = ((b.x1 + 1).min(bw), (b.y1 + 1).min(bh));
+        let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let conflict = EditorError::StrokeConflict(self.layer);
+        let layer = doc.layer_mut(self.layer)?;
+        let LayerKind::Pixel(p) = layer.kind_mut() else {
+            return Err(conflict);
+        };
+        let buf = p.image_mut().pixels_mut();
+        // First the region R, then the boundary values on the pixels next
+        // to R (only there, because the encode is not free).
+        let mut cells = Vec::with_capacity(rw * rh);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let inside = grid.cov_at(x as u32, y as u32) > 0.0
+                    && state.source_at(grid, buf, x, y).is_some();
+                cells.push(if inside { Cell::Unknown } else { Cell::Free });
+            }
+        }
+        for i in 0..cells.len() {
+            if cells[i] == Cell::Unknown {
+                continue;
+            }
+            let (cx, cy) = (i % rw, i / rw);
+            let next_to_r = (cx > 0 && cells[i - 1] == Cell::Unknown)
+                || (cx + 1 < rw && cells[i + 1] == Cell::Unknown)
+                || (cy > 0 && cells[i - rw] == Cell::Unknown)
+                || (cy + 1 < rh && cells[i + rw] == Cell::Unknown);
+            if !next_to_r {
+                continue;
+            }
+            let (x, y) = (x0 + cx as i64, y0 + cy as i64);
+            if let (Some(s), Some(d)) = (
+                state.source_at(grid, buf, x, y),
+                state.dest_tone(grid, buf, x, y),
+            ) {
+                let (d, s) = (state.encode(d), state.encode(s));
+                cells[i] = Cell::Fixed([d[0] - s[0], d[1] - s[1], d[2] - s[2], d[3] - s[3]]);
+            }
+        }
+        let membrane = solve_membrane(rw, rh, &cells);
+        let width = grid.width as usize;
+        let mut changed = None;
+        for (i, (cell, m)) in cells.iter().zip(&membrane).enumerate() {
+            if *cell != Cell::Unknown {
+                continue;
+            }
+            let x = x0 + (i % rw) as i64;
+            let y = y0 + (i / rw) as i64;
+            let (Some(s), Some(o)) = (state.source_at(grid, buf, x, y), grid.orig_at(x, y, buf))
+            else {
+                continue;
+            };
+            let s = state.encode(s);
+            let h = [s[0] + m[0], s[1] + m[1], s[2] + m[2], s[3] + m[3]];
+            let color = state
+                .space
+                .decode([h[0].max(0.0), h[1].max(0.0), h[2].max(0.0)])
+                .map(|v| v.max(0.0));
+            let alpha = h[3].clamp(0.0, 1.0);
+            let c = grid.cov_at(x as u32, y as u32);
+            let value = state.blend_straight(o, color, alpha, c);
+            let at = y as usize * width + x as usize;
+            if !value.same_bits(&buf[at]) {
+                buf[at] = value;
+                Bounds::add(&mut changed, x, y);
+            }
+        }
+        if let Some(b) = changed {
+            self.touch(doc, b.local_rect())?;
         }
         Ok(())
     }
@@ -1075,3 +1551,6 @@ fn canvas_rect(b: Bounds, ox: i64, oy: i64, canvas_w: u32, canvas_h: u32) -> Opt
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod clone_tests;
