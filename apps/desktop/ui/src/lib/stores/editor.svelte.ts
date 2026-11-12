@@ -1348,7 +1348,7 @@ export class EditorStore {
   /**
    * The reason why no filter can run now, or null if one can. Filters work
    * on the pixels of a pixel layer, or on a mask. The pixels lock and the
-   * all lock block the pixels; the all lock blocks the mask.
+   * all lock block both targets (the same rule as a brush stroke).
    */
   get filterBlockReason(): string | null {
     if (this.info === null || this.status !== 'ready') {
@@ -1363,7 +1363,7 @@ export class EditorStore {
       return 'Filters work on pixel layers. Select a pixel layer, or click the mask of a layer.';
     }
     const locks = this.selectedLocks;
-    if (locks.all || (target === 'pixels' && locks.pixels)) {
+    if (locks.all || locks.pixels) {
       return 'The layer is locked.';
     }
     return null;

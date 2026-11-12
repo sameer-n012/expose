@@ -118,12 +118,19 @@ describe('Filter menu', () => {
     expect(button.title).toMatch(/pixel layer/);
   });
 
-  it('is disabled for a layer with the pixels lock, and enabled for the mask', async () => {
+  it('is disabled for a layer with the pixels lock, for the pixels and for the mask', async () => {
     const { store } = await ready([layer(1, { hasMask: true, maskEnabled: true, locks: { ...NONE, pixels: true } })]);
     expect((filterButton() as HTMLButtonElement).disabled).toBe(true);
     store.selectMaskTarget(1);
     await flush();
-    expect((filterButton() as HTMLButtonElement).disabled).toBe(false);
+    expect((filterButton() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('is disabled for the mask of a layer with the all lock', async () => {
+    const { store } = await ready([layer(1, { hasMask: true, maskEnabled: true, locks: { ...NONE, all: true } })]);
+    store.selectMaskTarget(1);
+    await flush();
+    expect((filterButton() as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('has shortcut actions without default keys', async () => {
