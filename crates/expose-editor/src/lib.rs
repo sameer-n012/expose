@@ -30,6 +30,8 @@
 //!   diamond) on pixel layers and masks ([`Document::fill_gradient`]).
 //! - [`transform`]: free transform of a pixel layer and its mask with an
 //!   affine matrix ([`Affine`], [`Document::transform_layer`]) on the CPU.
+//! - [`crop`]: canvas crop with straighten ([`CropSpec`],
+//!   [`Document::crop_canvas`]). One crop gives one undo edit.
 //! - [`filter`]: Gaussian blur and unsharp mask on pixel layers and masks
 //!   ([`FilterSession`] for a live preview, [`Document::apply_filter`]).
 //! - [`history`]: undo and redo. [`History::push_merge`] makes one undo
@@ -82,6 +84,7 @@ pub mod blend;
 pub mod brush;
 mod changes;
 pub mod composite;
+pub mod crop;
 pub mod document;
 pub mod error;
 pub mod file;
@@ -108,6 +111,7 @@ pub use brush::{
     STROKE_TILE_SIZE, Stroke, StrokePoint, StrokeTarget,
 };
 pub use composite::{composite, composite_straight, to_straight_alpha};
+pub use crop::{CropSpec, MAX_CROP_ANGLE, MAX_CROP_COORD};
 pub use document::{
     Background, BitDepth, ColorMode, Document, DocumentSpec, MAX_DIMENSION, MAX_PIXELS,
 };
