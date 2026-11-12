@@ -335,6 +335,14 @@ impl Document {
         self.revision = next_stamp();
     }
 
+    /// Sets the canvas size. The caller must check the size with
+    /// [`check_size`] and must keep the selection the same size as the
+    /// canvas (see [`crate::crop`]).
+    pub(crate) const fn set_size(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+    }
+
     /// Returns the canvas width in pixels.
     pub const fn width(&self) -> u32 {
         self.width

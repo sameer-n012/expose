@@ -23,6 +23,7 @@ use expose_core::buffer::{Rect, Rgba, WorkingImage};
 use crate::adjust::Adjustment;
 use crate::blend::{BlendMode, BlendSpace};
 use crate::changes::union;
+use crate::crop::CanvasChange;
 use crate::document::Document;
 use crate::error::{EditorError, EditorResult, check_range};
 use crate::layer::{
@@ -113,6 +114,9 @@ enum EditKind {
     /// The document selection to set (`None` = no selection), in compact
     /// form. See [`crate::selection`].
     Selection(Option<Box<StoredSelection>>),
+    /// The canvas size, the selection, and the offsets and buffers of the
+    /// changed layers. A canvas crop makes this edit (see [`crate::crop`]).
+    Canvas(Box<CanvasChange>),
 }
 
 impl Edit {
@@ -155,6 +159,12 @@ impl Edit {
         })
     }
 
+    /// Makes an edit that applies a canvas change. Apply it with
+    /// [`Document::apply_edit`] to get the inverse.
+    pub(crate) fn canvas(change: CanvasChange) -> Self {
+        Self::new(EditKind::Canvas(Box::new(change)))
+    }
+
     /// Returns the approximate heap memory of the edit in bytes. The
     /// history uses it for its memory report.
     pub fn memory_bytes(&self) -> usize {
@@ -183,6 +193,7 @@ impl Edit {
                 image.as_bytes().len() + mask.as_ref().map_or(0, |m| size_of_val(m.image.data()))
             }
             EditKind::Selection(s) => s.as_ref().map_or(0, |s| s.memory_bytes()),
+            EditKind::Canvas(c) => c.memory_bytes(),
             EditKind::Remove { .. }
             | EditKind::Move { .. }
             | EditKind::Isolation { .. }
@@ -288,6 +299,10 @@ impl Document {
     /// A selection edit gives the document a new selection version, but it
     /// keeps the revision: the selection does not change the composite, so
     /// caches that use the revision stay valid.
+    ///
+    /// A canvas edit (crop) gives a new revision and a new selection
+    /// version. Layers whose buffers change get new versions; layers that
+    /// only move keep them (see [`crate::crop`]).
     pub(crate) fn apply_edit(&mut self, edit: Edit) -> EditorResult<Edit> {
         let inverse = match edit.kind {
             EditKind::Selection(stored) => {
@@ -375,6 +390,7 @@ impl Document {
                 let old = std::mem::replace(&mut self.blend_space, space);
                 EditKind::BlendSpace(old)
             }
+            EditKind::Canvas(change) => EditKind::Canvas(Box::new(self.raw_canvas(*change)?)),
         };
         // The edit is applied (each error above returns before a change).
         self.touch();
