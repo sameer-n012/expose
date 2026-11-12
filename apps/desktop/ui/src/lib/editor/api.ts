@@ -229,6 +229,8 @@ export type EditDto =
    * (`x' = a*x + c*y + e`, `y' = b*x + d*y + f`); it maps the old layer position to the new one.
    */
   | { type: 'transformLayer'; layerId: number; matrix: TransformMatrix; interpolation: 'bicubic' | 'bilinear' | 'nearest' }
+  /** Crops (and straightens) the canvas. History step "Crop". `width`/`height` whole px (document size limits). `angle` degrees -45..45, positive = clockwise on screen. Center of new pixel (u,v) = old canvas point center + R(angle)·(u+0.5−w/2, v+0.5−h/2). At angle 0 with centerX−width/2 and centerY−height/2 whole numbers, the crop is lossless (offsets only). */
+  | { type: 'cropCanvas'; centerX: number; centerY: number; width: number; height: number; angle: number; deleteCropped: boolean; interpolation: 'bicubic' | 'bilinear' | 'nearest' }
   /** Deselect, invert, and feather are errors when there is no selection. */
   | { type: 'deselect' }
   /** Restores the selection that the last deselect removed. An error if `canReselect` is false. */
