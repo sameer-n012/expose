@@ -290,7 +290,11 @@ export type StrokeTargetDto =
   | { type: 'paint'; color: [number, number, number] }
   | { type: 'erase' }
   /** 0 hides, 1 reveals. */
-  | { type: 'mask'; value: number };
+  | { type: 'mask'; value: number }
+  /** Copy pixels: source = destination + offset (whole canvas pixels, |v| <= 100000). */
+  | { type: 'clone'; offset: [number, number]; sampleAllLayers: boolean }
+  /** Like clone, then match the tone to the destination at the stroke end. */
+  | { type: 'heal'; offset: [number, number]; sampleAllLayers: boolean };
 
 /** The brush of a stroke. */
 export interface BrushSettingsDto {

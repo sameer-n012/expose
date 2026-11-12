@@ -55,6 +55,8 @@ export const EDITOR_ACTION = {
   brushTool: 'editor.brushTool',
   eraserTool: 'editor.eraserTool',
   eyedropperTool: 'editor.eyedropperTool',
+  cloneStampTool: 'editor.cloneStampTool',
+  healingBrushTool: 'editor.healingBrushTool',
   magicWandTool: 'editor.magicWandTool',
   paintBucketTool: 'editor.paintBucketTool',
   brushSizeDown: 'editor.brushSizeDown',
@@ -92,6 +94,7 @@ export interface EditorCommands {
   cycleFill(): void;
   setTool(tool: EditorTool): void;
   selectPaintTool(tool: 'brush' | 'eraser'): void;
+  selectCloneTool(tool: 'cloneStamp' | 'healingBrush'): void;
   stepBrushSize(direction: 1 | -1): void;
   stepBrushHardness(direction: 1 | -1): void;
   swapColors(): void;
@@ -131,6 +134,8 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     { id: EDITOR_ACTION.brushTool, label: 'Editor: brush tool', scope: 'editor', defaultBinding: 'B', run: () => commands.selectPaintTool('brush') },
     { id: EDITOR_ACTION.eraserTool, label: 'Editor: eraser tool', scope: 'editor', defaultBinding: 'E', run: () => commands.selectPaintTool('eraser') },
     { id: EDITOR_ACTION.eyedropperTool, label: 'Editor: eyedropper tool', scope: 'editor', defaultBinding: 'I', run: () => commands.setTool('eyedropper') },
+    { id: EDITOR_ACTION.cloneStampTool, label: 'Editor: clone stamp tool', scope: 'editor', defaultBinding: 'S', run: () => commands.selectCloneTool('cloneStamp') },
+    { id: EDITOR_ACTION.healingBrushTool, label: 'Editor: healing brush tool', scope: 'editor', defaultBinding: 'J', run: () => commands.selectCloneTool('healingBrush') },
     // In the editor scope, `G` takes precedence over the global Library grid key.
     { id: EDITOR_ACTION.magicWandTool, label: 'Editor: magic wand tool', scope: 'editor', defaultBinding: 'W', run: () => commands.setTool('magicWand') },
     { id: EDITOR_ACTION.paintBucketTool, label: 'Editor: paint bucket / gradient tool', scope: 'editor', defaultBinding: 'G', run: () => commands.cycleFill() },

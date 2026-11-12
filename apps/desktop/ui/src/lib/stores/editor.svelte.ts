@@ -62,6 +62,7 @@ import {
   type PaintTarget,
   type PaintTool,
 } from '../editor/brush';
+import { EMPTY_CLONE_STATE, afterStroke, cloneTarget, defaultCloneBrush, isCloneTool, strokeOffset, withSource, type CloneState, type CloneTool } from '../editor/clone';
 import { defaultBucket, defaultWand, fillEdit, magicWandEdit, type FloodSettings, type PaintBucketSettings } from '../editor/flood';
 import { clampFeather, cycleFill, cycleLasso, cycleMarquee, isFillTool, isLassoTool, type EditorTool, type FillTool, type LassoTool } from '../editor/selection';
 import { defaultGradient, gradientEdit, presetStops, type GradientSettings } from '../editor/gradient';
@@ -137,6 +138,12 @@ export class EditorStore {
   brush = $state<BrushSettings>(defaultBrush());
   /** The settings of the eraser tool. */
   eraser = $state<BrushSettings>(defaultEraser());
+  /** The settings of the clone stamp and the healing brush (shared by both tools). */
+  clone = $state<BrushSettings>(defaultCloneBrush());
+  /** Clone stamp and healing brush: keep the offset between strokes. */
+  cloneAligned = $state(true);
+  /** Clone stamp and healing brush: read all layers (the composite) instead of the selected layer. */
+  cloneSampleAll = $state(false);
   /** The foreground color, "#rrggbb". */
   foreground = $state(DEFAULT_FOREGROUND);
   /** The background color, "#rrggbb". */
@@ -592,7 +599,10 @@ export class EditorStore {
   }
 
   /** The settings of a paint tool. */
-  brushOf(tool: PaintTool): BrushSettings {
+  brushOf(tool: PaintTool | CloneTool): BrushSettings {
+    if (isCloneTool(tool)) {
+      return this.clone;
+    }
     return tool === 'brush' ? this.brush : this.eraser;
   }
 
@@ -601,13 +611,97 @@ export class EditorStore {
     return this.tool === 'brush' || this.tool === 'eraser' ? this.tool : null;
   }
 
+  /** The clone stamp or healing brush, if it is active, else null. */
+  get cloneTool(): CloneTool | null {
+    return isCloneTool(this.tool) ? this.tool : null;
+  }
+
   /** Changes some settings of a paint tool. Values go to their ranges. */
-  updateBrush(tool: PaintTool, patch: Partial<BrushSettings>): void {
+  updateBrush(tool: PaintTool | CloneTool, patch: Partial<BrushSettings>): void {
     const next = normalizeBrush({ ...this.brushOf(tool), ...patch });
-    if (tool === 'brush') {
+    if (isCloneTool(tool)) {
+      this.clone = next;
+    } else if (tool === 'brush') {
       this.brush = next;
     } else {
       this.eraser = next;
+    }
+  }
+
+  // ---- Clone stamp and healing brush ----
+
+  /**
+   * The reason why the clone stamp and the healing brush cannot work now, or
+   * null if they can. They work on the pixels of a pixel layer.
+   */
+  get cloneBlockReason(): string | null {
+    if (this.info === null) {
+      return 'No document is open.';
+    }
+    const layer = this.selected;
+    if (layer === null) {
+      return 'Select a pixel layer to clone on.';
+    }
+    if (layer.kind !== 'pixel') {
+      return 'The clone stamp and the healing brush work on pixel layers. Select a pixel layer.';
+    }
+    return null;
+  }
+
+  /** Selects the clone stamp or the healing brush. Does nothing while they cannot work. */
+  selectCloneTool(tool: CloneTool): void {
+    if (this.cloneBlockReason === null) {
+      this.setTool(tool);
+    }
+  }
+
+  /** The source point and stored offset of the active tab. */
+  get cloneState(): CloneState {
+    return this.#activeTab?.cloneState ?? EMPTY_CLONE_STATE;
+  }
+
+  /** Alt+click: sets the source point (canvas pixels) and clears the stored offset. */
+  setCloneSource(point: { x: number; y: number }): void {
+    const tab = this.#activeTab;
+    if (tab !== null) {
+      tab.cloneState = withSource(point);
+    }
+  }
+
+  /**
+   * The layer, target, and brush for a stroke of the clone stamp or the
+   * healing brush that starts at `start` (canvas pixels), or null if no
+   * stroke can start. The reason shows as a toast. This stores the offset.
+   */
+  cloneStrokeSpec(start: { x: number; y: number }): { layerId: number; target: StrokeTargetDto; brush: BrushSettings } | null {
+    const tool = this.cloneTool;
+    const tab = this.#activeTab;
+    const layer = this.selected;
+    if (tool === null || tab === null || layer === null || this.cloneBlockReason !== null) {
+      return null;
+    }
+    if (this.paintTarget === 'mask') {
+      this.#toasts.info('Clone stamp and healing brush work on layer pixels only');
+      return null;
+    }
+    const result = strokeOffset(tab.cloneState, start, this.cloneAligned);
+    if (result === null) {
+      this.#toasts.info('Alt+click to set the source point');
+      return null;
+    }
+    tab.cloneState = result.state;
+    return {
+      layerId: layer.id,
+      target: cloneTarget(tool, result.offset, this.cloneSampleAll),
+      brush: { ...this.clone, blendMode: 'normal' },
+    };
+  }
+
+  /** A clone stroke ended or was cancelled: a stroke that is not aligned forgets its offset. */
+  endCloneStroke(): void {
+    const tab = this.#activeTab;
+    if (tab !== null) {
+      tab.cloneState = afterStroke(tab.cloneState, this.cloneAligned);
     }
   }
 
@@ -620,7 +714,7 @@ export class EditorStore {
 
   /** `]` (1) and `[` (-1): the size of the active paint tool. */
   stepBrushSize(direction: 1 | -1): void {
-    const tool = this.paintTool;
+    const tool = this.paintTool ?? this.cloneTool;
     if (tool !== null) {
       this.updateBrush(tool, { size: steppedSize(this.brushOf(tool).size, direction) });
     }
@@ -628,7 +722,7 @@ export class EditorStore {
 
   /** `}` (1) and `{` (-1): the hardness of the active paint tool. */
   stepBrushHardness(direction: 1 | -1): void {
-    const tool = this.paintTool;
+    const tool = this.paintTool ?? this.cloneTool;
     if (tool !== null) {
       this.updateBrush(tool, { hardness: steppedHardness(this.brushOf(tool).hardness, direction) });
     }
