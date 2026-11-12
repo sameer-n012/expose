@@ -9,7 +9,7 @@ import type { SelectionModeId, SelectionShapeDto } from './api';
 import { screenToCanvas, type Point, type ViewMapping } from './view';
 
 /** The tools of the Editor canvas. */
-export type EditorTool = 'hand' | 'rotate' | 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso' | 'brush' | 'eraser' | 'eyedropper' | 'magicWand' | 'paintBucket' | 'gradient';
+export type EditorTool = 'hand' | 'rotate' | 'rectSelect' | 'ellipseSelect' | 'lasso' | 'polygonLasso' | 'brush' | 'eraser' | 'eyedropper' | 'magicWand' | 'paintBucket' | 'gradient' | 'cloneStamp' | 'healingBrush';
 
 /** The tools that `G` switches between. */
 export type FillTool = 'paintBucket' | 'gradient';

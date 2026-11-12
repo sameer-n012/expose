@@ -15,7 +15,9 @@
   import { MAX_FEATHER, isSelectionTool, type EditorTool } from '../../lib/editor/selection';
   import type { PaintTool } from '../../lib/editor/brush';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
+  import type { CloneTool } from '../../lib/editor/clone';
   import BrushOptions from './BrushOptions.svelte';
+  import CloneOptions from './CloneOptions.svelte';
   import EyedropperOptions from './EyedropperOptions.svelte';
   import GradientOptions from './GradientOptions.svelte';
   import MagicWandOptions from './MagicWandOptions.svelte';
@@ -33,6 +35,13 @@
     { id: 'eraser', label: 'Eraser', title: 'Eraser (E). Drag to erase. [ and ] change the size.' },
   ];
 
+  const CLONE_TOOLS: { id: CloneTool; label: string; title: string }[] = [
+    { id: 'cloneStamp', label: 'Clone stamp', title: 'Clone stamp (S). Alt+click sets the source point. Drag to copy pixels from it.' },
+    { id: 'healingBrush', label: 'Healing brush', title: 'Healing brush (J). Alt+click sets the source point. Drag to copy pixels and match their tone.' },
+  ];
+
+  const cloneBlocked = $derived(editor.cloneBlockReason);
+  const cloneTool = $derived(editor.cloneTool);
   const blocked = $derived(editor.paintBlockReason);
   const paintTool = $derived(editor.paintTool);
 
@@ -73,6 +82,19 @@
         </button>
       </span>
     {/each}
+    {#each CLONE_TOOLS as tool (tool.id)}
+      <span title={cloneBlocked ?? tool.title}>
+        <button
+          type="button"
+          aria-pressed={editor.tool === tool.id}
+          title={cloneBlocked ?? tool.title}
+          disabled={cloneBlocked !== null}
+          onclick={() => editor.selectCloneTool(tool.id)}
+        >
+          {tool.label}
+        </button>
+      </span>
+    {/each}
   </div>
 
   <div class="group" role="group" aria-label="Transform">
@@ -91,6 +113,10 @@
   {:else}
   {#if paintTool !== null}
     <BrushOptions {editor} tool={paintTool} />
+  {/if}
+
+  {#if cloneTool !== null}
+    <CloneOptions {editor} tool={cloneTool} />
   {/if}
 
   {#if editor.tool === 'eyedropper'}

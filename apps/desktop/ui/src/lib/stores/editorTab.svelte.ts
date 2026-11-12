@@ -8,6 +8,7 @@
  */
 import type { PhotoId } from '../catalog';
 import type { DocumentInfo, EditDto } from '../editor/api';
+import { EMPTY_CLONE_STATE, type CloneState } from '../editor/clone';
 import { allLayerIds, findLayer } from '../editor/layers';
 import type { MaskThumbnail } from '../editor/maskThumbnail';
 import type { Interpolation, TransformState } from '../editor/transform';
@@ -43,6 +44,8 @@ export class EditorTab {
   maskTarget = $state<number | null>(null);
   /** The layer whose mask the user chose as the paint target (the store reads it). */
   paintMaskId = $state<number | null>(null);
+  /** The source point and the stored offset of the clone stamp and the healing brush. */
+  cloneState = $state.raw<CloneState>(EMPTY_CLONE_STATE);
   /** Ids of the expanded groups. */
   expanded = $state.raw<ReadonlySet<number>>(new Set());
   /**

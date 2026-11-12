@@ -44,6 +44,10 @@
     pixels stay). Arrow keys move 1 px (Shift: 10 px). Enter commits, Escape
     cancels. A tool change, another layer, or another tab cancels. Frame
     requests carry `transformPreview` while it runs.
+  - Clone stamp and healing brush: Alt+click sets the source point (no
+    stroke). A drag is a stroke with a `clone` or `heal` target; the offset
+    comes from `EditorStore.cloneStrokeSpec`. A crosshair shows the source:
+    pointer plus offset, or the source point itself.
   - Eyedropper: a click samples the color under the pointer into the
     foreground color; Alt+click sets the background color. The options are
     the sample size and the source (all layers or the selected layer).
@@ -53,6 +57,7 @@
   import { fitCanvas, frameImageData } from '../../lib/develop/draw';
   import type { DocumentInfo, RenderArea } from '../../lib/editor/api';
   import { CROSSHAIR_BELOW, cursorDiameter, pointerPressure } from '../../lib/editor/brush';
+  import { isCloneTool, sourceMarker } from '../../lib/editor/clone';
   import { StrokeClient } from '../../lib/editor/strokeClient';
   import { EditorFrameClient, type EditorFrame } from '../../lib/editor/frameClient';
   import {
@@ -535,6 +540,8 @@
     readonly client: StrokeClient;
     readonly pointerId: number;
     readonly node: HTMLElement;
+    /** True for the clone stamp and the healing brush. */
+    readonly clone: boolean;
   }
 
   let stroke: RunningStroke | null = null;
@@ -554,7 +561,8 @@
   }
 
   function startStroke(event: PointerEvent, node: HTMLElement, view: View): void {
-    const spec = editor.strokeSpec();
+    const clone = isCloneTool(editor.tool);
+    const spec = clone ? editor.cloneStrokeSpec(screenToCanvas(view, local(event, node))) : editor.strokeSpec();
     const info = editor.info;
     if (spec === null || info === null) {
       return;
@@ -570,11 +578,14 @@
         if (stroke?.client === client) {
           stroke = null;
         }
+        if (clone) {
+          editor.endCloneStroke();
+        }
         toasts.error(`Start the stroke failed: ${describeError(error)}`, error);
       },
       onError: (error) => toasts.error(`Paint the stroke failed: ${describeError(error)}`, error),
     });
-    stroke = { client, pointerId: event.pointerId, node };
+    stroke = { client, pointerId: event.pointerId, node, clone };
     node.setPointerCapture?.(event.pointerId);
     client.addPoints(strokePoints(event, node, view));
   }
@@ -585,6 +596,9 @@
       return;
     }
     stroke = null;
+    if (current.clone) {
+      editor.endCloneStroke();
+    }
     current.node.releasePointerCapture?.(event.pointerId);
     const view = editor.view;
     if (event.type === 'pointercancel') {
@@ -603,6 +617,9 @@
       return;
     }
     stroke = null;
+    if (current.clone) {
+      editor.endCloneStroke();
+    }
     current.node.releasePointerCapture?.(current.pointerId);
     void current.client.cancel().then(applyStrokeInfo);
   }
@@ -613,15 +630,27 @@
     }
   }
 
-  const paintReady = $derived(editor.paintTool !== null && editor.paintBlockReason === null);
+  const paintReady = $derived(
+    (editor.paintTool !== null && editor.paintBlockReason === null) || (editor.cloneTool !== null && editor.cloneBlockReason === null),
+  );
   const cursorShape = $derived.by(() => {
-    const tool = editor.paintTool;
+    const tool = editor.paintTool ?? editor.cloneTool;
     const view = editor.view;
     if (tool === null || view === null || cursor === null || !paintReady || spaceDown || panning) {
       return null;
     }
     const diameter = cursorDiameter(editor.brushOf(tool).size, view.zoom);
     return { x: cursor.x, y: cursor.y, radius: diameter / 2, crosshair: diameter < CROSSHAIR_BELOW };
+  });
+
+  /** The source crosshair of the clone tools, in viewport pixels (follows zoom, pan, and rotation), or null. */
+  const sourceCross = $derived.by(() => {
+    const view = editor.view;
+    if (editor.cloneTool === null || view === null || transformShape !== null) {
+      return null;
+    }
+    const marker = sourceMarker(editor.cloneState, cursor === null ? null : screenToCanvas(view, cursor));
+    return marker === null ? null : canvasToScreen(view, marker);
   });
 
   function lassoClick(event: PointerEvent, p: Point, view: View): void {
@@ -791,6 +820,15 @@
         const start = screenToCanvas(view, startScreen);
         gradientDrag = { start, end: start, startScreen, pointerId: event.pointerId };
         event.currentTarget.setPointerCapture?.(event.pointerId);
+      }
+      return;
+    }
+    if (tool === 'cloneStamp' || tool === 'healingBrush') {
+      if (event.altKey) {
+        // Alt+click sets the source point; it starts no stroke.
+        editor.setCloneSource(screenToCanvas(view, local(event, event.currentTarget)));
+      } else if (stroke === null) {
+        startStroke(event, event.currentTarget, view);
       }
       return;
     }
@@ -1068,6 +1106,13 @@
               class="dashes solid"
               d="M {transformShape.reference.x - 8} {transformShape.reference.y} H {transformShape.reference.x + 8} M {transformShape.reference.x} {transformShape.reference.y - 8} V {transformShape.reference.y + 8}"
             />
+          </svg>
+        {/if}
+        {#if sourceCross !== null}
+          <svg class="preview" aria-hidden="true" data-testid="clone-source" data-x={sourceCross.x} data-y={sourceCross.y}>
+            <path class="under" d="M {sourceCross.x - 8} {sourceCross.y} H {sourceCross.x + 8} M {sourceCross.x} {sourceCross.y - 8} V {sourceCross.y + 8}" />
+            <path class="dashes solid" d="M {sourceCross.x - 7} {sourceCross.y} H {sourceCross.x + 7} M {sourceCross.x} {sourceCross.y - 7} V {sourceCross.y + 7}" />
+            <circle class="dashes solid" cx={sourceCross.x} cy={sourceCross.y} r="4" />
           </svg>
         {/if}
         {#if cursorShape !== null && transformShape === null}
