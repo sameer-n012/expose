@@ -69,6 +69,8 @@ export const EDITOR_ACTION = {
   nextTab: 'editor.nextTab',
   previousTab: 'editor.previousTab',
   freeTransform: 'editor.freeTransform',
+  gaussianBlur: 'editor.gaussianBlur',
+  unsharpMask: 'editor.unsharpMask',
 } as const;
 
 /** The commands that the Editor actions call (the editor store has them). */
@@ -102,6 +104,7 @@ export interface EditorCommands {
   closeActiveTab(): void;
   nextTab(step: 1 | -1): void;
   startTransform(): Promise<void>;
+  openFilterDialog(kind: 'gaussianBlur' | 'unsharpMask'): void;
 }
 
 /** The action that opens the selected photo in the Editor. The shell knows the photo. */
@@ -156,6 +159,9 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     { id: EDITOR_ACTION.zoom100, label: 'Editor: zoom to 100 %', scope: 'editor', defaultBinding: 'Mod+1', run: () => commands.zoomTo(1) },
     // Needs a selected pixel layer; the store shows a toast otherwise. `Enter` and `Escape` work in the transform mode (EditorView).
     { id: EDITOR_ACTION.freeTransform, label: 'Editor: free transform', scope: 'editor', defaultBinding: 'Mod+T', run: () => void commands.startTransform() },
+    // No default keys. The store shows a toast when the layer cannot take a filter.
+    { id: EDITOR_ACTION.gaussianBlur, label: 'Editor: filter, Gaussian blur…', scope: 'editor', defaultBinding: null, run: () => commands.openFilterDialog('gaussianBlur') },
+    { id: EDITOR_ACTION.unsharpMask, label: 'Editor: filter, unsharp mask…', scope: 'editor', defaultBinding: null, run: () => commands.openFilterDialog('unsharpMask') },
     { id: EDITOR_ACTION.closeTab, label: 'Editor: close document tab', scope: 'editor', defaultBinding: 'Mod+W', run: () => commands.closeActiveTab() },
     { id: EDITOR_ACTION.nextTab, label: 'Editor: next document tab', scope: 'editor', defaultBinding: 'Ctrl+Tab', allowRepeat: true, run: () => commands.nextTab(1) },
     { id: EDITOR_ACTION.previousTab, label: 'Editor: previous document tab', scope: 'editor', defaultBinding: 'Ctrl+Shift+Tab', allowRepeat: true, run: () => commands.nextTab(-1) },

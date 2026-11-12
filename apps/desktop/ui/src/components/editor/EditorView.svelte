@@ -111,6 +111,8 @@
   import type { EditorStore } from '../../lib/stores/editor.svelte';
   import DocumentTabs from './DocumentTabs.svelte';
   import FeatherDialog from './FeatherDialog.svelte';
+  import GaussianBlurDialog from './GaussianBlurDialog.svelte';
+  import UnsharpMaskDialog from './UnsharpMaskDialog.svelte';
   import GradientEditorDialog from './GradientEditorDialog.svelte';
   import NewDocumentDialog from './NewDocumentDialog.svelte';
   import SelectionOverlay from './SelectionOverlay.svelte';
@@ -1141,6 +1143,16 @@
     {/if}
     {#if editor.status === 'ready'}
       <SelectionToolbar {editor} />
+    {/if}
+    {#if editor.status === 'ready' && editor.filterDialog !== null}
+      {@const session = editor.filterDialog}
+      {#key session}
+        {#if session.kind === 'gaussianBlur'}
+          <GaussianBlurDialog {editor} {session} />
+        {:else}
+          <UnsharpMaskDialog {editor} {session} />
+        {/if}
+      {/key}
     {/if}
   </div>
 </div>

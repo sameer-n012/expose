@@ -16,6 +16,7 @@
   import type { PaintTool } from '../../lib/editor/brush';
   import type { EditorStore } from '../../lib/stores/editor.svelte';
   import type { CloneTool } from '../../lib/editor/clone';
+  import type { FilterKind } from '../../lib/editor/filter';
   import BrushOptions from './BrushOptions.svelte';
   import CloneOptions from './CloneOptions.svelte';
   import EyedropperOptions from './EyedropperOptions.svelte';
@@ -40,7 +41,15 @@
     { id: 'healingBrush', label: 'Healing brush', title: 'Healing brush (J). Alt+click sets the source point. Drag to copy pixels and match their tone.' },
   ];
 
-  const cloneBlocked = $derived(editor.cloneBlockReason);
+  let filterMenuOpen = $state(false);
+  const filterBlocked = $derived(editor.filterBlockReason);
+
+  function openFilter(kind: FilterKind): void {
+    filterMenuOpen = false;
+    editor.openFilterDialog(kind);
+  }
+
+  const cloneBlocked =$derived(editor.cloneBlockReason);
   const cloneTool = $derived(editor.cloneTool);
   const blocked = $derived(editor.paintBlockReason);
   const paintTool = $derived(editor.paintTool);
@@ -160,6 +169,25 @@
   {/if}
   {/if}
 
+  <div class="group menu" role="group" aria-label="Filter">
+    <button
+      type="button"
+      aria-haspopup="menu"
+      aria-expanded={filterMenuOpen}
+      title={filterBlocked ?? 'Filters: Gaussian blur and unsharp mask'}
+      disabled={filterBlocked !== null || editor.filterDialog !== null}
+      onclick={() => (filterMenuOpen = !filterMenuOpen)}
+    >
+      Filter ▾
+    </button>
+    {#if filterMenuOpen && filterBlocked === null}
+      <div class="popup" role="menu">
+        <button type="button" role="menuitem" onclick={() => openFilter('gaussianBlur')}>Gaussian Blur…</button>
+        <button type="button" role="menuitem" onclick={() => openFilter('unsharpMask')}>Unsharp Mask…</button>
+      </div>
+    {/if}
+  </div>
+
   <div class="group" role="group" aria-label="Select">
     <button type="button" title="Select all (Mod+A)" onclick={() => editor.selectAll()}>Select All</button>
     <button type="button" title="Deselect (Mod+D)" disabled={!editor.hasSelection} onclick={() => editor.deselect()}>Deselect</button>
@@ -220,5 +248,23 @@
   }
   button:disabled {
     opacity: 0.5;
+  }
+  .menu {
+    position: relative;
+  }
+  .popup {
+    position: absolute;
+    left: 0;
+    top: 100%;
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+    padding: var(--space-1);
+    background: var(--color-bg-panel);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
   }
 </style>
