@@ -55,6 +55,7 @@ export const EDITOR_ACTION = {
   brushTool: 'editor.brushTool',
   eraserTool: 'editor.eraserTool',
   eyedropperTool: 'editor.eyedropperTool',
+  cropTool: 'editor.cropTool',
   cloneStampTool: 'editor.cloneStampTool',
   healingBrushTool: 'editor.healingBrushTool',
   magicWandTool: 'editor.magicWandTool',
@@ -137,6 +138,8 @@ export function editorActions(commands: EditorCommands): ShortcutAction[] {
     { id: EDITOR_ACTION.brushTool, label: 'Editor: brush tool', scope: 'editor', defaultBinding: 'B', run: () => commands.selectPaintTool('brush') },
     { id: EDITOR_ACTION.eraserTool, label: 'Editor: eraser tool', scope: 'editor', defaultBinding: 'E', run: () => commands.selectPaintTool('eraser') },
     { id: EDITOR_ACTION.eyedropperTool, label: 'Editor: eyedropper tool', scope: 'editor', defaultBinding: 'I', run: () => commands.setTool('eyedropper') },
+    // Enter commits and Escape resets or leaves in the crop mode (EditorView).
+    { id: EDITOR_ACTION.cropTool, label: 'Editor: crop tool', scope: 'editor', defaultBinding: 'C', run: () => commands.setTool('crop') },
     { id: EDITOR_ACTION.cloneStampTool, label: 'Editor: clone stamp tool', scope: 'editor', defaultBinding: 'S', run: () => commands.selectCloneTool('cloneStamp') },
     { id: EDITOR_ACTION.healingBrushTool, label: 'Editor: healing brush tool', scope: 'editor', defaultBinding: 'J', run: () => commands.selectCloneTool('healingBrush') },
     // In the editor scope, `G` takes precedence over the global Library grid key.

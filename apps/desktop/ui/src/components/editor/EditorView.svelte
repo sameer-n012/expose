@@ -94,6 +94,18 @@
     type HandleId,
     type TransformState,
   } from '../../lib/editor/transform';
+  import {
+    cropCorners,
+    cropCursor,
+    cropHandlePoint,
+    cropHitTest,
+    isFullBox,
+    resizeByHandle as resizeCropByHandle,
+    rotateByPointer as rotateCropByPointer,
+    thirdsLines,
+    translateBox as translateCropBox,
+    type CropBox,
+  } from '../../lib/editor/crop';
   import { beginRotateDrag, cancelRotateDrag, dragRotation, rotationLabel, type RotateDrag } from '../../lib/editor/rotate';
   import {
     canvasToScreen,
@@ -520,6 +532,143 @@
     };
   });
 
+  // ---- Canvas crop (ADR 0032) ----
+
+  /** A drag of the crop box. `grab` is the canvas point at the pointer-down. */
+  type CropDrag =
+    | { readonly kind: 'move' | 'rotate'; readonly start: CropBox; readonly grab: Point; readonly pointerId: number }
+    | { readonly kind: 'resize'; readonly handle: HandleId; readonly start: CropBox; readonly grab: Point; readonly pointerId: number };
+  let cropDrag = $state.raw<CropDrag | null>(null);
+
+  /** The crop ended (commit, cancel, tab, tool): forget the drag. */
+  $effect(() => {
+    if (editor.crop === null) {
+      untrack(() => (cropDrag = null));
+    }
+  });
+
+  /** Pointer-down while the crop tool runs. Returns true if the crop took the event. */
+  function cropDown(event: PointerEvent & { currentTarget: HTMLDivElement }): boolean {
+    const session = editor.crop;
+    const view = editor.view;
+    if (session === null || view === null || event.button !== 0 || spaceDown) {
+      return false;
+    }
+    event.preventDefault();
+    if (editor.cropBusy || cropDrag !== null) {
+      return true;
+    }
+    const grab = screenToCanvas(view, local(event, event.currentTarget));
+    const hit = cropHitTest(session.box, grab, view.zoom);
+    const base = { start: session.box, grab, pointerId: event.pointerId };
+    cropDrag = hit.kind === 'handle' ? { kind: 'resize', handle: hit.handle, ...base } : { kind: hit.kind, ...base };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    return true;
+  }
+
+  function cropMove(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
+    const drag = cropDrag;
+    const view = editor.view;
+    if (drag === null || view === null || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    const p = screenToCanvas(view, local(event, event.currentTarget));
+    switch (drag.kind) {
+      case 'move':
+        editor.updateCropBox(translateCropBox(drag.start, p.x - drag.grab.x, p.y - drag.grab.y));
+        break;
+      case 'resize':
+        editor.updateCropBox(resizeCropByHandle(drag.start, drag.handle, p, editor.cropRatio, event.altKey));
+        break;
+      case 'rotate':
+        editor.updateCropBox(rotateCropByPointer(drag.start, drag.grab, p, event.shiftKey));
+        break;
+    }
+  }
+
+  function cropUp(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
+    const drag = cropDrag;
+    if (drag === null || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    // A cancelled pointer goes back to the box at the start of the drag.
+    if (event.type === 'pointercancel') {
+      editor.updateCropBox(drag.start);
+    }
+    cropDrag = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  }
+
+  /** Keys of the crop mode: Enter commits, Escape resets the box or leaves, arrows move. Returns true if the key was used. */
+  function cropKey(event: KeyboardEvent): boolean {
+    const session = editor.crop;
+    const info = editor.info;
+    if (session === null || info === null || event.type !== 'keydown' || isEditableTarget(event.target) || event.metaKey || event.ctrlKey) {
+      return false;
+    }
+    if (event.key === 'Enter') {
+      void editor.commitCrop();
+    } else if (event.key === 'Escape') {
+      if (isFullBox(session.box, info)) {
+        editor.cancelCrop();
+      } else {
+        editor.resetCrop();
+      }
+    } else {
+      const step = nudgeStep(event.shiftKey);
+      const arrows: Record<string, [number, number]> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+      const move = arrows[event.key];
+      if (move === undefined) {
+        return false;
+      }
+      editor.updateCropBox(translateCropBox(session.box, move[0], move[1]));
+    }
+    event.preventDefault();
+    return true;
+  }
+
+  /** The cursor of the crop zone under the pointer, or null. */
+  const cropCursorStyle = $derived.by(() => {
+    const session = editor.crop;
+    const view = editor.view;
+    if (session === null || view === null) {
+      return null;
+    }
+    if (cropDrag !== null) {
+      const drag = cropDrag;
+      return cropCursor(session.box, drag.kind === 'resize' ? { kind: 'handle', handle: drag.handle } : { kind: drag.kind }, rotation);
+    }
+    if (cursor === null || spaceDown || panning) {
+      return null;
+    }
+    return cropCursor(session.box, cropHitTest(session.box, screenToCanvas(view, cursor), view.zoom), rotation);
+  });
+
+  /** The box, the handles, the thirds, and the dimmed outside in content-space pixels. Null without a crop. */
+  const cropShape = $derived.by(() => {
+    const session = editor.crop;
+    const view = editor.view;
+    if (session === null || view === null) {
+      return null;
+    }
+    const corners = cropCorners(session.box).map((c) => canvasToScreen(view, c));
+    const outline = boxOutline(corners);
+    // Far corners of the dim layer: the rotator can turn the layer, so the rectangle is large.
+    const far = 100000;
+    return {
+      outline,
+      dim: `M ${-far} ${-far} H ${far} V ${far} H ${-far} Z ${outline}`,
+      thirds: thirdsLines(session.box)
+        .map(([a, b]) => {
+          const from = canvasToScreen(view, a);
+          const to = canvasToScreen(view, b);
+          return `M ${from.x} ${from.y} L ${to.x} ${to.y}`;
+        })
+        .join(' '),
+      handles: HANDLES.map((h) => ({ id: h, ...canvasToScreen(view, cropHandlePoint(session.box, h)) })),
+    };
+  });
+
   // A tool change or another document (also a tab switch) ends a gesture that runs.
   $effect(() => {
     void editor.tool;
@@ -786,7 +935,7 @@
       return;
     }
     // While the free transform runs, it takes all left-button events (no painting, no other tool).
-    if (transformDown(event)) {
+    if (transformDown(event) || cropDown(event)) {
       return;
     }
     if (event.button === 1 || (event.button === 0 && (spaceDown || (editor.tool === 'hand' && editor.info !== null)))) {
@@ -863,6 +1012,10 @@
       lassoClick(event, p, view);
       return;
     }
+    // The crop tool works in `cropDown`; without a session it does nothing.
+    if (tool === 'crop') {
+      return;
+    }
     marquee = { tool, mode: modeFromModifiers(event), start: p, current: p };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   }
@@ -871,6 +1024,8 @@
     cursor = local(event, event.currentTarget);
     if (transformDrag !== null) {
       transformMove(event);
+    } else if (cropDrag !== null) {
+      cropMove(event);
     } else if (rotating !== null) {
       if (event.pointerId === rotating.pointerId) {
         editor.setRotation(dragRotation(rotating.drag, screenPoint(event, event.currentTarget), editor.viewport, event.shiftKey));
@@ -903,6 +1058,8 @@
   function onpointerup(event: PointerEvent & { currentTarget: HTMLDivElement }): void {
     if (transformDrag !== null) {
       transformUp(event);
+    } else if (cropDrag !== null) {
+      cropUp(event);
     } else if (rotating !== null) {
       if (event.pointerId === rotating.pointerId) {
         endRotate(event.type === 'pointercancel');
@@ -939,7 +1096,7 @@
   }
 
   function onwindowkey(event: KeyboardEvent): void {
-    if (transformKey(event)) {
+    if (transformKey(event) || cropKey(event)) {
       return;
     }
     if (event.type === 'keydown' && event.key === 'Escape' && rotating !== null) {
@@ -1043,7 +1200,7 @@
       class:grabbing={panning || rotating !== null}
       class:crosshair={(isSelectionTool(editor.tool) || editor.tool === 'eyedropper' || editor.tool === 'magicWand' || editor.tool === 'paintBucket' || editor.tool === 'gradient') && !spaceDown && !panning}
       class:no-cursor={cursorShape !== null}
-      style:cursor={transformCursor}
+      style:cursor={transformCursor ?? cropCursorStyle}
       onpointerleave={() => (cursor = null)}
       hidden={editor.status !== 'ready'}
       bind:clientWidth={width}
@@ -1108,6 +1265,18 @@
               class="dashes solid"
               d="M {transformShape.reference.x - 8} {transformShape.reference.y} H {transformShape.reference.x + 8} M {transformShape.reference.x} {transformShape.reference.y - 8} V {transformShape.reference.y + 8}"
             />
+          </svg>
+        {/if}
+        {#if cropShape !== null}
+          <svg class="preview" aria-hidden="true" data-testid="crop-overlay">
+            <path class="dim" d={cropShape.dim} fill-rule="evenodd" />
+            <path class="dashes solid" d={cropShape.thirds} opacity="0.6" />
+            <path class="under" d={cropShape.outline} />
+            <path class="dashes solid" d={cropShape.outline} />
+            {#each cropShape.handles as h (h.id)}
+              <rect class="under" x={h.x - 4} y={h.y - 4} width="8" height="8" />
+              <rect class="handle" x={h.x - 3} y={h.y - 3} width="6" height="6" data-handle={h.id} />
+            {/each}
           </svg>
         {/if}
         {#if sourceCross !== null}
@@ -1246,6 +1415,11 @@
   }
   .preview .under {
     stroke: #fff;
+  }
+  .preview path.dim {
+    fill: rgba(0, 0, 0, 0.5);
+    fill-rule: evenodd;
+    stroke: none;
   }
   .preview rect.under {
     fill: #fff;

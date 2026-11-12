@@ -11,6 +11,7 @@ import type { DocumentInfo, EditDto } from '../editor/api';
 import { EMPTY_CLONE_STATE, type CloneState } from '../editor/clone';
 import { allLayerIds, findLayer } from '../editor/layers';
 import type { MaskThumbnail } from '../editor/maskThumbnail';
+import type { CropAspect, CropBox } from '../editor/crop';
 import type { Interpolation, TransformState } from '../editor/transform';
 import { FIT_MARGIN, clampView, fitView, hasArea, type Size, type View } from '../editor/view';
 
@@ -18,6 +19,16 @@ import { FIT_MARGIN, clampView, fitView, hasArea, type Size, type View } from '.
 export interface TransformSession {
   readonly layerId: number;
   readonly state: TransformState;
+  readonly interpolation: Interpolation;
+}
+
+/** A canvas crop in progress (ADR 0032). */
+export interface CropSession {
+  readonly box: CropBox;
+  readonly aspect: CropAspect;
+  /** True after the swap button: the ratio of the aspect is turned around. */
+  readonly portrait: boolean;
+  readonly deleteCropped: boolean;
   readonly interpolation: Interpolation;
 }
 
@@ -63,6 +74,10 @@ export class EditorTab {
   transform = $state.raw<TransformSession | null>(null);
   /** True while the commit of the transform runs. The transform ignores input then. */
   transformBusy = $state(false);
+  /** The canvas crop that runs (tool `crop`), or null. A tab switch, a tool change, or a layer change ends it. */
+  crop = $state.raw<CropSession | null>(null);
+  /** True while the commit of the crop runs. The crop ignores input then. */
+  cropBusy = $state(false);
   /** The number of edits that wait or run. */
   pending = $state(0);
   /** True while a save runs. */

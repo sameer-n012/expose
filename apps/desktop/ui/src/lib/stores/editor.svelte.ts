@@ -73,7 +73,8 @@ import { untitledName } from '../editor/newDocument';
 import { decodeMaskThumbnail, type MaskThumbnail } from '../editor/maskThumbnail';
 import { clampZoom, normalizeRotation, panBy, rotateVector, steppedZoom, zoomAbout, type Point, type Size, type View } from '../editor/view';
 import { identityState, isIdentityState, stateMatrix, type Interpolation, type TransformState } from '../editor/transform';
-import { EditorTab, type TransformSession } from './editorTab.svelte';
+import { aspectRatio, cropEdit, fitAspect, fullBox, isFullBox, swapBox, withFields as withCropFields, type CropAspect, type CropBox, type CropFields } from '../editor/crop';
+import { EditorTab, type CropSession, type TransformSession } from './editorTab.svelte';
 import type { LibraryStore } from './library.svelte';
 import type { ModuleStore } from './modules.svelte';
 import { describeError, type ToastStore } from './toasts.svelte';
@@ -237,6 +238,13 @@ export class EditorStore {
     // A tab switch ends a free transform without an edit (ADR 0029).
     if (old !== null && !old.transformBusy) {
       old.transform = null;
+    }
+    // A tab switch ends a canvas crop without an edit (ADR 0032).
+    if (old !== null && !old.cropBusy) {
+      old.crop = null;
+    }
+    if (this.tool === 'crop') {
+      this.tool = 'hand';
     }
     this.#activeTab = tab;
     tab.fitTo(this.viewport);
@@ -539,12 +547,18 @@ export class EditorStore {
   /** Sets the tool of the canvas. */
   setTool(tool: EditorTool): void {
     // The tools are blocked while a filter dialog is open.
-    if (this.filterDialog !== null) {
+    if (this.filterDialog !== null || this.cropBusy) {
       return;
     }
     // A tool change ends a free transform without an edit (ADR 0029).
     this.cancelTransform();
+    if (tool !== 'crop') {
+      this.cancelCrop();
+    }
     this.tool = tool;
+    if (tool === 'crop') {
+      this.#startCrop();
+    }
     if (isLassoTool(tool)) {
       this.lastLasso = tool;
     }
@@ -1386,6 +1400,7 @@ export class EditorStore {
       return;
     }
     this.cancelTransform();
+    this.cancelCrop();
     // A paint tool would start a stroke, and a stroke ends the filter session.
     this.tool = 'hand';
     const client = new FilterClient({
@@ -1435,6 +1450,7 @@ export class EditorStore {
     // Another layer ends a free transform without an edit (ADR 0029).
     if (id !== tab.selectedId) {
       this.cancelTransform();
+      this.cancelCrop();
     }
     // A click on a layer row chooses the pixels as the paint target.
     tab.paintMaskId = null;
@@ -1540,6 +1556,9 @@ export class EditorStore {
     if (tab === null || info === null || tab.status !== 'ready' || tab.transform !== null || this.filterDialog !== null) {
       return;
     }
+    if (tab.cropBusy) {
+      return;
+    }
     const layer = this.selected;
     if (layer === null || layer.kind !== 'pixel') {
       this.#toasts.info('Select a pixel layer to transform.');
@@ -1560,6 +1579,8 @@ export class EditorStore {
       this.#toasts.info('The layer is empty.');
       return;
     }
+    // The transform and the crop do not run together.
+    this.cancelCrop();
     tab.transform = { layerId: layer.id, state: identityState(bounds), interpolation: 'bicubic' };
   }
 
@@ -1620,8 +1641,162 @@ export class EditorStore {
     return done;
   }
 
-  /** True if the tab has a transform: the history command then ends it and does nothing else. */
+  // ---- Canvas crop (ADR 0032) ----
+
+  /** The canvas crop of the active tab, or null. */
+  get crop(): CropSession | null {
+    return this.#activeTab?.crop ?? null;
+  }
+
+  /** True while the crop sends its commit. */
+  get cropBusy(): boolean {
+    return this.#activeTab?.cropBusy ?? false;
+  }
+
+  /** The locked width/height ratio of the crop, or null when it is free. */
+  get cropRatio(): number | null {
+    const tab = this.#activeTab;
+    const session = tab?.crop ?? null;
+    if (tab?.info == null || session === null) {
+      return null;
+    }
+    return aspectRatio(session.aspect, session.portrait, tab.info);
+  }
+
+  /** The crop box of a new session: the whole canvas, with the options of the old session. */
+  #freshCrop(tab: EditorTab): CropSession | null {
+    const info = tab.info;
+    if (info === null) {
+      return null;
+    }
+    const old = tab.crop;
+    return {
+      box: fullBox(info),
+      aspect: old?.aspect ?? 'free',
+      portrait: false,
+      deleteCropped: old?.deleteCropped ?? true,
+      interpolation: old?.interpolation ?? 'bicubic',
+    };
+  }
+
+  #startCrop(): void {
+    const tab = this.#activeTab;
+    if (tab === null || tab.status !== 'ready') {
+      this.tool = 'hand';
+      return;
+    }
+    tab.crop = this.#freshCrop(tab);
+  }
+
+  #updateCrop(patch: Partial<CropSession>): void {
+    const tab = this.#activeTab;
+    if (tab !== null && tab.crop !== null && !tab.cropBusy) {
+      tab.crop = { ...tab.crop, ...patch };
+    }
+  }
+
+  /** Replaces the box (a drag, a key). Ignored while the commit runs. */
+  updateCropBox(box: CropBox): void {
+    this.#updateCrop({ box });
+  }
+
+  /** Sets a field (W, H, angle). Ignored while the commit runs. */
+  setCropField(fields: Partial<CropFields>): void {
+    const session = this.crop;
+    if (session !== null) {
+      this.#updateCrop({ box: withCropFields(session.box, fields, this.cropRatio) });
+    }
+  }
+
+  /** Locks an aspect and fits the box to it. */
+  setCropAspect(aspect: CropAspect): void {
+    const session = this.crop;
+    const info = this.#activeTab?.info;
+    if (session === null || info == null) {
+      return;
+    }
+    this.#updateCrop({ aspect, portrait: false, box: fitAspect(session.box, aspectRatio(aspect, false, info)) });
+  }
+
+  /** Swaps the orientation: the box sides and the ratio turn around. */
+  swapCrop(): void {
+    const session = this.crop;
+    if (session !== null) {
+      this.#updateCrop({ box: swapBox(session.box), portrait: !session.portrait });
+    }
+  }
+
+  setCropDeleteCropped(deleteCropped: boolean): void {
+    this.#updateCrop({ deleteCropped });
+  }
+
+  setCropInterpolation(interpolation: Interpolation): void {
+    this.#updateCrop({ interpolation });
+  }
+
+  /** Puts the box back to the whole canvas. The options stay. */
+  resetCrop(): void {
+    const tab = this.#activeTab;
+    if (tab !== null && tab.crop !== null && !tab.cropBusy) {
+      tab.crop = this.#freshCrop(tab);
+    }
+  }
+
+  /** Ends the crop of the active tab without an edit and leaves the tool. Ignored while the commit runs. */
+  cancelCrop(): void {
+    const tab = this.#activeTab;
+    if (tab !== null && !tab.cropBusy) {
+      tab.crop = null;
+      if (this.tool === 'crop') {
+        this.tool = 'hand';
+      }
+    }
+  }
+
+  /**
+   * Sends the crop as one edit. A box that is the whole canvas sends nothing
+   * and the mode stays. After the edit the view fits the new canvas and the
+   * box is the new whole canvas. If the edit fails, a toast shows and the
+   * box stays. Resolves to true if the edit ran.
+   */
+  async commitCrop(): Promise<boolean> {
+    const tab = this.#activeTab;
+    const session = tab?.crop ?? null;
+    const info = tab?.info ?? null;
+    if (tab === null || session === null || info === null || tab.cropBusy || isFullBox(session.box, info)) {
+      return false;
+    }
+    const edit: EditDto = cropEdit(session.box, session.deleteCropped, session.interpolation);
+    tab.cropBusy = true;
+    tab.endGesture();
+    let done = false;
+    this.#enqueue(tab, async (current) => {
+      const next = await this.#api.edit(current.documentId, edit, null);
+      if (tab.closed) {
+        return;
+      }
+      tab.apply(next);
+      // The crop mode stays only in the tab that is active with the crop tool.
+      tab.crop = this.#activeTab === tab && this.tool === 'crop' ? this.#freshCrop(tab) : null;
+      tab.fit = true;
+      tab.refit(this.viewport);
+      done = true;
+    });
+    await tab.chain;
+    tab.cropBusy = false;
+    return done;
+  }
+
+  /** True if the tab has a transform or a crop: the history command then ends or resets it and does nothing else. */
   #endsTransform(tab: EditorTab): boolean {
+    if (tab.cropBusy) {
+      return true;
+    }
+    if (tab.crop !== null) {
+      // Undo while the box is edited only puts the box back.
+      tab.crop = this.#freshCrop(tab);
+      return true;
+    }
     if (tab.transform === null && !tab.transformBusy) {
       return false;
     }

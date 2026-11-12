@@ -19,6 +19,7 @@
   import type { FilterKind } from '../../lib/editor/filter';
   import BrushOptions from './BrushOptions.svelte';
   import CloneOptions from './CloneOptions.svelte';
+  import CropOptions from './CropOptions.svelte';
   import EyedropperOptions from './EyedropperOptions.svelte';
   import GradientOptions from './GradientOptions.svelte';
   import MagicWandOptions from './MagicWandOptions.svelte';
@@ -64,6 +65,7 @@
     { id: 'magicWand', label: 'Magic wand', title: 'Magic wand (W). Click to select similar pixels. Shift adds, Alt subtracts, Shift+Alt intersects.' },
     { id: 'paintBucket', label: 'Paint bucket', title: 'Paint bucket (G). Click to fill similar pixels with the foreground color.' },
     { id: 'gradient', label: 'Gradient', title: 'Gradient (G). Drag from the start to the end. Shift snaps to 45° steps. Escape cancels.' },
+    { id: 'crop', label: 'Crop', title: 'Crop (C). Drag the handles to size the canvas box, drag outside to straighten. Enter applies. Escape resets, then leaves.' },
     { id: 'eyedropper', label: 'Eyedropper', title: 'Eyedropper (I). Click to pick the foreground color. Alt+click picks the background color.' },
   ];
 
@@ -126,6 +128,10 @@
 
   {#if cloneTool !== null}
     <CloneOptions {editor} tool={cloneTool} />
+  {/if}
+
+  {#if editor.tool === 'crop'}
+    <CropOptions {editor} />
   {/if}
 
   {#if editor.tool === 'eyedropper'}
